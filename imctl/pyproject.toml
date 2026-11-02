@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imctl"
+version = "0.1.0"
+description = "Control iPhone Mirroring on macOS from the CLI — CGEvent input, Vision OCR, pixel verification"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "imctl contributors" }]
+keywords = ["iphone", "mirroring", "macos", "automation", "cgevent", "vision-ocr"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+# pyobjc comes with macOS system Python; declare as optional to avoid
+# clobbering a user's pyobjc installation.
+dependencies = []
+
+[project.optional-dependencies]
+pyobjc = [
+    "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-Vision>=10.0",
+    "pyobjc-framework-AppKit>=10.0",
+]
+
+[project.scripts]
+imctl = "imctl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

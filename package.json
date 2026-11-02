@@ -1,6 +1,6 @@
 {
   "name": "noracu",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local, no-cloud MCP server for macOS and Playwright computer-use, plus experimental iPhone. Acts by element index.",
   "type": "module",
   "main": "src/server.mjs",
@@ -28,7 +28,9 @@
     "claude",
     "claude-desktop",
     "claude-code",
-    "cursor"
+    "cursor",
+    "iphone",
+    "iphone-mirroring"
   ],
   "license": "MIT",
   "dependencies": {
@@ -52,6 +54,10 @@
     "README.zh-CN.md",
     "LICENSE",
     "CHANGELOG.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "imctl/README.md",
+    "imctl/LICENSE",
+    "imctl/pyproject.toml",
+    "imctl/src/imctl/*.py"
   ]
 }

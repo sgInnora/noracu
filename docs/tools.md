@@ -1,7 +1,7 @@
 # Tool reference
 
 > Auto-generated from the running server (`node scripts/gen-tools.mjs`) — always in sync with the implementation.
-> noracu v0.1.0 · 35 tools
+> noracu v0.1.1 · 35 tools
 
 ## Mac layer (computer-use)
 
@@ -44,18 +44,18 @@
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `phone_status` | — | EXPERIMENTAL. Requires imctl (not yet public). Return the iPhone Mirroring session status as JSON. |
-| `phone_launch` | — | EXPERIMENTAL. Requires imctl (not yet public). Ensure iPhone Mirroring is running and brought to the front. |
-| `phone_screenshot` | — | EXPERIMENTAL. Requires imctl (not yet public). Screenshot the iPhone screen (the Mirroring window region). |
-| `phone_ocr` | — | EXPERIMENTAL. Requires imctl (not yet public). OCR the iPhone screen into text with coordinates. |
-| `phone_find` | text:string? | EXPERIMENTAL. Requires imctl (not yet public). Locate text on the iPhone screen. |
-| `phone_tap` | x:number?, y:number? | EXPERIMENTAL. Requires imctl (not yet public). Tap at {x, y} in normalized 0-1 coordinates. |
-| `phone_longpress` | x:number?, y:number?, duration:number? | EXPERIMENTAL. Requires imctl (not yet public). Long-press at {x, y} for an optional duration in seconds. |
-| `phone_swipe` | from:array?, to:array?, ms:number? | EXPERIMENTAL. Requires imctl (not yet public). Swipe from [x,y] to [x,y] over an optional duration in ms. |
-| `phone_home` | — | EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without imctl when the mirror is connected); falls back to an imctl swipe. |
-| `phone_app_switcher` | — | EXPERIMENTAL. Open the iPhone App Switcher via the iPhone Mirroring menu (works without imctl when the mirror is connected); falls back to an imctl gesture. |
-| `phone_scroll` | direction:string?, distance:number? | EXPERIMENTAL. Requires imctl (not yet public). Scroll up or down by a distance. |
-| `phone_type` | text:string? | EXPERIMENTAL. Requires imctl (not yet public). Type text via the clipboard (IME-safe). |
-| `phone_key` | key:string? | EXPERIMENTAL. Requires imctl (not yet public). Press a key: return, delete, up, down, left, or right. |
-| `phone_open` | app:string? | EXPERIMENTAL. Requires imctl (not yet public). Open an app via Spotlight search plus OCR-guided tap. |
+| `phone_status` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, paused). |
+| `phone_launch` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and resumed if the connection is paused. |
+| `phone_screenshot` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Screenshot the iPhone screen (the Mirroring window, captured by window id so it works even when covered). |
+| `phone_ocr` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. OCR the iPhone screen into text with coordinates. |
+| `phone_find` | text:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen. |
+| `phone_tap` | x:number?, y:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates. |
+| `phone_longpress` | x:number?, y:number?, duration:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Long-press at {x, y} for an optional duration in seconds. |
+| `phone_swipe` | from:array?, to:array?, ms:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe from [x,y] to [x,y] over an optional duration in ms. |
+| `phone_home` | — | EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl swipe. |
+| `phone_app_switcher` | — | EXPERIMENTAL. Open the iPhone App Switcher via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl gesture. |
+| `phone_scroll` | direction:string?, distance:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll up or down by a distance. |
+| `phone_type` | text:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe). |
+| `phone_key` | key:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right. |
+| `phone_open` | app:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app via Spotlight search plus OCR-guided tap. |
 

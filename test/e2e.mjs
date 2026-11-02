@@ -217,6 +217,9 @@ check("element_index：负数被校验层拒", badNeg?.isError && String(badNeg?
   } finally { s.proc.kill(); }
 }
 
+// 11a. 0.1.1：imctl 随包附带 —— 包内 imctl/src/imctl/cli.py 必须存在（CI 安全：只查文件系统）
+check("imctl bundled (imctl/src/imctl/cli.py)", existsSync(new URL("../imctl/src/imctl/cli.py", import.meta.url)));
+
 // 11. G10（F9 dogfooding）：iPhone 层失败必须是工具错误 —— imctl 缺失时 phone_status 报 isError（CI 安全：不碰真实硬件）
 {
   const s = await spawnServer({ NORACU_IMCTL_DIR: "/nonexistent" });

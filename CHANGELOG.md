@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.1.1] — 2026-11-02
+
+### Added
+- **iPhone driver bundled.** imctl (the Python driver behind the 14 `phone_*`
+  tools) now ships inside the npm package at `imctl/` (MIT, ~1,000 lines).
+  No companion checkout is needed; `NORACU_IMCTL_DIR` still overrides the
+  location for development. The layer stays EXPERIMENTAL.
+- `NORACU_PYTHON`: pick the python3 that runs imctl. Without it, noracu
+  probes `/opt/homebrew/bin/python3`, `/usr/local/bin/python3`, `python3`
+  and `/usr/bin/python3` for one that imports pyobjc (Quartz, Vision,
+  AppKit) — probed once, lazily, on the first `phone_*` call. When none
+  qualifies the tool returns one actionable line with the `pip install`
+  command.
+- `phone_status` now reports `window_id`, `onscreen`, `frontmost` and
+  `paused` (true when the Mirroring window shows "Connection Paused").
+- `phone_launch` resumes a paused session (clicks Resume) after bringing the
+  window to the front. imctl gains `screenshot [PATH]` and `resume`
+  commands.
+- e2e: 35 checks (new CI-safe guard that the bundled imctl is present).
+
+### Fixed
+- `phone_screenshot` / `phone_ocr` / `phone_find` captured whatever was on
+  screen at the window's rectangle, so a covered or background Mirroring
+  window produced screenshots and OCR of other apps. Capture is now by
+  CGWindow id (`screencapture -l`), which returns the window's own pixels
+  even when it is covered; region capture remains as a fallback.
+- imctl no longer writes `__pycache__` into the package directory
+  (`PYTHONDONTWRITEBYTECODE`).
+
+### Notes
+- Mac and browser layers are unchanged.
+- The iPhone layer needs macOS 15+, iPhone Mirroring connected, and a
+  python3 with pyobjc; Apple's `/usr/bin/python3` usually lacks pyobjc.
+
 ## [0.1.0] — 2026-11-02
 
 ### Added
@@ -36,8 +70,8 @@
 
 ### Notes
 - macOS 15+ required for Mac/iPhone layers; Browser layer is cross-platform.
-- imctl is a companion checkout (sibling directory or `NORACU_IMCTL_DIR`);
-  phone tools degrade gracefully when absent.
+- imctl was a companion checkout in 0.1.0 (sibling directory or `NORACU_IMCTL_DIR`);
+  phone tools degrade gracefully when absent. Bundled since 0.1.1.
 - Tool descriptions are English; every JSON-schema property is single-typed
   (no union/`oneOf`) for reliable LLM tool-calling across clients.
 - `mac_click` / `mac_drag` refuse an `element_index` when a different app is

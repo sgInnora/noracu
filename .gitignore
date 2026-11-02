@@ -16,3 +16,7 @@ docs/chatgpt-re-findings.md
 
 # Cowork deliverables (local only)
 OUTPUTS/
+
+# python bytecode (bundled imctl)
+__pycache__/
+*.pyc

@@ -27,8 +27,8 @@ import { createRequire } from "node:module";
 
 // ── 配置（开源友好：环境变量覆盖 + 同级目录解析）──
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-// imctl 默认按同级 checkout 解析（…/code/noracu → …/code/imctl），可用 NORACU_IMCTL_DIR 覆盖
-const IMCTL_DIR = process.env.NORACU_IMCTL_DIR || join(__dirname, "..", "..", "imctl");
+// imctl (the iPhone Mirroring driver, Python) ships inside the package at imctl/; NORACU_IMCTL_DIR overrides it (e.g. a dev checkout)
+const IMCTL_DIR = process.env.NORACU_IMCTL_DIR || join(__dirname, "..", "imctl");
 const CLICLICK = process.env.NORACU_CLICLICK || "/opt/homebrew/bin/cliclick";
 if (!existsSync(IMCTL_DIR)) {
   process.stderr.write(`[noracu] warning: imctl not found at ${IMCTL_DIR} — phone_* tools will fail. Set NORACU_IMCTL_DIR.\n`);
@@ -47,23 +47,50 @@ function sh(cmd, args, timeoutMs = 15000) {
   }
 }
 
+// The iPhone layer runs the bundled imctl (Python) and needs an interpreter that has pyobjc (Quartz, Vision, AppKit).
+// Resolution: NORACU_PYTHON if set, else the first candidate that imports Quartz. Probed once, lazily, on the first
+// phone_* call, so the Mac and browser layers pay nothing. Apple's /usr/bin/python3 usually lacks pyobjc; Homebrew's
+// python3 plus the three pyobjc-framework-* packages is the common working setup.
+const PYTHON_CANDIDATES = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "python3", "/usr/bin/python3"];
+const PYOBJC_INSTALL = "python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit";
+let pythonProbe = null; // { path, tried } once resolved; path === null when nothing qualified
+function pythonArgv(path) { return path === "python3" ? ["/usr/bin/env", ["python3"]] : [path, []]; }
+function resolvePython() {
+  if (pythonProbe) return pythonProbe;
+  const tried = [];
+  for (const cand of (process.env.NORACU_PYTHON ? [process.env.NORACU_PYTHON] : PYTHON_CANDIDATES)) {
+    const [cmd, pre] = pythonArgv(cand);
+    try {
+      execFileSync(cmd, [...pre, "-c", "import Quartz, Vision, AppKit"], { timeout: 20000, stdio: ["ignore", "ignore", "ignore"] });
+      pythonProbe = { path: cand, tried };
+      return pythonProbe;
+    } catch { tried.push(cand); }
+  }
+  pythonProbe = { path: null, tried };
+  return pythonProbe;
+}
+
 function imctl(...args) {
+  const py = resolvePython();
+  if (!py.path) {
+    return { ok: false, out: `imctl unavailable: no python3 with pyobjc found (tried ${py.tried.join(", ")}) — run \`${PYOBJC_INSTALL}\` for the python3 you want, or set NORACU_PYTHON=/path/to/python3 (see README)` };
+  }
+  const [cmd, pre] = pythonArgv(py.path);
   try {
-    const out = execFileSync("/usr/bin/env", ["python3", "-m", "imctl.cli", ...args], {
+    const out = execFileSync(cmd, [...pre, "-m", "imctl.cli", ...args], {
       timeout: 30000, encoding: "utf8", maxBuffer: 10 * 1024 * 1024,
-      cwd: IMCTL_DIR, env: { ...process.env, PYTHONPATH: join(IMCTL_DIR, "src") },
+      cwd: IMCTL_DIR, env: { ...process.env, PYTHONPATH: join(IMCTL_DIR, "src"), PYTHONDONTWRITEBYTECODE: "1" },
     });
     return { ok: true, out: out.trim() };
   } catch (e) {
     const raw = String(e.stderr || e.stdout || e.message);
-    // imctl 不可用 —— checkout 缺失，或 python3 没有 pyobjc（Quartz）。
-    // 把 Python traceback / spawn 错误收敛成一行可操作信息，phone_* 因此干净失败、测试可据此跳过（优雅降级）。
+    // Collapse Python tracebacks / spawn errors into one actionable line so phone_* fail cleanly and tests can skip (graceful degradation).
     if (/No module named|ModuleNotFoundError|ImportError|Traceback \(most recent/.test(raw)) {
       const mod = (raw.match(/No module named '([^']+)'/) || [])[1];
-      return { ok: false, out: `imctl unavailable: its python3 is missing ${mod ? `the ${mod} module (pyobjc)` : "pyobjc"} — install pyobjc for that python, or point NORACU_IMCTL_DIR at a checkout whose python has it (see README)` };
+      return { ok: false, out: `imctl unavailable: ${py.path} is missing ${mod ? `the ${mod} module` : "a module"} — run \`${PYOBJC_INSTALL}\` for that python, or set NORACU_PYTHON (see README)` };
     }
     if (/ENOENT|No such file or directory/.test(raw)) {
-      return { ok: false, out: `imctl unavailable: cannot run python3 for imctl at ${IMCTL_DIR} — install imctl or set NORACU_IMCTL_DIR (see README)` };
+      return { ok: false, out: `imctl unavailable: cannot run imctl at ${IMCTL_DIR} — the bundled imctl/ directory is missing or NORACU_IMCTL_DIR points to the wrong place (see README)` };
     }
     return { ok: false, out: raw.slice(0, 500) };
   }
@@ -700,21 +727,16 @@ function phoneOpen(args) {
   return imctl("open", args.app);
 }
 function phoneScreenshot() {
-  // Mirroring 窗口截图（imctl status 拿窗口 frame → screencapture -R）
-  const st = imctl("status");
-  if (!st.ok) return { error: "imctl status failed: " + st.out.slice(0, 150) };
+  // Captured by imctl by CGWindow id, so it is the Mirroring window's own pixels even when another window covers it.
+  const file = join(tmpdir(), `noracu-phone-${randomUUID().slice(0, 8)}.png`);
+  const r = imctl("screenshot", file);
+  if (!r.ok) return { error: r.out.slice(0, 300) };
   try {
-    const j = JSON.parse(st.out);
-    const w = j.window;
-    if (!w) return { error: "no mirroring window" };
-    const file = join(tmpdir(), `noracu-phone-${randomUUID().slice(0, 8)}.png`);
-    const r = sh("/usr/sbin/screencapture", ["-x", "-R", `${w.x},${w.y},${w.w},${w.h}`, file]);
-    if (!r.ok) return { error: r.out };
     const data = readFileSync(file).toString("base64");
     unlinkSync(file);
     return { image: data, mime: "image/png" };
   } catch (e) {
-    return { error: "parse status failed: " + String(e.message).slice(0, 150) };
+    return { error: "screenshot file missing: " + String(e.message).slice(0, 150) };
   }
 }
 
@@ -764,20 +786,20 @@ const TOOLS = [
   { name: "browser_evaluate", desc: "Evaluate JavaScript in the page and return the result.", args: { js: "string" }, fn: browserEvaluate },
   { name: "browser_close", desc: "Close the browser.", args: {}, fn: browserClose },
   // iPhone device-use（imctl）
-  { name: "phone_status", desc: "EXPERIMENTAL. Requires imctl (not yet public). Return the iPhone Mirroring session status as JSON.", args: {}, fn: phoneStatus },
-  { name: "phone_launch", desc: "EXPERIMENTAL. Requires imctl (not yet public). Ensure iPhone Mirroring is running and brought to the front.", args: {}, fn: phoneLaunch },
-  { name: "phone_screenshot", desc: "EXPERIMENTAL. Requires imctl (not yet public). Screenshot the iPhone screen (the Mirroring window region).", args: {}, fn: phoneScreenshot },
-  { name: "phone_ocr", desc: "EXPERIMENTAL. Requires imctl (not yet public). OCR the iPhone screen into text with coordinates.", args: {}, fn: phoneOcr },
-  { name: "phone_find", desc: "EXPERIMENTAL. Requires imctl (not yet public). Locate text on the iPhone screen.", args: { text: "string" }, fn: phoneFind },
-  { name: "phone_tap", desc: "EXPERIMENTAL. Requires imctl (not yet public). Tap at {x, y} in normalized 0-1 coordinates.", args: { x: "number", y: "number" }, fn: phoneTap },
-  { name: "phone_longpress", desc: "EXPERIMENTAL. Requires imctl (not yet public). Long-press at {x, y} for an optional duration in seconds.", args: { x: "number", y: "number", duration: "number?" }, fn: phoneLongpress },
-  { name: "phone_swipe", desc: "EXPERIMENTAL. Requires imctl (not yet public). Swipe from [x,y] to [x,y] over an optional duration in ms.", args: { from: "array", to: "array", ms: "number?" }, fn: phoneSwipe },
-  { name: "phone_home", desc: "EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without imctl when the mirror is connected); falls back to an imctl swipe.", args: {}, fn: phoneHome },
-  { name: "phone_app_switcher", desc: "EXPERIMENTAL. Open the iPhone App Switcher via the iPhone Mirroring menu (works without imctl when the mirror is connected); falls back to an imctl gesture.", args: {}, fn: phoneAppSwitcher },
-  { name: "phone_scroll", desc: "EXPERIMENTAL. Requires imctl (not yet public). Scroll up or down by a distance.", args: { direction: "string?", distance: "number?" }, fn: phoneScroll },
-  { name: "phone_type", desc: "EXPERIMENTAL. Requires imctl (not yet public). Type text via the clipboard (IME-safe).", args: { text: "string" }, fn: phoneType },
-  { name: "phone_key", desc: "EXPERIMENTAL. Requires imctl (not yet public). Press a key: return, delete, up, down, left, or right.", args: { key: "string" }, fn: phoneKey },
-  { name: "phone_open", desc: "EXPERIMENTAL. Requires imctl (not yet public). Open an app via Spotlight search plus OCR-guided tap.", args: { app: "string" }, fn: phoneOpen },
+  { name: "phone_status", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, paused).", args: {}, fn: phoneStatus },
+  { name: "phone_launch", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and resumed if the connection is paused.", args: {}, fn: phoneLaunch },
+  { name: "phone_screenshot", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Screenshot the iPhone screen (the Mirroring window, captured by window id so it works even when covered).", args: {}, fn: phoneScreenshot },
+  { name: "phone_ocr", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. OCR the iPhone screen into text with coordinates.", args: {}, fn: phoneOcr },
+  { name: "phone_find", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen.", args: { text: "string" }, fn: phoneFind },
+  { name: "phone_tap", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates.", args: { x: "number", y: "number" }, fn: phoneTap },
+  { name: "phone_longpress", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Long-press at {x, y} for an optional duration in seconds.", args: { x: "number", y: "number", duration: "number?" }, fn: phoneLongpress },
+  { name: "phone_swipe", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe from [x,y] to [x,y] over an optional duration in ms.", args: { from: "array", to: "array", ms: "number?" }, fn: phoneSwipe },
+  { name: "phone_home", desc: "EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl swipe.", args: {}, fn: phoneHome },
+  { name: "phone_app_switcher", desc: "EXPERIMENTAL. Open the iPhone App Switcher via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl gesture.", args: {}, fn: phoneAppSwitcher },
+  { name: "phone_scroll", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll up or down by a distance.", args: { direction: "string?", distance: "number?" }, fn: phoneScroll },
+  { name: "phone_type", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe).", args: { text: "string" }, fn: phoneType },
+  { name: "phone_key", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right.", args: { key: "string" }, fn: phoneKey },
+  { name: "phone_open", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app via Spotlight search plus OCR-guided tap.", args: { app: "string" }, fn: phoneOpen },
 ];
 
 // ── 统一参数校验（全工具入口门禁，返回 null=通过 / string=错误）──
