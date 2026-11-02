@@ -2,7 +2,7 @@
   "name": "noracu",
   "version": "0.1.2",
   "mcpName": "io.github.sgInnora/noracu",
-  "description": "Local, no-cloud MCP server for macOS and Playwright computer-use, plus experimental iPhone. Acts by element index.",
+  "description": "Local MCP server: macOS apps and a browser by element index, plus iPhone Mirroring (experimental).",
   "type": "module",
   "main": "src/server.mjs",
   "bin": {

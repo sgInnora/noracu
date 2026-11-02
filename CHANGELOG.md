@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.1.2] — 2026-11-02
+
+### Fixed
+- Docs: the iPhone must be **locked** and near the Mac — unlocking it ends
+  iPhone Mirroring (Apple). The 0.1.1 README, usage guide, architecture notes
+  and release notes said the opposite.
+- `phone_type` sends a real Command-V chord. Before, iPhone Mirroring received
+  a plain "v" and the text was never pasted.
+- `phone_open` opens Spotlight through iPhone Mirroring's own shortcut instead
+  of a swipe that could put the Home Screen into edit (jiggle) mode; it taps
+  only an exact app-name match above the search field and returns to the Home
+  Screen when nothing matches.
+- Phone input (`phone_tap`, `phone_longpress`, `phone_swipe`, `phone_scroll`,
+  `phone_type`, `phone_key`, `phone_open`) is refused with `mirror_not_live`
+  while iPhone Mirroring shows an overlay ("Connection Paused", "iPhone in
+  Use", …) instead of landing on the overlay; `phone_ocr` / `phone_find` start
+  with a warning in that state.
+
+### Added
+- `phone_status` reports `live` and `overlay`, read from the window's
+  structure rather than its language; `paused` now means "an overlay with a
+  Resume button is shown", and `resume` clicks that button only when it is the
+  single control.
+- Apple's iPhone Mirroring requirements (Apple silicon or T2, macOS 15+,
+  iOS 18+ with a passcode, same Apple Account with two-factor authentication,
+  not available in the EU), the "Authenticate automatically" trade-off, and
+  privacy guidance in the README, usage guide, architecture notes and SECURITY.
+- MCP Registry metadata: `mcpName` `io.github.sgInnora/noracu` in package.json
+  and `server.json`.
+- `demo/record-phone.py` (repo only, not in the npm package) reproduces the
+  iPhone demo.
+
 ## [0.1.1] — 2026-11-02
 
 ### Added

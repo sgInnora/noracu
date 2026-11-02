@@ -175,24 +175,31 @@ model — don't let it override the task.
 | `ENOENT` cliclick | `brew install cliclick` or set `NORACU_CLICLICK` |
 | `… blocked by NORACU_READ_ONLY=1` | you're in observation-only mode — unset it to act |
 | `browser_evaluate disabled by NORACU_DISABLE_EVAL=1` | eval kill-switch is on |
+| `mirror_not_live: …` | iPhone Mirroring shows an overlay (paused, "iPhone in Use") — lock the iPhone, keep it near the Mac, call `phone_launch` |
 | `imctl unavailable: no python3 with pyobjc found …` | install pyobjc for a python3 (`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`) or set `NORACU_PYTHON` |
 
 ## 9. iPhone layer
 
-Experimental. The driver (imctl, Python) ships inside the package; the tools
-need iPhone Mirroring connected and a python3 with pyobjc (`NORACU_PYTHON`, or
-the automatic probe described in the README). A typical session:
+Experimental. The driver (imctl, Python) ships inside the package. The tools
+need Apple's iPhone Mirroring with the iPhone **locked and near the Mac**
+(unlocking it ends the session; not available in the EU) and a python3 with
+pyobjc (`NORACU_PYTHON`, or the automatic probe described in the README).
+The phone exposes no accessibility tree, so this layer is not `element_index`:
+it observes with OCR on the Mac and acts at normalized 0–1 coordinates.
 
 ```
 phone_status
-→ {"running": true, "window": {...}, "window_id": 275104, "onscreen": true,
-   "frontmost": false, "paused": true}
+→ {"running": true, "window": {...}, "window_id": 278508, "onscreen": true,
+   "frontmost": false, "live": false, "overlay": "Connection Paused", "paused": true}
+
+phone_tap {"x": 0.5, "y": 0.5}       # refused while the mirror is not live
+→ ERROR: mirror_not_live: Connection Paused — call phone_launch (or imctl resume) first
 
 phone_launch          # brings the mirror to the front and clicks Resume
 → iPhone Mirroring ready
 
 phone_status
-→ {... "paused": false ...}
+→ {... "live": true, "overlay": null, "paused": false ...}
 
 phone_ocr             # OCR of the Mirroring window (captured by window id)
 → (0.50,0.06) 'Settings' [1.00]
@@ -206,8 +213,22 @@ phone_tap {"x": 0.50, "y": 0.06}
 → tapped (0.5, 0.06)
 ```
 
-Coordinates are normalized 0–1 over the mirror window. `phone_screenshot`
-returns a PNG of the window's own pixels even when another window covers it.
-If the phone is locked, unlock it on the phone; that step cannot be driven
-from the Mac. `phone_home` / `phone_app_switcher` go through the iPhone
-Mirroring menu and work without python when the mirror is connected.
+`live` / `overlay` / `paused` come from the window's structure, not its
+language: a live mirror is a single empty hosting view; "Connection Paused",
+"iPhone in Use" and similar states add text and a button. While the mirror is
+not live, `phone_tap`, `phone_longpress`, `phone_swipe`, `phone_scroll`,
+`phone_type`, `phone_key` and `phone_open` refuse with `mirror_not_live`, and
+`phone_ocr` / `phone_find` start with a `warning: mirror not live …` line.
+
+`phone_type` pastes through the clipboard with a real Command-V chord (the
+previous text clipboard is restored). `phone_open {"app": "Calculator"}` opens
+Spotlight through iPhone Mirroring's own shortcut, pastes the name, and taps a
+result whose OCR text matches the name exactly; with no match it returns to the
+Home Screen and reports `app not found`.
+
+Privacy: everything the phone shows — notifications, messages, one-time
+codes — becomes tool output that your MCP client sends to its model. Use a
+Focus, open a neutral app first, and start with `NORACU_READ_ONLY=1`
+(phone observation allowed, phone input refused). `phone_home` /
+`phone_app_switcher` go through the iPhone Mirroring menu and work without
+python when the mirror is connected.

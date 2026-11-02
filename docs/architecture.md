@@ -43,7 +43,8 @@ The bundled imctl driver (`imctl/`, Python) runs as a subprocess (`<python3> -m 
 
 - Observe: `phone_ocr` (coordinates + text), `phone_screenshot` (captures the Mirroring window by CGWindow id, so a covered window still yields its own pixels; region capture is the fallback), `phone_find` (locates text)
 - Act: `phone_tap/longpress/swipe` (normalized 0-1 coordinates), `phone_home` / `phone_app_switcher` (iPhone Mirroring menu first, imctl gesture fallback), `phone_scroll`, `phone_type` (clipboard-based, IME-safe), `phone_key`
-- Session: `phone_status` (running, window, window_id, onscreen, frontmost, paused), `phone_launch` (ensure running + frontmost, clicks Resume when the session shows "Connection Paused"), `phone_open` (Spotlight + OCR + tap)
+- Session: `phone_status` (running, window, window_id, onscreen, frontmost, live, overlay, paused — read from the window's AX structure: a live mirror is one empty AXHostingView group; an overlay such as "Connection Paused" or "iPhone in Use" adds static text and a button), `phone_launch` (ensure running + frontmost, clicks the single Resume button of a paused overlay), `phone_open` (Spotlight via the iPhone Mirroring shortcut, paste the name, tap an exact OCR match above the search field; otherwise back to the Home Screen)
+- Safety: while the mirror is not live, imctl refuses tap/longpress/swipe/scroll/page/type/key/open with exit code 3 and a `mirror_not_live:` line, which the server returns as a tool error; ocr/find prefix a warning. The phone layer has no `element_index`: OCR coordinates are normalized to the window, and nothing re-verifies the target before a tap.
 
 ## Configuration
 
@@ -62,7 +63,7 @@ The bundled imctl driver (`imctl/`, Python) runs as a subprocess (`<python3> -m 
 - Mac-layer actions spawn subprocesses (cliclick/osascript); per-action latency is tens of milliseconds (subprocess spawn; not benchmarked in this release) — a resident FFI process could cut it (see roadmap)
 - No axState diffing (every observation is a full snapshot)
 - Single browser session (no tab-level management)
-- The iPhone layer requires iPhone Mirroring to be online and the phone unlocked; OCR accuracy depends on screen content; `paused` detection reads the English "Connection Paused" label
+- The iPhone layer requires iPhone Mirroring to be online, with the iPhone locked and near the Mac (unlocking ends mirroring; Apple: unavailable in the EU); OCR accuracy depends on screen content; `paused` detection reads the English "Connection Paused" label
 - macOS-only (Mac/iPhone layers); the Browser layer is cross-platform
 
 ## Roadmap (v2 candidates)

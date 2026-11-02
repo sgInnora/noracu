@@ -1,6 +1,6 @@
 # noracu
 
-**Local, no-cloud MCP server for computer-use on macOS apps, a Playwright browser, and (experimentally) a mirrored iPhone — the agent reads an accessibility/ARIA tree and acts by `element_index`, not pixels. No API key, no telemetry.**
+**A local MCP server that lets Claude, Cursor, or any MCP client operate macOS apps and a Playwright browser by `element_index` — and, experimentally, a real iPhone through Apple's iPhone Mirroring (OCR on the Mac, normalized taps). No API key; no telemetry from the server.**
 
 [![CI](https://github.com/sgInnora/noracu/actions/workflows/ci.yml/badge.svg)](https://github.com/sgInnora/noracu/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/noracu.svg)](https://www.npmjs.com/package/noracu)
@@ -9,7 +9,7 @@
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md)。
 
-One stdio MCP server. The agent snapshots a tree, gets an indexed element list, then clicks or types by `element_index` instead of raw pixels — the same observe/act split on the Mac and in the browser.
+One stdio MCP server. The agent snapshots a tree, gets an indexed element list, then clicks or types by `element_index` instead of raw pixels — the same observe/act split on the Mac and in the browser. The experimental iPhone layer runs the same observe → act loop over OCR text and normalized coordinates.
 
 ![browser element_index demo](https://raw.githubusercontent.com/sgInnora/noracu/v0.1.0/docs/demo-browser.gif)
 
@@ -25,20 +25,20 @@ One MCP server, three control surfaces:
 | **Browser** | 12 (`browser_*`) | Playwright (persistent profile) | stable |
 | **iPhone** | 14 (`phone_*`) | iPhone Mirroring via the bundled imctl driver (Python + pyobjc) | experimental |
 
-The iPhone layer is experimental and ships with its driver, imctl (bundled in `imctl/`). It needs an active iPhone Mirroring session on this Mac and a python3 with pyobjc; when no such python is found, `phone_*` tools return a one-line `imctl unavailable` error with the install command, and the Mac and browser layers are unaffected (`phone_home` / `phone_app_switcher` work through the iPhone Mirroring menu even then). The observe/act vocabulary follows the action/observation split popularized by ChatGPT's computer-use, re-implemented on open local tooling.
+The iPhone layer is experimental and ships with its driver (imctl, in `imctl/`). It needs Apple's iPhone Mirroring with the iPhone **locked and near the Mac**, and a python3 with pyobjc; it observes with OCR and acts on normalized coordinates rather than `element_index`. Without pyobjc, `phone_*` tools return a one-line `imctl unavailable` error with the install command, and the Mac and browser layers are unaffected. The observe/act vocabulary follows the action/observation split popularized by ChatGPT's computer-use, re-implemented on open local tooling.
 
 ## Why noracu
 
 noracu is the local hands, not the model. Your MCP client (Claude Desktop, Claude Code, Cursor) decides what to do; this server only observes and acts on this machine.
 
-- **Runs entirely on your machine.** No cloud, no API key, no telemetry, no postinstall scripts. Sole runtime dependency: Playwright. noracu makes no network calls of its own; the only automatic one is the one-time Chromium download on the first `browser_launch` (`NORACU_DISABLE_AUTO_INSTALL=1` turns that off). The browser still fetches the pages you point it at.
+- **The server runs entirely on your machine.** No cloud service, no API key, no telemetry, no postinstall scripts. Sole runtime dependency: Playwright. noracu makes no network calls of its own; the only automatic one is the one-time Chromium download on the first `browser_launch` (`NORACU_DISABLE_AUTO_INSTALL=1` turns that off). The browser still fetches the pages you point it at, and your MCP client still sends tool results — screenshots, OCR text — to whatever model it uses.
 - **Acts on semantics, not pixels.** Observation returns the accessibility tree (Mac) or ARIA tree (browser) as an indexed list — text, not screenshots. Actions reference `element_index`; indices expire after 30 s, and clicks re-verify the target (tag/name/href/position in the browser, frontmost app on the Mac) before firing. A stale reference returns `element_no_longer_valid` instead of clicking the wrong thing. Screenshots are there when the tree is not enough.
-- **One protocol, three surfaces — not three scripts.** The same observe/act loop drives native Mac apps, a persistent-profile browser, and (experimentally) a mirrored iPhone. The pattern is identical across surfaces; only the tool names differ (`mac_*` vs `browser_*`).
+- **One loop, three surfaces.** Native Mac apps and a persistent-profile browser share the `element_index` protocol (observe a tree, act by index). The experimental iPhone layer runs the same observe → act loop on Apple's iPhone Mirroring, with OCR text and normalized coordinates, because the phone exposes no accessibility tree to the Mac.
 - **Uses your real sessions.** Your logged-in browser profile, your Mac apps — not a hosted VM. Compared with cloud computer-use: neither is universally more reliable; they fail differently. noracu keeps the screen on your machine.
 - **Off switches that are actually off.** `NORACU_READ_ONLY=1` (observation-only, default-deny), `NORACU_DISABLE_EVAL=1`, and `file://` blocked by default. See [Security](#security).
-- **Verifiable.** 34 end-to-end checks (`npm test`), CI on macos-latest, MIT, and the whole server is one file: `src/server.mjs`.
+- **Verifiable.** 39 end-to-end checks (`npm test`), CI on macos-latest, MIT, and the whole server is one file: `src/server.mjs`.
 
-**Not a good fit if** you need multiple browser tabs or sessions (single session for now), you're not on macOS (the Mac and iPhone layers are macOS-only; the browser layer is cross-platform), or you need a finished iPhone layer today (it ships, but experimental). If you only need browser automation, playwright-mcp has tab management and selector APIs that noracu v0.1 lacks; noracu is for when one agent also has to leave the browser and drive Mac apps.
+**Not a good fit if** you need multiple browser tabs or sessions (single session for now), you're not on macOS (the Mac and iPhone layers are macOS-only; the browser layer is cross-platform), or you need a finished iPhone layer today (it ships, but experimental — and Apple does not offer iPhone Mirroring in the EU). If you only need browser automation, playwright-mcp has tab management and selector APIs that noracu v0.1 lacks; noracu is for when one agent also has to leave the browser and drive Mac apps.
 
 ## Quickstart
 
@@ -88,6 +88,7 @@ Then **quit the host app completely (including any menu-bar icon) and reopen it.
 | `spawn node` / `npx` `ENOENT` from a GUI host | use an absolute `node` path in the config — nvm/volta/homebrew shims are not on the GUI `PATH` |
 | `browser_launch` hangs on first use | one-time Chromium download; or auto-install disabled (`NORACU_DISABLE_AUTO_INSTALL=1`) → run `npx playwright install chromium` |
 | `phone_*` says `imctl unavailable: no python3 with pyobjc found` | install pyobjc for a python3 (`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`; Homebrew python3 is the usual choice) or set `NORACU_PYTHON` — see [iPhone layer](#iphone-layer-experimental) |
+| `phone_*` refused with `mirror_not_live: …` ("Connection Paused", "iPhone in Use") | the mirror is paused or the iPhone is unlocked — lock the iPhone, keep it near the Mac, then call `phone_launch` (it clicks Resume) |
 | Typed text comes out re-spaced (e.g. "no ra cu") | a CJK input method is active — use `mac_paste` instead of `mac_type` |
 | `element_no_longer_valid` | the snapshot is older than 30 s or the UI changed — re-run `mac_ax_state` / `browser_snapshot` and use a fresh index |
 
@@ -97,15 +98,21 @@ Full worked examples: [docs/usage.md](docs/usage.md).
 
 ## iPhone layer (experimental)
 
-The 14 `phone_*` tools drive iPhone Mirroring through **imctl**, a small Python driver that ships inside this package (`imctl/`, MIT, about 1,000 lines). Nothing else to install on noracu's side; the layer stays experimental because it depends on a live mirror and an unlocked phone.
+noracu can operate a real iPhone through Apple's **iPhone Mirroring**. The agent observes with OCR on the Mac (`phone_screenshot`, `phone_ocr`, `phone_find`), acts at normalized 0–1 coordinates (`phone_tap`, `phone_swipe`, `phone_scroll`), types by pasting (`phone_type`) and opens apps by name (`phone_open`). This is not `element_index`: the phone exposes no accessibility tree to the Mac, so a tap lands where OCR placed the text. The driver (imctl, Python, MIT, about 1,000 lines) ships in `imctl/`.
 
-**Requirements:** macOS 15+ · iPhone Mirroring connected (same Apple Account, Bluetooth + Wi-Fi on) · Accessibility + Screen Recording granted to the host app · a python3 that imports pyobjc (Quartz, Vision, AppKit).
+**Apple's requirements** ([support.apple.com/120421](https://support.apple.com/120421)): a Mac with Apple silicon or a T2 chip on macOS 15 or later; an iPhone on iOS 18 or later with a passcode; both signed in to the same Apple Account with two-factor authentication; Bluetooth and Wi-Fi on; the Mac not sharing its internet connection or using AirPlay or Sidecar. **The iPhone must be locked and near the Mac** — unlocking it, or quitting iPhone Mirroring, ends the session. iPhone Mirroring is currently unavailable in the EU. One Mac and one iPhone at a time; camera and microphone are not mirrored.
 
-**Python:** set `NORACU_PYTHON=/path/to/python3`, or let noracu probe `/opt/homebrew/bin/python3`, `/usr/local/bin/python3`, `python3`, `/usr/bin/python3` once, on the first `phone_*` call. Apple's `/usr/bin/python3` usually lacks pyobjc; the common working setup is Homebrew's python3 plus `python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`. When nothing qualifies, every `phone_*` tool returns one line — `imctl unavailable: no python3 with pyobjc found (tried …) — run …` — and the Mac and browser layers are unaffected.
+**Unattended sessions:** in iPhone Mirroring → Settings, "Authenticate automatically" lets a session start without a password prompt. Trade-off: anyone who can use your unlocked Mac can then open your phone.
 
-**First success:** `phone_status` → if `paused` is `true`, `phone_launch` (brings the mirror to the front and clicks Resume) → `phone_screenshot` → `phone_ocr` → `phone_find` / `phone_tap`. Screenshots and OCR capture the Mirroring window by window id, so they are the phone's own pixels even when another window covers the mirror.
+**Python:** the driver needs a python3 that imports pyobjc (Quartz, Vision, AppKit). Set `NORACU_PYTHON`, or noracu probes `/opt/homebrew/bin/python3`, `/usr/local/bin/python3`, `python3`, `/usr/bin/python3` once, on the first `phone_*` call. Apple's `/usr/bin/python3` usually lacks pyobjc; Homebrew's python3 plus `python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit` is the common working setup.
 
-**Known limits:** the iPhone must be unlocked (unlocking cannot be driven from the Mac); `paused` reads `null` on non-English macOS; `phone_open` relies on Spotlight + OCR and can miss apps whose labels are truncated. `phone_home` / `phone_app_switcher` go through the iPhone Mirroring menu and work without python when the mirror is connected.
+**Mirror state:** `phone_status` reports `live` (the phone's screen is being streamed), `overlay` (the text iPhone Mirroring shows instead, e.g. "Connection Paused" or "iPhone in Use") and `paused` (that overlay offers a Resume button). Detection reads the window's structure, not its text. While the mirror is not live, `phone_tap`, `phone_longpress`, `phone_swipe`, `phone_scroll`, `phone_type`, `phone_key` and `phone_open` refuse with `mirror_not_live` instead of tapping the overlay, and `phone_ocr` / `phone_find` start their output with a warning. The mirror pauses after inactivity; `phone_launch` brings it forward and clicks Resume.
+
+**Privacy:** whatever the phone shows — notifications, messages, mail, one-time codes — becomes tool output that your MCP client sends to its model. Turn on a Focus, open a neutral app before you start, and begin with `NORACU_READ_ONLY=1` (`phone_status`, `phone_screenshot`, `phone_ocr` and `phone_find` stay allowed; all phone input is refused). iPhone notifications also reach the Mac once Mirroring is set up.
+
+**First success:** `phone_status` → `phone_launch` if `live` is not `true` → `phone_screenshot` → `phone_ocr` → `phone_find` + `phone_tap`.
+
+**Known limits:** a tap goes where OCR saw the text, so repeated or misread labels can be hit wrong; `phone_open` types the app name into Spotlight and taps an exact match, otherwise returns to the Home Screen; `phone_home` / `phone_app_switcher` use the iPhone Mirroring menu (English macOS) and work without python while connected.
 
 ## Environment variables
 
@@ -132,6 +139,7 @@ noracu runs with the privileges of your MCP client. It clicks, types, pastes, an
 - **`file://` is refused** unless `NORACU_ALLOW_FILE_URL=1`, so a browser agent can't read `~/Documents` by navigating to it. (The initial navigation URL is scheme-checked; redirects are not — see SECURITY.md.)
 - **Focus guard:** pass `app` to `mac_type` / `mac_paste` / `mac_key` and input is refused unless that app is frontmost. Omit `app` and the guard is off.
 - **Stale-element protection:** an `element_index` is not a coordinate. It expires after 30 s (`element_no_longer_valid`); a browser click re-checks tag/name/href/position, and a Mac click is refused if the frontmost app changed since the snapshot.
+- **iPhone screen is model input:** `phone_screenshot` / `phone_ocr` / `phone_find` return whatever the phone shows — notifications, messages, one-time codes. Use a Focus and a neutral app, and start with `NORACU_READ_ONLY=1` (phone observation allowed, phone input refused). Phone input is also refused while the mirror is paused (`mirror_not_live`).
 - **Injection-safe JXA:** string parameters are passed to `osascript` as argv data, never built into the script; the one numeric value (AX read depth) is clamped to 1–10 before use. Regression-tested.
 
 These switches do not make observed content trustworthy. Screenshot text, accessibility names, and page content are untrusted input to your model — do not let them override the task. Full threat model and per-threat status: [SECURITY.md](SECURITY.md).
@@ -147,10 +155,11 @@ These switches do not make observed content trustworthy. Screenshot text, access
 - Browser: tab management (list / select / close)
 - Act vocabulary (browser): `hover`, `set_value`, `wait_for`
 - Snapshot diffing to cut token use — pending measurement
+- iPhone: `element_index` over OCR regions, re-checking the text before a tap
 
 ## Maintenance
 
-Solo-maintained, no SLA. macOS 15+ for the Mac and iPhone layers; the browser layer runs wherever Playwright does.
+Solo-maintained, no SLA. macOS 15+ for the Mac layer; the iPhone layer also needs Apple silicon or a T2 Mac, iOS 18+ and iPhone Mirroring (not available in the EU); the browser layer runs wherever Playwright does.
 
 ## License
 

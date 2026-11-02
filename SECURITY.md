@@ -13,7 +13,8 @@ Treat every tool call as privileged.
 | 3 | **Arbitrary JS in browser** | `browser_evaluate` executes any JavaScript in the page context | **Mitigated (kill switch)** | Set `NORACU_DISABLE_EVAL=1`; `browser_evaluate` then returns an error on every call (it stays listed in `tools/list`) |
 | 4 | **Input validation gaps** | Malformed arguments (NaN coordinates, oversized strings, `javascript:` URLs) | **Mitigated** | `validateArgs` runs on every tool call; tools with coordinate/enum/length/URL constraints are checked (others pass through) |
 | 5 | **Screenshot privacy** | `mac_screenshot` / `phone_screenshot` capture the full screen / phone display | **Inherent** | Run in a dedicated macOS user account or virtual display for untrusted automation |
-| 6 | **iPhone operations** | `phone_tap` / `phone_type` can interact with payment and SMS-verification UIs | **Inherent** | Consider disconnecting Apple Pay / keeping Mirroring off for untrusted sessions |
+| 6 | **iPhone operations** | `phone_tap` / `phone_type` can interact with payment and SMS-verification UIs; taps go to OCR coordinates with no element re-check | **Inherent** | Keep Mirroring off for untrusted sessions; `NORACU_READ_ONLY=1` refuses all phone input; input is refused while the mirror shows an overlay (`mirror_not_live`); "Authenticate automatically" lets anyone at the unlocked Mac start mirroring |
+| 12 | **Phone screen as model input** | `phone_screenshot` / `phone_ocr` / `phone_find` return notifications, messages, mail and one-time codes visible on the phone | **Inherent** | Use a Focus mode and a neutral app; the MCP client sends tool results to its model; iPhone notifications also reach the Mac once Mirroring is set up |
 | 7 | **Supply chain** | malicious PRs / dependency poisoning after open-sourcing | **Partially mitigated** | Review all PRs touching `src/server.mjs` argument handling; lockfile committed; no `postinstall` scripts; the only runtime download is the one-time Playwright `chromium` install triggered by `browser_launch`, which can be disabled with `NORACU_DISABLE_AUTO_INSTALL=1` |
 | 8 | **Local file read via browser** | `browser_navigate` to a `file://` URL, then `browser_read` exfiltrates local files | **Mitigated (default)** | `file://` blocked at the `browser_navigate` argument unless `NORACU_ALLOW_FILE_URL=1` (initial URL only; redirects fall under threat 9) |
 | 9 | **HTTP GET side effects** | navigation triggers logout links, one-time tokens, private-network / cloud-metadata endpoints | **Not mitigated** | No URL blocklist (redirects and DNS rebinding defeat pre-navigation checks); client-side policy |
@@ -23,6 +24,9 @@ Treat every tool call as privileged.
 ## Hardening recommendations
 
 - Set `NORACU_DISABLE_EVAL=1` unless you actively need `browser_evaluate`.
+- Before an agent touches the iPhone layer: turn on a Focus, open a neutral app,
+  and start with `NORACU_READ_ONLY=1`. Prefer "Ask every time" in iPhone
+  Mirroring settings unless you need unattended sessions.
 - Gate `mac_type` / `mac_paste` behind human confirmation when the frontmost
   app is a password manager or banking site (client-side policy).
 - Run untrusted automation in a dedicated macOS user account with

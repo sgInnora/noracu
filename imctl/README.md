@@ -77,7 +77,7 @@ imctl status
 
 | Command | Description |
 |---------|-------------|
-| `status` | session + window info (JSON: running, window, window_id, onscreen, frontmost, paused) |
+| `status` | session + window info (JSON: running, window, window_id, onscreen, frontmost, live, overlay, paused) |
 | `screenshot [PATH]` | capture the mirroring window to PNG by window id (works when covered) |
 | `resume` | click Resume when the window shows Connection Paused |
 | `launch` | ensure mirroring is running and frontmost |
@@ -129,8 +129,10 @@ through the Vision framework on-device.
 
 ## Limitations
 
-- The iPhone must stay unlocked and connected; lock-screen state is
-  surfaced by `status` only indirectly (window content freezes).
+- The iPhone must stay **locked** and near the Mac — iPhone Mirroring only
+  runs while the phone is locked, and unlocking it ends the session. The
+  mirror pauses after inactivity; `status` reports `paused` and `resume`
+  clicks Resume. iPhone Mirroring is unavailable in the EU (Apple).
 - Drag-and-drop between Mac and iPhone is not supported.
 - Multi-display setups: the window is located by AX query, so it works
   on any display, but coordinates are always screen-global.
