@@ -8,6 +8,10 @@
   and release notes said the opposite.
 - `phone_type` sends a real Command-V chord. Before, iPhone Mirroring received
   a plain "v" and the text was never pasted.
+- `phone_scroll` uses trackpad-style scroll events (continuous, with
+  began/changed/ended phases). It used a mouse drag, which iPhone Mirroring
+  does not turn into a list scroll, so lists never moved. `phone_swipe` stays
+  a drag for gestures such as Home Screen paging.
 - `phone_open` opens Spotlight through iPhone Mirroring's own shortcut instead
   of a swipe that could put the Home Screen into edit (jiggle) mode; it taps
   only an exact app-name match above the search field and returns to the Home
@@ -17,6 +21,11 @@
   while iPhone Mirroring shows an overlay ("Connection Paused", "iPhone in
   Use", …) instead of landing on the overlay; `phone_ocr` / `phone_find` start
   with a warning in that state.
+
+### Known issue
+- On one tested setup (iPhone 17 Pro Max, macOS 26) iPhone Mirroring draws the
+  phone larger than its window at every View size; the right column and bottom
+  row are cut off, so noracu cannot see or tap them. Under investigation.
 
 ### Added
 - `phone_status` reports `live` and `overlay`, read from the window's

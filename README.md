@@ -112,7 +112,7 @@ noracu can operate a real iPhone through Apple's **iPhone Mirroring**. The agent
 
 **First success:** `phone_status` → `phone_launch` if `live` is not `true` → `phone_screenshot` → `phone_ocr` → `phone_find` + `phone_tap`.
 
-**Known limits:** a tap goes where OCR saw the text, so repeated or misread labels can be hit wrong; `phone_open` types the app name into Spotlight and taps an exact match, otherwise returns to the Home Screen; `phone_home` / `phone_app_switcher` use the iPhone Mirroring menu (English macOS) and work without python while connected.
+**Known limits:** a tap goes where OCR saw the text, so repeated or misread labels can be hit wrong; `phone_scroll` moves lists with trackpad-style scroll events (a vertical `phone_swipe` drag does not scroll a list — use it for gestures such as Home Screen paging); on one tested setup (iPhone 17 Pro Max, macOS 26) iPhone Mirroring draws the phone larger than its window at every View size, so the right column and bottom row are cut off and cannot be reached — check `phone_screenshot` if taps near the edges miss; `phone_open` types the app name into Spotlight and taps an exact match, otherwise returns to the Home Screen; `phone_home` / `phone_app_switcher` use the iPhone Mirroring menu (English macOS) and work without python while connected.
 
 ## Environment variables
 

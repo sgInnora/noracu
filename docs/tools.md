@@ -51,10 +51,10 @@
 | `phone_find` | text:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen. |
 | `phone_tap` | x:number?, y:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates. Refused with mirror_not_live when the mirror is paused. |
 | `phone_longpress` | x:number?, y:number?, duration:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Long-press at {x, y} for an optional duration in seconds. |
-| `phone_swipe` | from:array?, to:array?, ms:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe from [x,y] to [x,y] over an optional duration in ms. |
+| `phone_swipe` | from:array?, to:array?, ms:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe (mouse drag) from [x,y] to [x,y] over an optional duration in ms, for gestures such as Home Screen paging; to move a list use phone_scroll. |
 | `phone_home` | — | EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl swipe. |
 | `phone_app_switcher` | — | EXPERIMENTAL. Open the iPhone App Switcher via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl gesture. |
-| `phone_scroll` | direction:string?, distance:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll up or down by a distance. |
+| `phone_scroll` | direction:string?, distance:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll the list under the mirror up or down by about `distance` window heights (default 0.5), using trackpad-style scroll events. |
 | `phone_type` | text:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe). |
 | `phone_key` | key:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right. |
 | `phone_open` | app:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app via the mirroring Spotlight menu command/shortcut, type the name, OCR-pick the matching app row and tap it; returns to the home screen when not found. |

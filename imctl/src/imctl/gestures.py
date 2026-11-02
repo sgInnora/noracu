@@ -65,16 +65,25 @@ def app_switcher() -> None:
     ev(kCGEventLeftMouseUp, x1, y1)
 
 
+# Wheel pixels per window point of list movement, measured on iPhone Mirroring
+# (Settings list, 524 pt window: between 1.1 and 1.6 px/pt across runs).
+_SCROLL_PX_PER_PT = 1.3
+
+
 def scroll_down(distance: float = 0.5) -> None:
-    """Scroll content down (swipe up) by a normalized distance."""
-    start = min(0.9, 0.4 + distance / 2)
-    inp.swipe(0.5, start, 0.5, start - distance, duration_ms=300)
+    """Reveal content further down a list by about `distance` window heights.
+
+    Uses trackpad-style scroll events; a vertical mouse drag does not scroll
+    lists in iPhone Mirroring (F16). Swipes stay for gestures such as paging.
+    """
+    b = get_bounds()
+    inp.scroll_trackpad(-distance * b.height * _SCROLL_PX_PER_PT, bounds=b)
 
 
 def scroll_up(distance: float = 0.5) -> None:
-    """Scroll content up (swipe down) by a normalized distance."""
-    start = max(0.1, 0.6 - distance / 2)
-    inp.swipe(0.5, start, 0.5, start + distance, duration_ms=300)
+    """Reveal content further up a list by about `distance` window heights."""
+    b = get_bounds()
+    inp.scroll_trackpad(distance * b.height * _SCROLL_PX_PER_PT, bounds=b)
 
 
 def page_left() -> None:

@@ -58,6 +58,51 @@ def _source():
     return CGEventSourceCreate(kCGEventSourceStateHIDSystemState)
 
 
+def scroll_steps(total_px: float, steps: int = 24) -> list[int]:
+    """Split a scroll distance (wheel pixels) into per-event integer deltas that sum to it."""
+    steps = max(4, int(steps))
+    target = int(round(total_px))
+    out: list[int] = []
+    for i in range(1, steps + 1):
+        out.append(int(round(target * i / steps)) - sum(out))
+    return out
+
+
+def scroll_trackpad(total_px: float, nx: float = 0.5, ny: float = 0.6,
+                    bounds: WindowBounds | None = None) -> None:
+    """Scroll like a two-finger trackpad swipe: continuous wheel events with phases.
+
+    iPhone Mirroring turns these into a touch scroll of the list under the cursor
+    (F16: a mouse drag scrolls nothing in a list, and a bare wheel event without a
+    phase is ignored). Negative total_px moves the content up, revealing what is
+    below. The cursor is moved over the mirror first, because scroll events go to
+    the window under the cursor.
+    """
+    from Quartz import (CGEventCreateScrollWheelEvent, CGEventSetLocation,
+                        kCGEventMouseMoved, kCGScrollEventUnitPixel,
+                        kCGScrollWheelEventIsContinuous, kCGScrollWheelEventScrollPhase)
+
+    ensure_frontmost()
+    b = bounds or get_bounds()
+    x, y = b.denormalize(nx, ny)
+    src = _source()
+    _mouse_event(kCGEventMouseMoved, x, y, src)
+    time.sleep(0.12)
+    deltas = scroll_steps(total_px)
+    last = len(deltas) - 1
+    for i, d in enumerate(deltas):
+        event = CGEventCreateScrollWheelEvent(src, kCGScrollEventUnitPixel, 1, d)
+        if event is None:
+            raise InputError("CGEventCreateScrollWheelEvent returned None")
+        CGEventSetLocation(event, (x, y))
+        CGEventSetIntegerValueField(event, kCGScrollWheelEventIsContinuous, 1)
+        # NSEvent phases: 1 = began, 2 = changed, 4 = ended
+        CGEventSetIntegerValueField(event, kCGScrollWheelEventScrollPhase,
+                                    1 if i == 0 else (4 if i == last else 2))
+        CGEventPost(kCGHIDEventTap, event)
+        time.sleep(0.016)
+
+
 def _mouse_event(kind: int, x: float, y: float, source) -> None:
     event = CGEventCreateMouseEvent(
         source, kind, (x, y), kCGMouseButtonLeft

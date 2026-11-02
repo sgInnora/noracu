@@ -107,6 +107,14 @@ def test_choose_app_hit():
     assert choose_app_hit([], "Calculator") is None
 
 
+def test_scroll_steps():
+    from imctl.input import scroll_steps
+    d = scroll_steps(-432, 24)
+    assert len(d) == 24 and sum(d) == -432
+    assert all(-19 <= x <= -17 for x in d)
+    assert sum(scroll_steps(100.4, 7)) == 100 and len(scroll_steps(10, 2)) == 4
+
+
 if __name__ == "__main__":
     test_denormalize()
     test_center()
@@ -114,4 +122,5 @@ if __name__ == "__main__":
     test_parser_builds()
     test_parse_overlay()
     test_choose_app_hit()
+    test_scroll_steps()
     print("all smoke tests passed")

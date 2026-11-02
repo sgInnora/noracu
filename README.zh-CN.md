@@ -112,7 +112,7 @@ noracu 可以经 Apple 的 **iPhone Mirroring** 操作真实 iPhone。agent 在 
 
 **首次成功路径：** `phone_status` → 若 `live` 不是 `true` 先 `phone_launch` → `phone_screenshot` → `phone_ocr` → `phone_find` + `phone_tap`。
 
-**已知限制：** 点击落在 OCR 识别到文字的位置，重复或识别错的标签可能点错；`phone_open` 把 App 名输入 Spotlight 并只点击完全匹配的结果，找不到就回到主屏；`phone_home` / `phone_app_switcher` 走 iPhone Mirroring 菜单（英文 macOS），镜像连接时无需 python。
+**已知限制：** 点击落在 OCR 识别到文字的位置，重复或识别错的标签可能点错；`phone_scroll` 用触控板式的滚动事件移动列表（竖向的 `phone_swipe` 拖拽不会滚动列表——它用于主屏翻页这类手势）；在一套实测环境（iPhone 17 Pro Max、macOS 26）上，iPhone Mirroring 在所有 View 尺寸下都把手机画面画得比窗口大，右列和最底行被裁掉、无法点到——边缘附近点不中时先看 `phone_screenshot`；`phone_open` 把 App 名输入 Spotlight 并只点击完全匹配的结果，找不到就回到主屏；`phone_home` / `phone_app_switcher` 走 iPhone Mirroring 菜单（英文 macOS），镜像连接时无需 python。
 
 ## 环境变量
 

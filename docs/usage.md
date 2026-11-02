@@ -220,6 +220,11 @@ not live, `phone_tap`, `phone_longpress`, `phone_swipe`, `phone_scroll`,
 `phone_type`, `phone_key` and `phone_open` refuse with `mirror_not_live`, and
 `phone_ocr` / `phone_find` start with a `warning: mirror not live …` line.
 
+`phone_scroll {"direction": "down", "distance": 0.5}` moves the list under the
+mirror by about half a window, with trackpad-style scroll events; a vertical
+`phone_swipe` drag does not scroll lists in iPhone Mirroring, so keep swipes
+for gestures such as Home Screen paging.
+
 `phone_type` pastes through the clipboard with a real Command-V chord (the
 previous text clipboard is restored). `phone_open {"app": "Calculator"}` opens
 Spotlight through iPhone Mirroring's own shortcut, pastes the name, and taps a
