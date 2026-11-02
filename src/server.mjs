@@ -83,6 +83,10 @@ function imctl(...args) {
     });
     return { ok: true, out: out.trim() };
   } catch (e) {
+    // G23（0.1.2）：镜像不在线时 imctl 拒绝输入（退出码 3，stderr 带 mirror_not_live: 行）——
+    // 原样透传那一行，不归类为 imctl unavailable（这是可恢复的调用方错误，不是环境缺失）
+    const guard = (String(e.stderr || "") + "\n" + String(e.stdout || "")).match(/^mirror_not_live:.*$/m);
+    if (guard) return { ok: false, out: guard[0].trim() };
     const raw = String(e.stderr || e.stdout || e.message);
     // Collapse Python tracebacks / spawn errors into one actionable line so phone_* fail cleanly and tests can skip (graceful degradation).
     if (/No module named|ModuleNotFoundError|ImportError|Traceback \(most recent/.test(raw)) {
@@ -786,12 +790,12 @@ const TOOLS = [
   { name: "browser_evaluate", desc: "Evaluate JavaScript in the page and return the result.", args: { js: "string" }, fn: browserEvaluate },
   { name: "browser_close", desc: "Close the browser.", args: {}, fn: browserClose },
   // iPhone device-use（imctl）
-  { name: "phone_status", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, paused).", args: {}, fn: phoneStatus },
-  { name: "phone_launch", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and resumed if the connection is paused.", args: {}, fn: phoneLaunch },
+  { name: "phone_status", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, live, overlay, paused).", args: {}, fn: phoneStatus },
+  { name: "phone_launch", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and clicks Resume when the connection is paused.", args: {}, fn: phoneLaunch },
   { name: "phone_screenshot", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Screenshot the iPhone screen (the Mirroring window, captured by window id so it works even when covered).", args: {}, fn: phoneScreenshot },
   { name: "phone_ocr", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. OCR the iPhone screen into text with coordinates.", args: {}, fn: phoneOcr },
   { name: "phone_find", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen.", args: { text: "string" }, fn: phoneFind },
-  { name: "phone_tap", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates.", args: { x: "number", y: "number" }, fn: phoneTap },
+  { name: "phone_tap", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates. Refused with mirror_not_live when the mirror is paused.", args: { x: "number", y: "number" }, fn: phoneTap },
   { name: "phone_longpress", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Long-press at {x, y} for an optional duration in seconds.", args: { x: "number", y: "number", duration: "number?" }, fn: phoneLongpress },
   { name: "phone_swipe", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe from [x,y] to [x,y] over an optional duration in ms.", args: { from: "array", to: "array", ms: "number?" }, fn: phoneSwipe },
   { name: "phone_home", desc: "EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl swipe.", args: {}, fn: phoneHome },

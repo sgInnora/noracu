@@ -1,6 +1,7 @@
 {
   "name": "noracu",
-  "version": "0.1.1",
+  "version": "0.1.2",
+  "mcpName": "io.github.sgInnora/noracu",
   "description": "Local, no-cloud MCP server for macOS and Playwright computer-use, plus experimental iPhone. Acts by element index.",
   "type": "module",
   "main": "src/server.mjs",

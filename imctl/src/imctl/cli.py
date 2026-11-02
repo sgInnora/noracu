@@ -24,7 +24,37 @@ import json
 import sys
 
 from . import gestures, input, verify, vision
-from .window import WindowError
+from .window import WindowError, get_overlay
+
+
+def _require_live() -> int | None:
+    """Refuse phone input while the mirror shows an overlay instead of the phone stream.
+
+    Returns exit code 3 after printing a `mirror_not_live:` line when the mirror is
+    verifiably not live; returns None (allow) when live or unknown (fail-open).
+    """
+    overlay = get_overlay()
+    if overlay["live"] is False:
+        label = overlay["overlay"] or "overlay shown"
+        print(
+            f"mirror_not_live: {label} — call phone_launch (or imctl resume) first",
+            file=sys.stderr,
+        )
+        return 3
+    return None
+
+
+def _warn_if_not_live() -> None:
+    """Print a heads-up before ocr/find output when the mirror is not live.
+
+    The captured pixels then show the overlay (paused/connecting notice), not the phone.
+    """
+    overlay = get_overlay()
+    if overlay["live"] is False:
+        print(
+            f"warning: mirror not live (overlay: {overlay['overlay'] or 'unknown'}) — "
+            "the text below comes from the overlay, not the phone; call phone_launch"
+        )
 
 
 def _cmd_status(_args) -> int:
@@ -33,18 +63,27 @@ def _cmd_status(_args) -> int:
 
 
 def _cmd_tap(args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     input.tap(args.x, args.y)
     print(f"tapped ({args.x}, {args.y})")
     return 0
 
 
 def _cmd_longpress(args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     input.long_press(args.x, args.y, args.duration)
     print(f"long-pressed ({args.x}, {args.y}) for {args.duration}s")
     return 0
 
 
 def _cmd_swipe(args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     input.swipe(args.fx, args.fy, args.tx, args.ty, args.ms)
     print(f"swiped ({args.fx},{args.fy}) -> ({args.tx},{args.ty})")
     return 0
@@ -63,6 +102,9 @@ def _cmd_app_switcher(_args) -> int:
 
 
 def _cmd_scroll(args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     if args.direction == "down":
         gestures.scroll_down(args.distance)
     else:
@@ -72,6 +114,9 @@ def _cmd_scroll(args) -> int:
 
 
 def _cmd_page(args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     if args.direction == "left":
         gestures.page_left()
     else:
@@ -81,18 +126,25 @@ def _cmd_page(args) -> int:
 
 
 def _cmd_type(args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     input.type_text(args.text)
     print(f"typed {args.text!r}")
     return 0
 
 
 def _cmd_key(args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     input.press_key(args.key)
     print(f"pressed {args.key}")
     return 0
 
 
 def _cmd_ocr(_args) -> int:
+    _warn_if_not_live()
     hits = gestures.read_text()
     for h in hits:
         print(h)
@@ -101,6 +153,7 @@ def _cmd_ocr(_args) -> int:
 
 
 def _cmd_find(args) -> int:
+    _warn_if_not_live()
     hit = vision.find(args.text, exact=args.exact)
     if hit is None:
         print(f"not found: {args.text!r}", file=sys.stderr)
@@ -110,6 +163,9 @@ def _cmd_find(args) -> int:
 
 
 def _cmd_open(args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     ok = gestures.open_app(args.app)
     print(f"opened {args.app!r}" if ok else f"app not found: {args.app!r}")
     return 0 if ok else 1
@@ -159,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("screenshot", help="capture the mirroring window to PNG (by window id, works when covered)")
     sp.add_argument("path", nargs="?", default=None)
     sp.set_defaults(func=_cmd_screenshot)
-    sub.add_parser("resume", help="click Resume when the session shows Connection Paused").set_defaults(func=_cmd_resume)
+    sub.add_parser("resume", help="click Resume when the session is paused").set_defaults(func=_cmd_resume)
     sub.add_parser("launch", help="ensure mirroring is running and frontmost").set_defaults(func=_cmd_launch)
 
     sp = sub.add_parser("tap", help="tap at normalized coords")

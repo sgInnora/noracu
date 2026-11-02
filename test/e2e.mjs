@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // noracu MCP 端到端测试
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, unlinkSync, readFileSync } from "node:fs";
 
 const proc = spawn("node", [new URL("../src/server.mjs", import.meta.url).pathname], {
   stdio: ["pipe", "pipe", "inherit"],
@@ -227,6 +227,16 @@ check("imctl bundled (imctl/src/imctl/cli.py)", existsSync(new URL("../imctl/src
     const r = await s.call("phone_status");
     check("G10：imctl 缺失时 phone_status 报 isError", r?.isError && String(r?.content?.[0]?.text).includes("ERROR"), r?.content?.[0]?.text?.slice(0, 80));
   } finally { s.proc.kill(); }
+}
+
+// 12. 0.1.2：MCP Registry 元数据 —— server.json 必须与 package.json 一致（CI 安全：只读文件，不碰硬件）
+{
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const reg = JSON.parse(readFileSync(new URL("../server.json", import.meta.url), "utf8"));
+  check("registry: server.json name === pkg.mcpName", reg.name === pkg.mcpName, `${reg.name} vs ${pkg.mcpName}`);
+  check("registry: server.json version === pkg.version", reg.version === pkg.version, `${reg.version} vs ${pkg.version}`);
+  check("registry: packages[0].version === pkg.version", reg.packages?.[0]?.version === pkg.version, `${reg.packages?.[0]?.version} vs ${pkg.version}`);
+  check("registry: packages[0].identifier === pkg.name", reg.packages?.[0]?.identifier === pkg.name, `${reg.packages?.[0]?.identifier} vs ${pkg.name}`);
 }
 
 const failed = results.filter(r => !r.pass);

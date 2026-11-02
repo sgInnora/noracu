@@ -114,9 +114,12 @@ def status() -> dict:
     """Return a status dict for the mirroring session.
 
     Keys: running; and when running: window {x,y,w,h} (AX bounds), window_id, onscreen, frontmost,
-    paused (True/False, or null when the "Connection Paused" text cannot be read).
+    live (True/False/null — is the phone stream up), overlay (text shown over the stream when not
+    live, e.g. a paused/connecting notice), paused (True/False, or null when the state is unknown).
     """
-    from .window import get_window_info, is_frontmost, is_paused, is_running
+    from .window import (
+        get_overlay, get_window_info, is_frontmost, is_paused, is_running,
+    )
 
     running = is_running()
     info = {"running": running}
@@ -131,7 +134,10 @@ def status() -> dict:
             info["window_id"] = wi["id"]
             info["onscreen"] = wi["onscreen"]
         info["frontmost"] = is_frontmost()
-        info["paused"] = is_paused()
+        overlay = get_overlay()
+        info["live"] = overlay["live"]
+        info["overlay"] = overlay["overlay"]
+        info["paused"] = is_paused(overlay)
     return info
 
 

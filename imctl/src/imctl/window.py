@@ -64,7 +64,7 @@ end tell
 '''
 
 
-def _run_osascript(script: str) -> str:
+def _run_osascript(script: str, *, strip: bool = True) -> str:
     result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True,
@@ -73,7 +73,7 @@ def _run_osascript(script: str) -> str:
     )
     if result.returncode != 0:
         raise WindowError(f"osascript failed: {result.stderr.strip()}")
-    return result.stdout.strip()
+    return result.stdout.strip() if strip else result.stdout
 
 
 def is_running() -> bool:
@@ -152,25 +152,64 @@ def get_bounds() -> WindowBounds:
     return WindowBounds(x=x, y=y, width=w, height=h)
 
 
-_PAUSED_SCRIPT = '''
+# Language-independent mirror-state probe. When the mirroring session is live, window 1 contains a
+# single group (the AXHostingView) with no children; when an overlay is shown (paused, connecting,
+# "iPhone in use", …) that group gains child elements (image / static text / button). Overlay text
+# is localized, so the decision never matches on text — only on structure (child count, classes).
+# Labels can span multiple lines and nameless elements coerce to the literal "missing value";
+# both are normalized so one element = exactly one `<class>\t<label>` line.
+_OVERLAY_SCRIPT = '''
+on collapseBreaks(s)
+    set tid to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to linefeed
+    set parts to text items of s
+    set AppleScript's text item delimiters to " "
+    set s to parts as text
+    set AppleScript's text item delimiters to return
+    set parts to text items of s
+    set AppleScript's text item delimiters to " "
+    set s to parts as text
+    set AppleScript's text item delimiters to tid
+    return s
+end collapseBreaks
+
 tell application "System Events"
     tell process "iPhone Mirroring"
+        set winCount to count of windows
+        if winCount is 0 then return "NO_WINDOW"
         tell window 1
-            return (exists (static text "Connection Paused" of group 1)) as text
+            if not (exists group 1) then return "NO_GROUP"
+            set els to UI elements of group 1
+            if (count of els) is 0 then return ""
+            set out to ""
+            repeat with e in els
+                set c to (class of e) as text
+                set lbl to ""
+                try
+                    set n to (name of e) as text
+                    if n is not "missing value" then set lbl to n
+                end try
+                if lbl is "" then
+                    try
+                        set v to (value of e) as text
+                        if v is not "missing value" then set lbl to v
+                    end try
+                end if
+                set out to out & c & tab & (my collapseBreaks(lbl)) & linefeed
+            end repeat
+            return out
         end tell
     end tell
 end tell
 '''
 
-_RESUME_SCRIPT = '''
+# Clicks the Resume control of the paused overlay. Only ever invoked after _OVERLAY_SCRIPT
+# reported exactly one button under group 1 (static script, no interpolated parameters).
+_CLICK_RESUME_SCRIPT = '''
 tell application "System Events"
     tell process "iPhone Mirroring"
         tell window 1
-            if exists (static text "Connection Paused" of group 1) then
-                click button 1 of group 1
-                return "clicked"
-            end if
-            return "not-paused"
+            click button 1 of group 1
         end tell
     end tell
 end tell
@@ -219,30 +258,95 @@ def is_frontmost() -> bool:
         return False
 
 
-def is_paused() -> bool | None:
-    """True when the window shows "Connection Paused"; None when that cannot be read (e.g. localized UI)."""
+def parse_overlay(raw: str) -> dict:
+    """Parse _OVERLAY_SCRIPT output into {"live", "overlay", "buttons"}.
+
+    Rules (structure only, never localized text):
+      - "" (group 1 has no children)          -> live=True,  overlay=None, buttons=0
+      - child lines "<class>\t<name-or-value>"  -> live=False, overlay=static texts joined with " / "
+                                                   (None when no text), buttons=button count
+      - "NO_WINDOW" / "NO_GROUP" / unparseable -> live=None,  overlay=None, buttons=0
+    """
+    unknown = {"live": None, "overlay": None, "buttons": 0}
+    if raw is None:
+        return unknown
+    if raw.strip() in ("NO_WINDOW", "NO_GROUP"):
+        return unknown
+    # Keep lines as-is (a trailing tab is significant: "button\t" means a nameless button);
+    # only filter out blank lines.
+    lines = [ln for ln in raw.split("\n") if ln.strip()]
+    if not lines:
+        return {"live": True, "overlay": None, "buttons": 0}
+    buttons = 0
+    texts: list[str] = []
+    for ln in lines:
+        parts = ln.split("\t", 1)
+        if len(parts) != 2:
+            return unknown  # unexpected format -> unknown, never guess
+        cls, label = parts[0].strip(), parts[1].strip()
+        if cls == "button":
+            buttons += 1
+        elif cls == "static text" and label:
+            texts.append(label)
+    return {
+        "live": False,
+        "overlay": " / ".join(texts) if texts else None,
+        "buttons": buttons,
+    }
+
+
+def get_overlay() -> dict:
+    """Return the current overlay state: {"live", "overlay", "buttons"}.
+
+    Fail-open: any osascript failure (app not running, AX hiccup, timeout) returns
+    live=None so callers can decide; this never raises.
+    """
     try:
-        return _run_osascript(_PAUSED_SCRIPT) == "true"
-    except WindowError:
-        return None
+        # strip=False: a trailing "<class>\t" line (nameless button) must keep its tab —
+        # str.strip() would eat it and make the last line unparseable.
+        raw = _run_osascript(_OVERLAY_SCRIPT, strip=False)
+    except Exception:
+        return {"live": None, "overlay": None, "buttons": 0}
+    return parse_overlay(raw)
+
+
+def is_paused(overlay: dict | None = None) -> bool | None:
+    """True when the overlay shows a Resume control; False when live; None when unknown.
+
+    Language-independent: derived from the overlay structure (live flag + button count),
+    not from localized text such as "Connection Paused". Accepts a pre-fetched overlay
+    dict (as returned by get_overlay) so status can report one consistent snapshot.
+    """
+    if overlay is None:
+        overlay = get_overlay()
+    if overlay["live"] is False and overlay["buttons"] >= 1:
+        return True
+    if overlay["live"] is True:
+        return False
+    return None
 
 
 def resume() -> bool:
-    """Click the Resume control when the session is paused.
+    """Click the Resume control when the session is paused (language-independent).
 
-    Returns True when the session is not paused afterwards (or was never paused). The phone may still
+    Live already -> True. Paused overlay with exactly one button -> click it, then poll up
+    to ~6 s (0.5 s interval) until the stream is live again. Anything else (multiple
+    buttons, no button, unknown state) -> do not click, return False. The phone may still
     ask for Face ID / passcode on its own screen; that part cannot be automated from the Mac.
     """
     import time
 
+    overlay = get_overlay()
+    if overlay["live"] is True:
+        return True
+    if overlay["live"] is not False or overlay["buttons"] != 1:
+        return False
     try:
-        out = _run_osascript(_RESUME_SCRIPT)
+        _run_osascript(_CLICK_RESUME_SCRIPT)
     except WindowError:
         return False
-    if out == "not-paused":
-        return True
-    for _ in range(10):  # up to ~5 s for the stream to come back
+    for _ in range(12):  # up to ~6 s for the stream to come back
         time.sleep(0.5)
-        if is_paused() is False:
+        if get_overlay()["live"] is True:
             return True
     return False

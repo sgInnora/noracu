@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, "src")
 
-from imctl.window import WindowBounds
+from imctl.window import WindowBounds, parse_overlay
 from imctl.input import _ease_in_out
 from imctl.cli import build_parser
 
@@ -55,9 +55,40 @@ def test_parser_builds():
     assert args.text == "hello world"
 
 
+def test_parse_overlay():
+    # live: group 1 has no children (script returns an empty string)
+    assert parse_overlay("") == {"live": True, "overlay": None, "buttons": 0}
+    # paused: image + static text + button under group 1
+    raw = "image\t\nstatic text\tConnection Paused\nbutton\t\n"
+    assert parse_overlay(raw) == {
+        "live": False,
+        "overlay": "Connection Paused",
+        "buttons": 1,
+    }
+    # transitional: only a static text (e.g. "Connecting to iPhone …"), no button
+    raw = "static text\tConnecting to iPhone\n"
+    assert parse_overlay(raw) == {
+        "live": False,
+        "overlay": "Connecting to iPhone",
+        "buttons": 0,
+    }
+    # unknown states: no window / no group / unparseable output
+    assert parse_overlay("NO_WINDOW") == {"live": None, "overlay": None, "buttons": 0}
+    assert parse_overlay("NO_GROUP") == {"live": None, "overlay": None, "buttons": 0}
+    assert parse_overlay("garbage without tabs") == {
+        "live": None,
+        "overlay": None,
+        "buttons": 0,
+    }
+    # multiple static texts are joined with " / "
+    raw = "static text\tOne\nstatic text\tTwo\n"
+    assert parse_overlay(raw) == {"live": False, "overlay": "One / Two", "buttons": 0}
+
+
 if __name__ == "__main__":
     test_denormalize()
     test_center()
     test_ease_curve()
     test_parser_builds()
+    test_parse_overlay()
     print("all smoke tests passed")

@@ -1,7 +1,7 @@
 # Tool reference
 
 > Auto-generated from the running server (`node scripts/gen-tools.mjs`) — always in sync with the implementation.
-> noracu v0.1.1 · 35 tools
+> noracu v0.1.2 · 35 tools
 
 ## Mac layer (computer-use)
 
@@ -44,12 +44,12 @@
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `phone_status` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, paused). |
-| `phone_launch` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and resumed if the connection is paused. |
+| `phone_status` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, live, overlay, paused). |
+| `phone_launch` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and clicks Resume when the connection is paused. |
 | `phone_screenshot` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Screenshot the iPhone screen (the Mirroring window, captured by window id so it works even when covered). |
 | `phone_ocr` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. OCR the iPhone screen into text with coordinates. |
 | `phone_find` | text:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen. |
-| `phone_tap` | x:number?, y:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates. |
+| `phone_tap` | x:number?, y:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates. Refused with mirror_not_live when the mirror is paused. |
 | `phone_longpress` | x:number?, y:number?, duration:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Long-press at {x, y} for an optional duration in seconds. |
 | `phone_swipe` | from:array?, to:array?, ms:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe from [x,y] to [x,y] over an optional duration in ms. |
 | `phone_home` | — | EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl swipe. |

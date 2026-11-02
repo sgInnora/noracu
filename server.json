@@ -1,0 +1,10 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sgInnora/noracu",
+  "description": "Local, no-cloud MCP server for macOS and Playwright computer-use, plus experimental iPhone. Acts by element index.",
+  "repository": { "url": "https://github.com/sgInnora/noracu", "source": "github" },
+  "version": "0.1.2",
+  "packages": [
+    { "registryType": "npm", "identifier": "noracu", "version": "0.1.2", "transport": { "type": "stdio" } }
+  ]
+}
