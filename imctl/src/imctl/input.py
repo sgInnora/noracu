@@ -170,6 +170,56 @@ _VK_DELETE = 51
 _VK_ARROW_KEYS = {"up": 126, "down": 125, "left": 123, "right": 124}
 _VK_V = 9
 _VK_A = 0
+_VK_COMMAND = 55
+
+# ANSI keycodes for digits and letters — the characters a menu-item
+# shortcut can use as its command char (AXMenuItemCmdChar). Translates
+# a shortcut such as Cmd+3 into a keycode for _cmd_chord().
+_ANSI_KEYCODES = {
+    "0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22,
+    "7": 26, "8": 28, "9": 25,
+    "a": 0, "b": 11, "c": 8, "d": 2, "e": 14, "f": 3, "g": 5, "h": 4,
+    "i": 34, "j": 38, "k": 40, "l": 37, "m": 46, "n": 45, "o": 31,
+    "p": 35, "q": 12, "r": 15, "s": 1, "t": 17, "u": 32, "v": 9,
+    "w": 13, "x": 7, "y": 16, "z": 6,
+}
+
+
+def keycode_for_char(char: str) -> int | None:
+    """ANSI virtual keycode for a single digit/letter, else None."""
+    if len(char) != 1:
+        return None
+    return _ANSI_KEYCODES.get(char.lower())
+
+
+def _cmd_chord(keycode: int) -> None:
+    """Send a real Command chord: ⌘ down → key down → key up → ⌘ up.
+
+    iPhone Mirroring forwards the *state* of the physical modifier
+    keys, not the per-event flag bits: a target-key event that merely
+    carries kCGEventFlagMaskCommand arrives on the phone as an
+    unmodified keystroke (F14 — a "Cmd+V" paste typed a literal "v").
+    The chord therefore presses the Command key itself, keeps the
+    flag set on every event, and releases Command last. ~30ms between
+    steps, all events from one shared source.
+    """
+    ensure_frontmost()
+    src = _source()
+
+    def post(code: int, down: bool, flags: int) -> None:
+        event = CGEventCreateKeyboardEvent(src, code, down)
+        if event is None:
+            raise InputError(f"CGEventCreateKeyboardEvent returned None for {code}")
+        CGEventSetFlags(event, flags)
+        CGEventPost(kCGHIDEventTap, event)
+
+    post(_VK_COMMAND, True, kCGEventFlagMaskCommand)
+    time.sleep(0.03)
+    post(keycode, True, kCGEventFlagMaskCommand)
+    time.sleep(0.03)
+    post(keycode, False, kCGEventFlagMaskCommand)
+    time.sleep(0.03)
+    post(_VK_COMMAND, False, 0)
 
 
 def press_key(key: str) -> None:
@@ -209,14 +259,7 @@ def type_text(text: str) -> None:
         pb.setString_forType_(text, "public.utf8-plain-text")
         time.sleep(0.05)
 
-        src = _source()
-        v_down = CGEventCreateKeyboardEvent(src, _VK_V, True)
-        CGEventSetFlags(v_down, kCGEventFlagMaskCommand)
-        CGEventPost(kCGHIDEventTap, v_down)
-        time.sleep(0.05)
-        v_up = CGEventCreateKeyboardEvent(src, _VK_V, False)
-        CGEventSetFlags(v_up, kCGEventFlagMaskCommand)
-        CGEventPost(kCGHIDEventTap, v_up)
+        _cmd_chord(_VK_V)  # real ⌘ chord — flags alone reach the phone as "v" (F14)
         time.sleep(0.15)  # let the paste land before restoring
     finally:
         # Restore the user's clipboard only if nothing else changed it.
@@ -229,18 +272,9 @@ def type_text(text: str) -> None:
 def clear_text() -> None:
     """Select-all and delete in the focused field."""
     ensure_frontmost()
-    src = _source()
-    for keycode, flags in (
-        (_VK_A, kCGEventFlagMaskCommand),  # Cmd+A
-    ):
-        e = CGEventCreateKeyboardEvent(src, keycode, True)
-        CGEventSetFlags(e, flags)
-        CGEventPost(kCGHIDEventTap, e)
-        time.sleep(0.03)
-        e = CGEventCreateKeyboardEvent(src, keycode, False)
-        CGEventSetFlags(e, flags)
-        CGEventPost(kCGHIDEventTap, e)
+    _cmd_chord(_VK_A)  # Cmd+A — real chord, same reason as type_text
     time.sleep(0.05)
+    src = _source()
     _key_event(_VK_DELETE, True, src)
     time.sleep(0.02)
     _key_event(_VK_DELETE, False, src)

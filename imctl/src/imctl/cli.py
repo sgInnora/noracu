@@ -166,7 +166,12 @@ def _cmd_open(args) -> int:
     guard = _require_live()
     if guard is not None:
         return guard
-    ok = gestures.open_app(args.app)
+    # Open Spotlight here (not inside open_app) so a failure can be
+    # reported as its own condition instead of a bogus "app not found".
+    if not gestures.open_spotlight():
+        print("spotlight unavailable")
+        return 1
+    ok = gestures.open_app(args.app, spotlight_open=True)
     print(f"opened {args.app!r}" if ok else f"app not found: {args.app!r}")
     return 0 if ok else 1
 

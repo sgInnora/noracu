@@ -57,5 +57,5 @@
 | `phone_scroll` | direction:string?, distance:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll up or down by a distance. |
 | `phone_type` | text:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe). |
 | `phone_key` | key:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right. |
-| `phone_open` | app:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app via Spotlight search plus OCR-guided tap. |
+| `phone_open` | app:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app via the mirroring Spotlight menu command/shortcut, type the name, OCR-pick the matching app row and tap it; returns to the home screen when not found. |
 

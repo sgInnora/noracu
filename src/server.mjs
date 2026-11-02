@@ -803,7 +803,7 @@ const TOOLS = [
   { name: "phone_scroll", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll up or down by a distance.", args: { direction: "string?", distance: "number?" }, fn: phoneScroll },
   { name: "phone_type", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe).", args: { text: "string" }, fn: phoneType },
   { name: "phone_key", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right.", args: { key: "string" }, fn: phoneKey },
-  { name: "phone_open", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app via Spotlight search plus OCR-guided tap.", args: { app: "string" }, fn: phoneOpen },
+  { name: "phone_open", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app via the mirroring Spotlight menu command/shortcut, type the name, OCR-pick the matching app row and tap it; returns to the home screen when not found.", args: { app: "string" }, fn: phoneOpen },
 ];
 
 // ── 统一参数校验（全工具入口门禁，返回 null=通过 / string=错误）──

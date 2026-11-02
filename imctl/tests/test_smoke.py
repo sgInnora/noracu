@@ -85,10 +85,33 @@ def test_parse_overlay():
     assert parse_overlay(raw) == {"live": False, "overlay": "One / Two", "buttons": 0}
 
 
+def test_choose_app_hit():
+    from imctl.gestures import choose_app_hit
+    from imctl.vision import OCRHit
+
+    def hit(text, ny, nx=0.5, confidence=0.9):
+        return OCRHit(text=text, nx=nx, ny=ny, confidence=confidence)
+
+    # ① the typed query echoes in the bottom search field (ny≈0.95) —
+    #    only a result row above it (ny<0.88) counts; topmost row wins.
+    hits = [hit("Calculator", 0.95), hit("Calculator", 0.30), hit("Calculator", 0.50)]
+    assert choose_app_hit(hits, "Calculator").ny == 0.30
+    # ② only the search field matches → nothing to tap
+    assert choose_app_hit([hit("Calculator", 0.95)], "Calculator") is None
+    # ③ case and surrounding whitespace don't matter
+    assert choose_app_hit([hit(" calculator ", 0.40)], "Calculator").ny == 0.40
+    assert choose_app_hit([hit("Calculator", 0.40)], "  CALCULATOR ").ny == 0.40
+    # ④ partial matches are not the app
+    assert choose_app_hit([hit("Calculator Pro", 0.30)], "Calculator") is None
+    # no hits at all
+    assert choose_app_hit([], "Calculator") is None
+
+
 if __name__ == "__main__":
     test_denormalize()
     test_center()
     test_ease_curve()
     test_parser_builds()
     test_parse_overlay()
+    test_choose_app_hit()
     print("all smoke tests passed")

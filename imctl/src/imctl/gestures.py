@@ -3,13 +3,20 @@
 These map to standard iOS interactions. Coordinates are normalized
 (0-1) within the mirroring window. Gesture start points were chosen to
 match iOS conventions (e.g. home swipe starts at the very bottom edge).
+
+Phone-level actions that the mirroring app exposes as menu commands
+(Spotlight, Home Screen) are triggered through those menus rather than
+synthesized touch gestures — see the menu-command section below.
 """
 
 from __future__ import annotations
 
+import subprocess
+import time
+
 from . import input as inp
 from . import vision
-from .window import ensure_running, get_bounds
+from .window import WindowError, ensure_frontmost, ensure_running, get_bounds
 
 
 class GestureError(RuntimeError):
@@ -81,24 +88,168 @@ def page_right() -> None:
 
 
 def pull_down_search() -> None:
-    """Swipe down from mid-screen: open Spotlight search."""
+    """Swipe down from mid-screen (DEPRECATED — never use for Spotlight).
+
+    F13: iOS sometimes reads this swipe as an icon long-press-drag, which
+    drops the home screen into edit (jiggle) mode — a stray tap on a "−"
+    badge there offers to DELETE apps. open_spotlight() replaces it.
+    Kept only as a raw gesture primitive; nothing in imctl calls it.
+    """
     inp.swipe(0.5, 0.25, 0.5, 0.75, duration_ms=280)
 
 
-def open_app(name: str) -> bool:
-    """Open an app by name via Spotlight + OCR + tap.
+# --- iPhone Mirroring menu commands -----------------------------------------
+#
+# The View menu of iPhone Mirroring exposes phone-level actions (Home
+# Screen, App Switcher, Spotlight) as real menu commands, which iOS
+# cannot misread as touch gestures. We trigger them by keyboard shortcut
+# when one is readable — language-independent, because the shortcut
+# character (AXMenuItemCmdChar), not the localized menu title, drives
+# it — and fall back to clicking the English menu item.
 
-    Returns True if the app name was found on screen after typing.
+# Static AppleScript only (invariant 1): script text is fixed; the menu
+# item name travels as an osascript argument, never interpolated.
+_MENU_SHORTCUT_SCRIPT = '''
+on run(argv)
+    tell application "System Events"
+        tell process "iPhone Mirroring"
+            set cc to ""
+            set cm to ""
+            try
+                set cc to (value of attribute "AXMenuItemCmdChar" of menu item (item 1 of argv) of menu 1 of menu bar item "View" of menu bar 1) as text
+            end try
+            try
+                set cm to (value of attribute "AXMenuItemCmdModifiers" of menu item (item 1 of argv) of menu 1 of menu bar item "View" of menu bar 1) as text
+            end try
+            return cc & "," & cm
+        end tell
+    end tell
+end run
+'''
+
+_CLICK_MENU_ITEM_SCRIPT = '''
+on run(argv)
+    tell application "System Events"
+        tell process "iPhone Mirroring"
+            click menu item (item 1 of argv) of menu 1 of menu bar item "View" of menu bar 1
+        end tell
+    end tell
+end run
+'''
+
+
+def _run_osascript(script: str, args: list[str] | None = None) -> str:
+    """Run a static AppleScript; runtime values go through argv only."""
+    cmd = ["osascript", "-e", script]
+    if args:
+        cmd += ["--"] + args
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        raise GestureError(f"osascript failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def _view_menu_shortcut(item: str) -> tuple[str, int] | None:
+    """Read a View menu item's shortcut — read-only, never clicks.
+
+    Returns (cmdChar, cmdModifiers), or None when unreadable.
+    AXMenuItemCmdModifiers uses the Carbon menu-modifier bits: 0 means
+    the Command key alone (Spotlight is Cmd+3 here), 1 adds Shift,
+    8 means no key equivalent at all.
     """
-    pull_down_search()
-    import time
+    try:
+        raw = _run_osascript(_MENU_SHORTCUT_SCRIPT, [item])
+    except (GestureError, OSError, subprocess.TimeoutExpired):
+        return None
+    char, sep, mods = raw.partition(",")
+    if not sep:
+        return None
+    try:
+        return char, int(mods.strip())
+    except ValueError:  # "missing value" / empty — no usable shortcut
+        return None
 
+
+def _run_view_menu_command(item: str) -> bool:
+    """Trigger a View menu command of iPhone Mirroring.
+
+    Primary: the item's shortcut as a real Command chord (works on any
+    UI language). Fallback: clicking the English menu item. Returns
+    False when neither path works (app not running, localized menus…).
+    """
+    shortcut = _view_menu_shortcut(item)
+    if shortcut is not None:
+        char, mods = shortcut
+        keycode = inp.keycode_for_char(char) if mods == 0 else None
+        if keycode is not None:
+            try:
+                ensure_frontmost()
+                inp._cmd_chord(keycode)
+                return True
+            except (inp.InputError, WindowError):
+                pass  # fall through to clicking the menu item
+    try:
+        ensure_frontmost()
+        _run_osascript(_CLICK_MENU_ITEM_SCRIPT, [item])
+        return True
+    except (GestureError, OSError, subprocess.TimeoutExpired, WindowError):
+        return False
+
+
+def open_spotlight() -> bool:
+    """Open the phone's Spotlight search (View ▸ Spotlight).
+
+    Never a swipe: the old pull-down could be misread by iOS as a
+    long-press-drag that triggers home-screen edit mode (F13).
+    """
+    return _run_view_menu_command("Spotlight")
+
+
+def choose_app_hit(hits: list, name: str) -> vision.OCRHit | None:
+    """Pick the Spotlight result row for ``name`` from OCR hits.
+
+    iOS 26 draws the Spotlight search field at the BOTTOM of the screen
+    (ny ≈ 0.95) and echoes the typed query inside it, so a plain text
+    match finds the field itself. A result row must:
+      - equal ``name`` case-insensitively after stripping whitespace, and
+      - lie above the bottom search-field zone (ny < 0.88).
+    When several rows match, the topmost (smallest ny) wins. Returns
+    None when nothing qualifies.
+    """
+    want = name.strip().lower()
+    best = None
+    for hit in hits:
+        if hit.text.strip().lower() != want:
+            continue
+        if hit.ny >= 0.88:
+            continue  # the search field echoing the query
+        if best is None or hit.ny < best.ny:
+            best = hit
+    return best
+
+
+def open_app(name: str, *, spotlight_open: bool = False) -> bool:
+    """Open an app by name: Spotlight → type → OCR → tap the result row.
+
+    ``spotlight_open`` lets a caller that already ran open_spotlight()
+    itself (to tell "spotlight unavailable" apart from "app not found")
+    skip the internal call. Returns True when a row matching ``name``
+    was tapped; False when Spotlight could not be opened or no row
+    matched (after returning to the home screen).
+
+    The top hit is never opened with Return — it may belong to a
+    different app than the requested one.
+    """
+    if not spotlight_open and not open_spotlight():
+        return False
     time.sleep(1.0)
     inp.type_text(name)
     time.sleep(1.5)  # wait for Spotlight results
 
-    hit = vision.find(name)
+    hit = choose_app_hit(vision.read_screen(), name)
     if hit is None:
+        # Leave the phone tidy: back to the home screen (View ▸ Home Screen).
+        _run_view_menu_command("Home Screen")
         return False
     inp.tap(hit.nx, hit.ny)
     time.sleep(1.0)
