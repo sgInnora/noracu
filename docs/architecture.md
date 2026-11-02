@@ -39,17 +39,18 @@ A single persistent Playwright 1.58 session (one browser, one context), held in 
 
 ### iPhone layer (14 tools)
 
-imctl subprocess (`python3 -m imctl.cli`, PYTHONPATH pointing at imctl/src) drives iPhone Mirroring. **Experimental**: when imctl or its Python dependencies (pyobjc/Quartz) are absent, most tools return a structured `imctl unavailable` error rather than crashing the server (`phone_home`/`phone_app_switcher` still work via the iPhone Mirroring menu).
+The bundled imctl driver (`imctl/`, Python) runs as a subprocess (`<python3> -m imctl.cli`, PYTHONPATH = `imctl/src`, no bytecode written). The interpreter is `NORACU_PYTHON` or the first of `/opt/homebrew/bin/python3`, `/usr/local/bin/python3`, `python3`, `/usr/bin/python3` that imports pyobjc (Quartz, Vision, AppKit); probed once, lazily, on the first `phone_*` call. **Experimental**: when no such python exists, tools return a structured one-line `imctl unavailable` error with the install command rather than crashing the server (`phone_home`/`phone_app_switcher` still work via the iPhone Mirroring menu).
 
-- Observe: `phone_ocr` (coordinates + text), `phone_screenshot` (captures the Mirroring window region), `phone_find` (locates text)
+- Observe: `phone_ocr` (coordinates + text), `phone_screenshot` (captures the Mirroring window by CGWindow id, so a covered window still yields its own pixels; region capture is the fallback), `phone_find` (locates text)
 - Act: `phone_tap/longpress/swipe` (normalized 0-1 coordinates), `phone_home` / `phone_app_switcher` (iPhone Mirroring menu first, imctl gesture fallback), `phone_scroll`, `phone_type` (clipboard-based, IME-safe), `phone_key`
-- Session: `phone_status`, `phone_launch`, `phone_open` (Spotlight + OCR + tap)
+- Session: `phone_status` (running, window, window_id, onscreen, frontmost, paused), `phone_launch` (ensure running + frontmost, clicks Resume when the session shows "Connection Paused"), `phone_open` (Spotlight + OCR + tap)
 
 ## Configuration
 
 | Environment variable | Default | Description |
 |---|---|---|
-| `NORACU_IMCTL_DIR` | `../imctl` beside the repo root (`src/../../imctl`) | imctl checkout location |
+| `NORACU_PYTHON` | auto-probe (see iPhone layer) | python3 that runs the bundled driver; must import pyobjc |
+| `NORACU_IMCTL_DIR` | bundled `imctl/` (`src/../imctl`) | override the driver location (development only) |
 | `NORACU_CLICLICK` | `/opt/homebrew/bin/cliclick` | path to cliclick |
 | `NORACU_READ_ONLY` | unset (full control) | `=1` observation-only mode: a default-deny allowlist of 12 tools — the observe tools (`mac_screenshot`, `mac_ax_state`, `browser_snapshot`, `browser_screenshot`, `browser_read`, `phone_status`, `phone_screenshot`, `phone_ocr`, `phone_find`) plus browser session lifecycle (`browser_launch`, `browser_navigate`, `browser_close`). `browser_navigate` still issues a page-load request. All input-synthesis tools (click/drag/type/key/paste/tap/swipe/evaluate/…) are rejected |
 | `NORACU_DISABLE_EVAL` | unset (enabled) | `=1` makes `browser_evaluate` return an error on every call (kill switch for arbitrary JS execution; it stays listed) |
@@ -61,7 +62,7 @@ imctl subprocess (`python3 -m imctl.cli`, PYTHONPATH pointing at imctl/src) driv
 - Mac-layer actions spawn subprocesses (cliclick/osascript); per-action latency is tens of milliseconds (subprocess spawn; not benchmarked in this release) — a resident FFI process could cut it (see roadmap)
 - No axState diffing (every observation is a full snapshot)
 - Single browser session (no tab-level management)
-- The iPhone layer requires iPhone Mirroring to be online; OCR accuracy depends on screen content
+- The iPhone layer requires iPhone Mirroring to be online and the phone unlocked; OCR accuracy depends on screen content; `paused` detection reads the English "Connection Paused" label
 - macOS-only (Mac/iPhone layers); the Browser layer is cross-platform
 
 ## Roadmap (v2 candidates)

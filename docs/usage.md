@@ -161,7 +161,8 @@ model — don't let it override the task.
 | `NORACU_ALLOW_FILE_URL` | unset | `=1` allows `browser_navigate` to open `file://` |
 | `NORACU_DISABLE_AUTO_INSTALL` | unset | `=1` skips Chromium auto-install on first `browser_launch` |
 | `NORACU_CLICLICK` | `/opt/homebrew/bin/cliclick` | cliclick binary path |
-| `NORACU_IMCTL_DIR` | sibling `../imctl` | imctl location (leave unset unless you have imctl) |
+| `NORACU_PYTHON` | auto-probe | python3 for the bundled iPhone driver (must import pyobjc: Quartz, Vision, AppKit) |
+| `NORACU_IMCTL_DIR` | bundled `imctl/` | override the driver location (development only) |
 | `NORACU_CI` | unset | `=1` only affects `npm test` (skips hardware-gated checks) |
 
 ## 8. Error reference
@@ -174,10 +175,39 @@ model — don't let it override the task.
 | `ENOENT` cliclick | `brew install cliclick` or set `NORACU_CLICLICK` |
 | `… blocked by NORACU_READ_ONLY=1` | you're in observation-only mode — unset it to act |
 | `browser_evaluate disabled by NORACU_DISABLE_EVAL=1` | eval kill-switch is on |
-| `imctl unavailable …` | expected — imctl is not public; the iPhone layer is experimental |
+| `imctl unavailable: no python3 with pyobjc found …` | install pyobjc for a python3 (`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`) or set `NORACU_PYTHON` |
 
 ## 9. iPhone layer
 
-Experimental and gated by imctl (not public). There are no worked examples
-here; see the [iPhone layer section in the README](../README.md#iphone-layer-experimental)
-for exactly which tools work without imctl and what the structured error means.
+Experimental. The driver (imctl, Python) ships inside the package; the tools
+need iPhone Mirroring connected and a python3 with pyobjc (`NORACU_PYTHON`, or
+the automatic probe described in the README). A typical session:
+
+```
+phone_status
+→ {"running": true, "window": {...}, "window_id": 275104, "onscreen": true,
+   "frontmost": false, "paused": true}
+
+phone_launch          # brings the mirror to the front and clicks Resume
+→ iPhone Mirroring ready
+
+phone_status
+→ {... "paused": false ...}
+
+phone_ocr             # OCR of the Mirroring window (captured by window id)
+→ (0.50,0.06) 'Settings' [1.00]
+  (0.18,0.31) 'FaceTime' [1.00]
+  -- 2 hits
+
+phone_find {"text": "Settings"}
+→ (0.50,0.06) 'Settings' [1.00]
+
+phone_tap {"x": 0.50, "y": 0.06}
+→ tapped (0.5, 0.06)
+```
+
+Coordinates are normalized 0–1 over the mirror window. `phone_screenshot`
+returns a PNG of the window's own pixels even when another window covers it.
+If the phone is locked, unlock it on the phone; that step cannot be driven
+from the Mac. `phone_home` / `phone_app_switcher` go through the iPhone
+Mirroring menu and work without python when the mirror is connected.

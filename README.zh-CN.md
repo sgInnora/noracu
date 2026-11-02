@@ -23,9 +23,9 @@ For English, see [README.md](README.md).
 |---|---|---|---|
 | **Mac** | 9 个（`mac_*`） | cliclick、screencapture、JXA System Events | stable |
 | **Browser** | 12 个（`browser_*`） | Playwright（持久化 profile） | stable |
-| **iPhone** | 14 个（`phone_*`） | 经 imctl 驱动 iPhone Mirroring（尚未公开；2 个工具无需它也能用） | experimental |
+| **iPhone** | 14 个（`phone_*`） | 经随包附带的 imctl 驱动 iPhone Mirroring（Python + pyobjc） | experimental |
 
-iPhone 层是实验性的，依赖 imctl——一个尚未公开的伴生工具。没有 imctl 时，多数 `phone_*` 工具返回结构化错误；Mac 层和 Browser 层不受影响（`phone_home` / `phone_app_switcher` 在镜像已连接时仍可经 iPhone Mirroring 菜单工作）。observe/act 词汇表沿用 ChatGPT computer-use 推广的 action/observation 拆分思路，在开放的本地工具上重新实现。
+iPhone 层是实验性的，驱动 imctl 随包附带（在 `imctl/`）。它需要本 Mac 上有活动的 iPhone Mirroring 会话和一个带 pyobjc 的 python3；找不到这样的 python 时，`phone_*` 工具返回一行带安装命令的 `imctl unavailable` 错误，Mac 层和 Browser 层不受影响（`phone_home` / `phone_app_switcher` 即便如此仍可经 iPhone Mirroring 菜单工作）。observe/act 词汇表沿用 ChatGPT computer-use 推广的 action/observation 拆分思路，在开放的本地工具上重新实现。
 
 ## 为什么用 noracu
 
@@ -38,7 +38,7 @@ noracu 是本地的"手"，不是"脑"。决策由你的 MCP client（Claude Des
 - **真正能关掉的开关。** `NORACU_READ_ONLY=1`（只观察，默认拒绝）、`NORACU_DISABLE_EVAL=1`、以及默认封禁 `file://`。见 [安全](#安全)。
 - **可验证。** 34 项端到端检查（`npm test`）、CI 跑在 macos-latest、MIT 许可，整个 server 就一个文件：`src/server.mjs`。
 
-**不适合的场景：** 你需要多个浏览器标签页或会话（当前仅单会话）、你不在 macOS 上（Mac 与 iPhone 层仅限 macOS；Browser 层跨平台）、或你现在就要用 iPhone 层。如果你只需要浏览器自动化，playwright-mcp 有 noracu v0.1 还没有的 tab 管理和 selector API；noracu 的价值在于：同一个 agent 还得离开浏览器去操作 Mac 应用。
+**不适合的场景：** 你需要多个浏览器标签页或会话（当前仅单会话）、你不在 macOS 上（Mac 与 iPhone 层仅限 macOS；Browser 层跨平台）、或你现在就需要一个成品级的 iPhone 层（它已随包附带，但仍是实验性）。如果你只需要浏览器自动化，playwright-mcp 有 noracu v0.1 还没有的 tab 管理和 selector API；noracu 的价值在于：同一个 agent 还得离开浏览器去操作 Mac 应用。
 
 ## 快速开始
 
@@ -87,7 +87,7 @@ Claude Code：`claude mcp add noracu -- /绝对路径/TO/node /绝对路径/nora
 | `ENOENT` 提到 cliclick | `brew install cliclick`（或设 `NORACU_CLICLICK`） |
 | GUI 宿主报 `spawn node` / `npx` `ENOENT` | 配置里改用绝对 `node` 路径——nvm/volta/homebrew 的 shim 不在 GUI `PATH` 上 |
 | 首次 `browser_launch` 卡住 | 一次性 Chromium 下载；或自动安装被关闭（`NORACU_DISABLE_AUTO_INSTALL=1`）→ 执行 `npx playwright install chromium` |
-| `phone_*` 报 `imctl unavailable … missing Quartz` | 正常——imctl 未公开；忽略 phone 工具（两个菜单工具仍可用，见下） |
+| `phone_*` 报 `imctl unavailable: no python3 with pyobjc found` | 给某个 python3 装 pyobjc（`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`，通常选 Homebrew 的 python3）或设 `NORACU_PYTHON`——见[iPhone 层](#iphone-层实验性) |
 | 输入的文本被重新空格化（如 "no ra cu"） | 有 CJK 输入法在激活——用 `mac_paste` 代替 `mac_type` |
 | `element_no_longer_valid` | 快照超过 30 秒或界面变了——重跑 `mac_ax_state` / `browser_snapshot` 并用新索引 |
 
@@ -97,12 +97,15 @@ Claude Code：`claude mcp add noracu -- /绝对路径/TO/node /绝对路径/nora
 
 ## iPhone 层（实验性）
 
-iPhone 层有 14 个 `phone_*` 工具，经 **imctl**（尚未公开的伴生工具）驱动 iPhone Mirroring。
+14 个 `phone_*` 工具经 **imctl** 驱动 iPhone Mirroring——一个随本包附带的小型 Python 驱动（`imctl/`，MIT，约 1,000 行）。noracu 这边不需要再装别的；该层仍为实验性，因为它依赖在线的镜像会话和已解锁的手机。
 
-- **装了 imctl** 且 iPhone 已镜像到本 Mac 时：14 个工具全部可用。
-- **没有 imctl 时：** 多数 `phone_*` 返回结构化的 `imctl unavailable` 错误。有两个工具在镜像已连接时仍可用，因为它们走 iPhone Mirroring 菜单：`phone_home`（回主屏）和 `phone_app_switcher`（打开 App 切换器）。
+**要求：** macOS 15+ · iPhone Mirroring 已连接（同一 Apple 账户，蓝牙 + Wi-Fi 打开）· Accessibility + Screen Recording 授给宿主应用 · 一个能导入 pyobjc（Quartz、Vision、AppKit）的 python3。
 
-任何 `phone_*` 工具都需要本 Mac 上有活动的 iPhone Mirroring 会话。imctl 发布前，工具名和行为可能变化。除非你已从作者处拿到 imctl，否则不要设 `NORACU_IMCTL_DIR`。
+**Python：** 设置 `NORACU_PYTHON=/path/to/python3`，或由 noracu 在首次调用 `phone_*` 时依次探测一次 `/opt/homebrew/bin/python3`、`/usr/local/bin/python3`、`python3`、`/usr/bin/python3`。Apple 自带的 `/usr/bin/python3` 通常没有 pyobjc；常见可用配置是 Homebrew 的 python3 加 `python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`。都不可用时，每个 `phone_*` 工具返回一行错误——`imctl unavailable: no python3 with pyobjc found (tried …) — run …`——Mac 层与 Browser 层不受影响。
+
+**首次成功路径：** `phone_status` → 若 `paused` 为 `true`，先 `phone_launch`（置前并点击 Resume）→ `phone_screenshot` → `phone_ocr` → `phone_find` / `phone_tap`。截图与 OCR 按窗口 id 截取镜像窗口，即使被其它窗口遮挡，拿到的也是手机自身的画面。
+
+**已知限制：** 手机须处于解锁状态（解锁无法从 Mac 侧代做）；非英文 macOS 下 `paused` 读为 `null`；`phone_open` 依赖 Spotlight + OCR，标签被截断的 app 可能找不到。`phone_home` / `phone_app_switcher` 走 iPhone Mirroring 菜单，镜像已连接时无需 python 也能用。
 
 ## 环境变量
 
@@ -113,7 +116,8 @@ iPhone 层有 14 个 `phone_*` 工具，经 **imctl**（尚未公开的伴生工
 | `NORACU_ALLOW_FILE_URL` | 未设 | `=1` 允许 `browser_navigate` 打开 `file://` URL（默认封禁） |
 | `NORACU_DISABLE_AUTO_INSTALL` | 未设 | `=1` 跳过首次 `browser_launch` 的 Chromium 自动安装 |
 | `NORACU_CLICLICK` | `/opt/homebrew/bin/cliclick` | cliclick 二进制路径 |
-| `NORACU_IMCTL_DIR` | 同级 `../imctl` | imctl 检出位置（没有 imctl 就别设） |
+| `NORACU_PYTHON` | 自动探测 | 运行随包 iPhone 驱动的 python3；须能导入 pyobjc（Quartz、Vision、AppKit）。未设置时依次尝试 `/opt/homebrew/bin/python3`、`/usr/local/bin/python3`、`python3`、`/usr/bin/python3` |
+| `NORACU_IMCTL_DIR` | 包内 `imctl/` | 覆盖驱动位置（仅开发用） |
 
 ## 安全
 

@@ -23,9 +23,9 @@ One MCP server, three control surfaces:
 |---|---|---|---|
 | **Mac** | 9 (`mac_*`) | cliclick, screencapture, JXA System Events | stable |
 | **Browser** | 12 (`browser_*`) | Playwright (persistent profile) | stable |
-| **iPhone** | 14 (`phone_*`) | iPhone Mirroring via imctl (not public; 2 tools work without it) | experimental |
+| **iPhone** | 14 (`phone_*`) | iPhone Mirroring via the bundled imctl driver (Python + pyobjc) | experimental |
 
-The iPhone layer is experimental and gated by imctl, a companion tool that is not yet public. Without imctl, most `phone_*` tools return a structured error; the Mac and browser layers are unaffected (`phone_home` / `phone_app_switcher` still work through the iPhone Mirroring menu when a phone is connected). The observe/act vocabulary follows the action/observation split popularized by ChatGPT's computer-use, re-implemented on open local tooling.
+The iPhone layer is experimental and ships with its driver, imctl (bundled in `imctl/`). It needs an active iPhone Mirroring session on this Mac and a python3 with pyobjc; when no such python is found, `phone_*` tools return a one-line `imctl unavailable` error with the install command, and the Mac and browser layers are unaffected (`phone_home` / `phone_app_switcher` work through the iPhone Mirroring menu even then). The observe/act vocabulary follows the action/observation split popularized by ChatGPT's computer-use, re-implemented on open local tooling.
 
 ## Why noracu
 
@@ -38,7 +38,7 @@ noracu is the local hands, not the model. Your MCP client (Claude Desktop, Claud
 - **Off switches that are actually off.** `NORACU_READ_ONLY=1` (observation-only, default-deny), `NORACU_DISABLE_EVAL=1`, and `file://` blocked by default. See [Security](#security).
 - **Verifiable.** 34 end-to-end checks (`npm test`), CI on macos-latest, MIT, and the whole server is one file: `src/server.mjs`.
 
-**Not a good fit if** you need multiple browser tabs or sessions (single session for now), you're not on macOS (the Mac and iPhone layers are macOS-only; the browser layer is cross-platform), or you need the iPhone layer today. If you only need browser automation, playwright-mcp has tab management and selector APIs that noracu v0.1 lacks; noracu is for when one agent also has to leave the browser and drive Mac apps.
+**Not a good fit if** you need multiple browser tabs or sessions (single session for now), you're not on macOS (the Mac and iPhone layers are macOS-only; the browser layer is cross-platform), or you need a finished iPhone layer today (it ships, but experimental). If you only need browser automation, playwright-mcp has tab management and selector APIs that noracu v0.1 lacks; noracu is for when one agent also has to leave the browser and drive Mac apps.
 
 ## Quickstart
 
@@ -87,7 +87,7 @@ Then **quit the host app completely (including any menu-bar icon) and reopen it.
 | `ENOENT` mentioning cliclick | `brew install cliclick` (or set `NORACU_CLICLICK`) |
 | `spawn node` / `npx` `ENOENT` from a GUI host | use an absolute `node` path in the config — nvm/volta/homebrew shims are not on the GUI `PATH` |
 | `browser_launch` hangs on first use | one-time Chromium download; or auto-install disabled (`NORACU_DISABLE_AUTO_INSTALL=1`) → run `npx playwright install chromium` |
-| `phone_*` says `imctl unavailable … missing Quartz` | expected — imctl is not public; ignore the phone tools (two menu tools still work, see below) |
+| `phone_*` says `imctl unavailable: no python3 with pyobjc found` | install pyobjc for a python3 (`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`; Homebrew python3 is the usual choice) or set `NORACU_PYTHON` — see [iPhone layer](#iphone-layer-experimental) |
 | Typed text comes out re-spaced (e.g. "no ra cu") | a CJK input method is active — use `mac_paste` instead of `mac_type` |
 | `element_no_longer_valid` | the snapshot is older than 30 s or the UI changed — re-run `mac_ax_state` / `browser_snapshot` and use a fresh index |
 
@@ -97,12 +97,15 @@ Full worked examples: [docs/usage.md](docs/usage.md).
 
 ## iPhone layer (experimental)
 
-The iPhone layer has 14 `phone_*` tools that drive iPhone Mirroring through **imctl**, a companion tool that is not yet public.
+The 14 `phone_*` tools drive iPhone Mirroring through **imctl**, a small Python driver that ships inside this package (`imctl/`, MIT, about 1,000 lines). Nothing else to install on noracu's side; the layer stays experimental because it depends on a live mirror and an unlocked phone.
 
-- **With imctl** installed and an iPhone mirrored to this Mac: all 14 tools are available.
-- **Without imctl:** most `phone_*` tools return a structured `imctl unavailable` error. Two tools still work when the mirror is connected, because they go through the iPhone Mirroring menu: `phone_home` (Home Screen) and `phone_app_switcher` (App Switcher).
+**Requirements:** macOS 15+ · iPhone Mirroring connected (same Apple Account, Bluetooth + Wi-Fi on) · Accessibility + Screen Recording granted to the host app · a python3 that imports pyobjc (Quartz, Vision, AppKit).
 
-No `phone_*` tool runs without an active iPhone Mirroring session on this Mac. Tool names and behavior may change before imctl is released. Do not set `NORACU_IMCTL_DIR` unless you already have imctl from its author.
+**Python:** set `NORACU_PYTHON=/path/to/python3`, or let noracu probe `/opt/homebrew/bin/python3`, `/usr/local/bin/python3`, `python3`, `/usr/bin/python3` once, on the first `phone_*` call. Apple's `/usr/bin/python3` usually lacks pyobjc; the common working setup is Homebrew's python3 plus `python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`. When nothing qualifies, every `phone_*` tool returns one line — `imctl unavailable: no python3 with pyobjc found (tried …) — run …` — and the Mac and browser layers are unaffected.
+
+**First success:** `phone_status` → if `paused` is `true`, `phone_launch` (brings the mirror to the front and clicks Resume) → `phone_screenshot` → `phone_ocr` → `phone_find` / `phone_tap`. Screenshots and OCR capture the Mirroring window by window id, so they are the phone's own pixels even when another window covers the mirror.
+
+**Known limits:** the iPhone must be unlocked (unlocking cannot be driven from the Mac); `paused` reads `null` on non-English macOS; `phone_open` relies on Spotlight + OCR and can miss apps whose labels are truncated. `phone_home` / `phone_app_switcher` go through the iPhone Mirroring menu and work without python when the mirror is connected.
 
 ## Environment variables
 
@@ -113,7 +116,8 @@ No `phone_*` tool runs without an active iPhone Mirroring session on this Mac. T
 | `NORACU_ALLOW_FILE_URL` | unset | `=1` lets `browser_navigate` open `file://` URLs (blocked by default) |
 | `NORACU_DISABLE_AUTO_INSTALL` | unset | `=1` skips the Chromium auto-install on first `browser_launch` |
 | `NORACU_CLICLICK` | `/opt/homebrew/bin/cliclick` | cliclick binary path |
-| `NORACU_IMCTL_DIR` | sibling `../imctl` | imctl checkout location (do not set unless you have imctl) |
+| `NORACU_PYTHON` | auto-probe | python3 used for the bundled iPhone driver; must import pyobjc (Quartz, Vision, AppKit). Unset → first working of `/opt/homebrew/bin/python3`, `/usr/local/bin/python3`, `python3`, `/usr/bin/python3` |
+| `NORACU_IMCTL_DIR` | bundled `imctl/` | override the driver location (development only) |
 
 ## Security
 
