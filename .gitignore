@@ -1,0 +1,18 @@
+node_modules/
+*.png
+.DS_Store
+.env
+*.log
+
+# internal working docs (not for public repo)
+docs/analysis/
+docs/chatgpt-re-findings.md
+
+# demo recording temp
+.demo-video/
+
+# npm pack output
+*.tgz
+
+# Cowork deliverables (local only)
+OUTPUTS/

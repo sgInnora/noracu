@@ -1,0 +1,66 @@
+name: Bug report
+description: Report something that behaves incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Output of `sw_vers -productVersion`
+      placeholder: "e.g. 15.2"
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      description: Output of `node -v`
+      placeholder: "e.g. v22.14.0"
+    validations:
+      required: true
+  - type: input
+    id: mcp-client
+    attributes:
+      label: MCP client
+      description: Which app hosts the MCP client?
+      placeholder: "e.g. Claude Desktop, Claude Code, Cursor, pi"
+    validations:
+      required: true
+  - type: dropdown
+    id: permissions
+    attributes:
+      label: Are Accessibility and Screen Recording permissions granted to the MCP host app?
+      options:
+        - "Yes, both"
+        - "Only one"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Also tell us what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: npm-test
+    attributes:
+      label: Output of `npm test`
+      description: |
+        Clone the repo, run `npm install && npm test`, and paste the tail of
+        the output. On macOS without local permissions, prefix with
+        `NORACU_CI=1`. This will be formatted as code.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Screenshots, tool-call transcripts, MCP config snippets.

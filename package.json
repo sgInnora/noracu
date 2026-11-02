@@ -1,0 +1,57 @@
+{
+  "name": "noracu",
+  "version": "0.1.0",
+  "description": "Local, no-cloud MCP server for macOS and Playwright computer-use, plus experimental iPhone. Acts by element index.",
+  "type": "module",
+  "main": "src/server.mjs",
+  "bin": {
+    "noracu": "src/server.mjs"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node test/e2e.mjs",
+    "test:ci": "NORACU_CI=1 node test/e2e.mjs",
+    "prepublishOnly": "node --check src/server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "computer-use",
+    "playwright",
+    "macos",
+    "macos-automation",
+    "browser-automation",
+    "claude",
+    "claude-desktop",
+    "claude-code",
+    "cursor"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.58.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sgInnora/noracu.git"
+  },
+  "homepage": "https://github.com/sgInnora/noracu#readme",
+  "bugs": {
+    "url": "https://github.com/sgInnora/noracu/issues"
+  },
+  "author": "sgInnora",
+  "files": [
+    "src",
+    "docs/architecture.md",
+    "docs/tools.md",
+    "docs/usage.md",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ]
+}
