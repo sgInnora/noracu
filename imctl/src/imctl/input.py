@@ -33,6 +33,7 @@ from Quartz import (
     kCGEventLeftMouseDown,
     kCGEventLeftMouseUp,
     kCGEventLeftMouseDragged,
+    kCGEventMouseMoved,
     kCGEventSourceStateHIDSystemState,
     kCGHIDEventTap,
     kCGMouseButtonLeft,
@@ -41,6 +42,7 @@ from Quartz import (
     CGEventSetFlags,
 )
 
+from . import window
 from .window import WindowBounds, ensure_frontmost, get_bounds
 
 TAP_INTERVAL_S = 0.05
@@ -52,6 +54,28 @@ SWIPE_DEFAULT_MS = 300
 
 class InputError(RuntimeError):
     """Raised when a synthesized input event cannot be delivered."""
+
+
+class FocusLost(InputError):
+    """Raised when iPhone Mirroring stopped being the frontmost app (F26).
+
+    The frontmost check runs right before every synthesized event; a
+    keystroke landing in whatever app took the foreground in the meantime
+    (a Cmd+V pasted into a terminal, a Return running a command) is the
+    failure this prevents.
+    """
+
+
+# F26: consulted right before every synthesized event. Module-level so
+# tests can swap it; window.is_frontmost asks System Events afresh on
+# every call (F30: an in-process NSWorkspace answer is a stale snapshot).
+_focus_check = window.is_frontmost
+
+
+def _require_focus() -> None:
+    """Refuse to send any event unless iPhone Mirroring is still frontmost (F26)."""
+    if not _focus_check():
+        raise FocusLost("iPhone Mirroring is not the frontmost app")
 
 
 def _source():
@@ -78,28 +102,21 @@ def scroll_trackpad(total_px: float, nx: float = 0.5, ny: float = 0.6,
     below. The cursor is moved over the mirror first, because scroll events go to
     the window under the cursor.
     """
-    from Quartz import (CGEventCreateScrollWheelEvent, CGEventSetLocation,
-                        kCGEventMouseMoved, kCGScrollEventUnitPixel,
-                        kCGScrollWheelEventIsContinuous, kCGScrollWheelEventScrollPhase)
-
     ensure_frontmost()
     b = bounds or get_bounds()
     x, y = b.denormalize(nx, ny)
     src = _source()
+    _require_focus()  # F26: before the first event
     _mouse_event(kCGEventMouseMoved, x, y, src)
     time.sleep(0.12)
     deltas = scroll_steps(total_px)
     last = len(deltas) - 1
+    sent = 1  # events posted so far (the mouse-moved above)
     for i, d in enumerate(deltas):
-        event = CGEventCreateScrollWheelEvent(src, kCGScrollEventUnitPixel, 1, d)
-        if event is None:
-            raise InputError("CGEventCreateScrollWheelEvent returned None")
-        CGEventSetLocation(event, (x, y))
-        CGEventSetIntegerValueField(event, kCGScrollWheelEventIsContinuous, 1)
-        # NSEvent phases: 1 = began, 2 = changed, 4 = ended
-        CGEventSetIntegerValueField(event, kCGScrollWheelEventScrollPhase,
-                                    1 if i == 0 else (4 if i == last else 2))
-        CGEventPost(kCGHIDEventTap, event)
+        if sent % 6 == 0:
+            _require_focus()  # F26: every 6 events; drop the rest on focus loss
+        _scroll_event(src, d, x, y, 1 if i == 0 else (4 if i == last else 2))
+        sent += 1
         time.sleep(0.016)
 
 
@@ -119,6 +136,29 @@ def _key_event(keycode: int, down: bool, source) -> None:
     CGEventPost(kCGHIDEventTap, event)
 
 
+def _scroll_event(source, delta: int, x: float | None = None, y: float | None = None,
+                  phase: int | None = None) -> None:
+    """Post one pixel-unit vertical scroll-wheel event.
+
+    scroll_trackpad passes the cursor position and the NSEvent phase
+    (continuous gesture; 1 = began, 2 = changed, 4 = ended); scroll()
+    posts a bare wheel event with neither.
+    """
+    from Quartz import (CGEventCreateScrollWheelEvent, CGEventSetLocation,
+                        kCGScrollEventUnitPixel, kCGScrollWheelEventIsContinuous,
+                        kCGScrollWheelEventScrollPhase)
+
+    event = CGEventCreateScrollWheelEvent(source, kCGScrollEventUnitPixel, 1, delta)
+    if event is None:
+        raise InputError("CGEventCreateScrollWheelEvent returned None")
+    if x is not None:
+        CGEventSetLocation(event, (x, y))
+    if phase is not None:
+        CGEventSetIntegerValueField(event, kCGScrollWheelEventIsContinuous, 1)
+        CGEventSetIntegerValueField(event, kCGScrollWheelEventScrollPhase, phase)
+    CGEventPost(kCGHIDEventTap, event)
+
+
 # --- Pointer primitives ---------------------------------------------------
 
 
@@ -128,6 +168,7 @@ def tap(nx: float = 0.5, ny: float = 0.5, bounds: WindowBounds | None = None) ->
     b = bounds or get_bounds()
     x, y = b.denormalize(nx, ny)
     src = _source()
+    _require_focus()  # F26: before the first event
     _mouse_event(kCGEventLeftMouseDown, x, y, src)
     time.sleep(TAP_INTERVAL_S)
     _mouse_event(kCGEventLeftMouseUp, x, y, src)
@@ -140,6 +181,7 @@ def long_press(nx: float = 0.5, ny: float = 0.5, duration_s: float = LONG_PRESS_
     b = bounds or get_bounds()
     x, y = b.denormalize(nx, ny)
     src = _source()
+    _require_focus()  # F26: before the press-down
     _mouse_event(kCGEventLeftMouseDown, x, y, src)
     time.sleep(duration_s)
     _mouse_event(kCGEventLeftMouseUp, x, y, src)
@@ -168,6 +210,7 @@ def swipe(from_x: float, from_y: float, to_x: float, to_y: float,
     src = _source()
     step_delay = (duration_ms / 1000.0) / SWIPE_STEPS
 
+    _require_focus()  # F26: before the first event
     _mouse_event(kCGEventLeftMouseDown, x0, y0, src)
     time.sleep(0.02)
 
@@ -192,19 +235,13 @@ def swipe(from_x: float, from_y: float, to_x: float, to_y: float,
 def scroll(dy_pixels: int, nx: float = 0.5, ny: float = 0.5,
            bounds: WindowBounds | None = None) -> None:
     """Scroll vertically at a position. Positive dy scrolls up."""
-    from Quartz import CGEventCreateScrollWheelEvent
-
     ensure_frontmost()
     b = bounds or get_bounds()
     x, y = b.denormalize(nx, ny)
     src = _source()
+    _require_focus()  # F26: before the only event
     # Axis 1 = vertical; pixel units; negative = scroll down (content up).
-    event = CGEventCreateScrollWheelEvent(
-        src, kCGScrollEventUnitPixel, 1, dy_pixels
-    )
-    if event is None:
-        raise InputError("CGEventCreateScrollWheelEvent returned None")
-    CGEventPost(kCGHIDEventTap, event)
+    _scroll_event(src, dy_pixels)
 
 
 # --- Keyboard primitives ----------------------------------------------------
@@ -237,7 +274,7 @@ def keycode_for_char(char: str) -> int | None:
     return _ANSI_KEYCODES.get(char.lower())
 
 
-def _cmd_chord(keycode: int) -> None:
+def _cmd_chord(keycode: int, before_key=None) -> None:
     """Send a real Command chord: ⌘ down → key down → key up → ⌘ up.
 
     iPhone Mirroring forwards the *state* of the physical modifier
@@ -247,8 +284,15 @@ def _cmd_chord(keycode: int) -> None:
     The chord therefore presses the Command key itself, keeps the
     flag set on every event, and releases Command last. ~30ms between
     steps, all events from one shared source.
+
+    ``before_key`` runs after the focus checks, right before the first
+    event: the caller's last chance to call the chord off by raising —
+    nothing is posted then (F35).
     """
     ensure_frontmost()
+    _require_focus()  # F26: before the chord's first event
+    if before_key is not None:
+        before_key()
     src = _source()
 
     def post(code: int, down: bool, flags: int) -> None:
@@ -274,44 +318,318 @@ def press_key(key: str) -> None:
     if key not in keymap:
         raise InputError(f"unsupported key: {key!r} (supported: {sorted(keymap)})")
     src = _source()
+    _require_focus()  # F26: before the key-down
     _key_event(keymap[key], True, src)
     time.sleep(0.02)
     _key_event(keymap[key], False, src)
 
 
-def type_text(text: str) -> None:
-    """Type text via clipboard paste (IME-safe).
+class ClipboardChanged(InputError):
+    """Raised when something else wrote the pasteboard between type_text()'s
+    own write and Cmd+V (F35): another app, or Universal Clipboard bringing
+    a copy over from another device. Cmd+V would paste THEIR content into
+    the phone, so nothing is sent and their newer content is left alone.
+    """
+
+
+class PendingRestore:
+    """A clipboard restore type_text() could not license itself (F33).
+
+    Holds the user's saved clipboard after a one-character paste whose
+    checks did not see the character arrive in time — on the device the
+    paste once showed up 8-10 s after Cmd+V. offer() takes later screen
+    reads and hands each to ``confirm`` (type_text uses a fresh
+    verify.RepeatedSighting: the same new position in two separate reads
+    against the still pre-paste baseline); once it confirms, the user's
+    clipboard goes back, under the same changeCount rule as type_text().
+    Nothing else restores it.
+    """
+
+    def __init__(self, pasteboard, saved, saved_change, confirm, *, sent_at,
+                 clock=time.monotonic, min_hold_s: float = 0.3):
+        self._pasteboard = pasteboard
+        self._saved = saved
+        self._saved_change = saved_change
+        self._confirm = confirm
+        self._sent_at = sent_at
+        self._clock = clock
+        self._min_hold_s = min_hold_s
+        self.done = False
+
+    def offer(self, hits) -> bool:
+        """Hand ``hits`` to the evidence; restore once it confirms.
+
+        Returns True only on the call that put the user's clipboard back.
+        """
+        if self.done or not self._confirm(hits):
+            return False
+        if self._clock() - self._sent_at < self._min_hold_s:
+            return False
+        self.done = True
+        if self._pasteboard.changeCount() != self._saved_change + 1:
+            return False  # something else wrote the pasteboard: never restore
+        self._pasteboard.clearContents()
+        if self._saved is not None:
+            self._pasteboard.setData_forType_(self._saved, "public.utf8-plain-text")
+        return True
+
+
+def type_text(text: str, *, replace: bool = False, pasteboard=None,
+              chord=None, before_check=None, ocr_check=None,
+              sleep=time.sleep, clock=time.monotonic,
+              timeout_s: float = 2.5, poll_s: float = 0.15,
+              min_hold_s: float = 0.3, pending: list | None = None) -> bool:
+    """Type text via clipboard paste (IME-safe), confirmed on screen.
 
     Direct CGEvent keystroke synthesis breaks under CJK IMEs and is
     slow for long strings. Instead we:
       1. save the user's pasteboard,
       2. write the text,
       3. Cmd+V into the focused field,
-      4. restore the pasteboard.
+      4. wait until the paste is visible on screen,
+      5. only then restore the pasteboard.
+
+    Step 4 yields two SEPARATE judgments (F18, tightened in G26b):
+
+    ``landed`` — did the paste show up? This decides the return
+    value. The whole-window luma frame diff is the fast path; when
+    it never fires within ``timeout_s``, a single OCR probe is the
+    fallback. Either one confirms the paste.
+
+    ``restore_ok`` — may the user's clipboard be restored? ONLY an
+    OCR hit grants this. The frame diff merely proves "the picture
+    changed": a notification banner sliding in, a page animation, a
+    redraw near the cursor all trip it without our text being on
+    screen. iPhone Mirroring reads the Mac pasteboard
+    asynchronously some time AFTER the Cmd+V keystroke, so
+    restoring on the frame diff alone could hand a late read the
+    user's original clipboard (possibly a password or private
+    text). When OCR does not see the text (too short, cropped,
+    low contrast) the tool still returns True but the clipboard is
+    left holding ``text``: we prefer the user's clipboard holding
+    the typed text over any chance of the user's original clipboard
+    being pasted into the phone.
+
+    The restore therefore happens only when the paste landed, OCR
+    saw the text, at least ``min_hold_s`` has passed since Cmd+V
+    (the phone's asynchronous read must see the paste first), and
+    the changeCount shows nothing else touched the pasteboard.
+
+    Errors: anything that raises before the Cmd+V chord posts its
+    first event (a lost focus, a capture error, ClipboardChanged)
+    means the phone never received a paste, so the user's clipboard
+    is restored (same changeCount rule) and the original exception
+    is re-raised. From the chord's last check on, the phone may read
+    the pasteboard at any moment, so the clipboard is NEVER restored
+    after an error there and the original exception is re-raised.
+
+    Capture failures are not errors (F25): when changed() or
+    ocr_check() cannot get the mirroring window's pixels (window
+    offscreen, blank transition frame, capture by id failed), that
+    poll counts as "no change" and the OCR probe as "not seen" —
+    the result can only be False (type_not_confirmed), never a
+    false confirmation read off another window.
+
+    Returns True when the paste was confirmed; False when neither
+    check passed within ``timeout_s`` — then the clipboard still
+    holds ``text`` and the user's previous clipboard is NOT
+    restored.
+
+    ``replace=True`` sends Cmd+A before the paste, replacing the
+    focused field's content. Like clear_text() (F17), Cmd+A targets
+    whatever field currently has focus on the phone: if the focus is
+    not the intended input, this overwrites content elsewhere. Use it
+    only when the caller has established the focus (e.g. guarded by
+    a preceding expect/verify step).
+
+    ``pending`` (F33): when a one-character paste was not licensed for a
+    restore here — not seen within the checks, or landed while OCR stayed
+    blind — and the caller passes a list, a PendingRestore is appended to
+    it. The caller offers it the screen reads it makes anyway; it restores
+    only on the evidence the checks above require (the same new position
+    in two separate reads), under the same changeCount rule. Longer texts
+    never get one: without a pre-paste read, text already on screen could
+    pose as the paste.
 
     Requires the calling terminal to have Accessibility permission
     (same as every other imctl input).
     """
     from AppKit import NSPasteboard
 
+    from . import verify, vision
+
     ensure_frontmost()
-    pb = NSPasteboard.generalPasteboard()
-    saved = pb.dataForType_("public.utf8-plain-text")
-    saved_change = pb.changeCount()
+    if chord is None:
+        chord = _cmd_chord
+    if pasteboard is None:
+        pasteboard = NSPasteboard.generalPasteboard()
+    # F27: a single character is invisible to the default OCR probe
+    # (screen_shows_text never matches it) and may already be on screen, so
+    # the default checks wait for a still screen, read it with the
+    # minimumTextHeight sweep before Cmd+V, and license a restore only when
+    # the character shows up at the same NEW position in two separate
+    # reads, looking for up to 4 s (the paste can land while Spotlight
+    # redraws its results; the field echo blinks with the cursor). A screen
+    # that never holds still gets no baseline and so no restore; otherwise
+    # too the clipboard keeps holding ``text``, as before.
+    single = verify.is_short_text(text, limit=1)
+    sweep_before = [None]
 
+    def sweep_read():
+        return vision.read_screen(language_correction=False, sweep=True)
+
+    def defer_restore():
+        # F33: hand the caller what it needs to restore later, on evidence.
+        before = sweep_before[0]
+        if pending is None or not single or before is None:
+            return
+
+        pending.append(PendingRestore(pasteboard, saved, saved_change,
+                                      verify.RepeatedSighting(text, before).add,
+                                      sent_at=t0, clock=clock,
+                                      min_hold_s=min_hold_s))
+
+    pre_read = single and before_check is None
+    if before_check is None:
+        def before_check():
+            # Baseline luma is captured here, right before Cmd+V, so the
+            # paste itself is the change we look for.
+            baseline = verify.window_luma()
+
+            def changed() -> bool:
+                return (
+                    verify.mean_abs_diff(baseline, verify.window_luma())
+                    >= verify.TYPE_MIN_DIFF
+                )
+
+            return changed
+    if ocr_check is None:
+        def ocr_check() -> bool:
+            if single:
+                if sweep_before[0] is None:
+                    return False
+                evidence = verify.RepeatedSighting(text, sweep_before[0])
+                deadline = clock() + 4.0
+                while True:
+                    if evidence.add(sweep_read()):
+                        return True
+                    if clock() >= deadline:
+                        return False
+                    sleep(0.3)
+            return verify.screen_shows_text(text, vision.read_screen)
+
+    sent = [False]  # True from the moment a Cmd+V may be on its way
+    saved = None
+    saved_change = None
     try:
-        pb.clearContents()
-        pb.setString_forType_(text, "public.utf8-plain-text")
-        time.sleep(0.05)
+        if replace:
+            chord(_VK_A)  # select the focused field's content first (see docstring)
+            sleep(0.05)
 
-        _cmd_chord(_VK_V)  # real ⌘ chord — flags alone reach the phone as "v" (F14)
-        time.sleep(0.15)  # let the paste land before restoring
-    finally:
-        # Restore the user's clipboard only if nothing else changed it.
-        if pb.changeCount() == saved_change + 1:
-            pb.clearContents()
-            if saved is not None:
-                pb.setData_forType_(saved, "public.utf8-plain-text")
+        if pre_read:
+            # F27: the pre-paste sweep for a single character, taken on a
+            # still screen only (a mid-transition read could miss a label
+            # that is already there and later pass it off as the paste).
+            # It runs before the pasteboard write so the stretch between our
+            # write and Cmd+V (F35) stays short.
+            try:
+                if verify.wait_still(sleep=sleep, clock=clock):
+                    sweep_before[0] = sweep_read()
+            except Exception as exc:
+                if not verify.is_capture_error(exc):
+                    raise
+                sweep_before[0] = None
+
+        saved = pasteboard.dataForType_("public.utf8-plain-text")
+        saved_change = pasteboard.changeCount()
+
+        pasteboard.clearContents()
+        pasteboard.setString_forType_(text, "public.utf8-plain-text")
+        sleep(0.05)
+
+        changed = before_check()
+
+        def last_check():
+            # F35: the last look at the pasteboard, after the chord's focus
+            # round-trips and right before its first event: anything else
+            # that wrote it since our own write would be pasted instead.
+            if pasteboard.changeCount() != saved_change + 1:
+                raise ClipboardChanged(
+                    "another app or device changed the clipboard before the "
+                    "paste; nothing was typed and the clipboard was left as it is")
+            # From here on a paste may be on its way: an error from now on
+            # must never put the user's clipboard back.
+            sent[0] = True
+
+        # real ⌘ chord — flags alone reach the phone as "v" (F14)
+        chord(_VK_V, before_key=last_check)
+        t0 = clock()
+
+        # landed: did the paste show up on screen? (decides the return
+        # value; the frame diff is only the fast path, never a restore
+        # license)
+        landed = False
+        while clock() - t0 < timeout_s:
+            sleep(poll_s)
+            try:
+                if changed():
+                    landed = True
+                    break
+            except Exception as exc:
+                # F25: a capture failure is "no change observed this
+                # round", never proof of change — keep polling. Other
+                # errors still propagate (after Cmd+V: no restore).
+                if not verify.is_capture_error(exc):
+                    raise
+
+        # restore_ok: only OCR seeing the pasted text licenses a
+        # restore. When the frame-diff window timed out, this same
+        # probe is also the confirmation — one call covers both, and
+        # its result is reused rather than re-checked. A capture
+        # failure counts as "not seen" (F25): the paste stays
+        # unconfirmed rather than trusting another window's pixels.
+        try:
+            restore_ok = ocr_check()
+        except Exception as exc:
+            if not verify.is_capture_error(exc):
+                raise
+            restore_ok = False
+        if not landed:
+            landed = restore_ok
+
+        if not landed:
+            # F18 invariant: never restore unconfirmed — a late paste
+            # must at worst repeat `text`, never the user's own clipboard.
+            defer_restore()
+            return False
+
+        if restore_ok:
+            # Hold the paste long enough for the asynchronous
+            # pasteboard read before putting the user's data back.
+            elapsed = clock() - t0
+            if elapsed < min_hold_s:
+                sleep(min_hold_s - elapsed)
+            # Restore the user's clipboard only if nothing else changed it.
+            if pasteboard.changeCount() == saved_change + 1:
+                pasteboard.clearContents()
+                if saved is not None:
+                    pasteboard.setData_forType_(saved, "public.utf8-plain-text")
+        else:
+            # landed but OCR is blind to it (short/cropped text): success,
+            # but the clipboard keeps `text` — see the docstring's tradeoff.
+            defer_restore()
+        return True
+    except BaseException:
+        # Before Cmd+V the phone never got a paste command, so the
+        # user's clipboard can safely go back (changeCount rule).
+        # After Cmd+V a late asynchronous read may still happen — never
+        # restore then. Either way the original exception propagates.
+        if not sent[0] and saved_change is not None:
+            if pasteboard.changeCount() == saved_change + 1:
+                pasteboard.clearContents()
+                if saved is not None:
+                    pasteboard.setData_forType_(saved, "public.utf8-plain-text")
+        raise
 
 
 def clear_text() -> None:
@@ -320,6 +638,7 @@ def clear_text() -> None:
     _cmd_chord(_VK_A)  # Cmd+A — real chord, same reason as type_text
     time.sleep(0.05)
     src = _source()
+    _require_focus()  # F26: re-check between Cmd+A and Delete
     _key_event(_VK_DELETE, True, src)
     time.sleep(0.02)
     _key_event(_VK_DELETE, False, src)

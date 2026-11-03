@@ -21,7 +21,7 @@ import { spawn, execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
@@ -32,6 +32,36 @@ const IMCTL_DIR = process.env.NORACU_IMCTL_DIR || join(__dirname, "..", "imctl")
 const CLICLICK = process.env.NORACU_CLICLICK || "/opt/homebrew/bin/cliclick";
 if (!existsSync(IMCTL_DIR)) {
   process.stderr.write(`[noracu] warning: imctl not found at ${IMCTL_DIR} — phone_* tools will fail. Set NORACU_IMCTL_DIR.\n`);
+}
+
+// ── F23：进程/磁盘漂移检测（server 进程比磁盘上的文件旧时提示调用方）──
+// MCP 客户端（如 Claude Desktop）会把 server 进程常驻数小时；磁盘上的 package.json /
+// src/server.mjs 升级后，进程里跑的仍是启动时加载的旧代码（旧版本号、旧工具描述），
+// 实际形成"旧 server + 新 imctl 驱动"混跑，调用方照旧描述传参会踩坑（F20 的根因之一）。
+// 注意：git 切分支同样会改写 src/server.mjs 的内容 —— 这时下面的提示同样成立，因为
+// 进程里的代码确实与磁盘不同。启动时快照一次 LOADED，每次 tools/call 现读磁盘对比
+// （两个文件都很小，不做缓存）。
+const PKG_JSON = join(__dirname, "..", "package.json");
+const SERVER_MJS = join(__dirname, "server.mjs"); // 本文件
+const sha256OfFile = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
+const LOADED = (() => {
+  try {
+    return { version: JSON.parse(readFileSync(PKG_JSON, "utf8")).version, sha256: sha256OfFile(SERVER_MJS), at: new Date().toISOString() };
+  } catch {
+    return { version: "0.0.0", sha256: null, at: new Date().toISOString() };
+  }
+})();
+
+// 版本或哈希任一与磁盘不同 → 一行英文提示；读磁盘失败或一致 → null（不报错、不影响工具执行）
+function staleServerNote() {
+  try {
+    const diskVersion = JSON.parse(readFileSync(PKG_JSON, "utf8")).version;
+    const hashChanged = LOADED.sha256 !== null && LOADED.sha256 !== sha256OfFile(SERVER_MJS);
+    if (LOADED.version === diskVersion && !hashChanged) return null;
+    return `noracu: this server process is stale: it loaded ${LOADED.version} at ${LOADED.at}, but the files on disk are ${diskVersion}${hashChanged ? " (src/server.mjs changed)" : ""}. Restart the MCP client to load them.`;
+  } catch {
+    return null;
+  }
 }
 
 // ── 工具实现 ──────────────────────────────────────────────
@@ -70,6 +100,10 @@ function resolvePython() {
   return pythonProbe;
 }
 
+// imctl 拒绝输入时在 stderr 打印 `前缀: 说明` 行。这些是可恢复的调用方错误（不是环境缺失），
+// 原样透传匹配到的那一行，不归类为 imctl unavailable。后续任务会往列表里追加更多前缀。
+const IMCTL_PASS_THROUGH = ["mirror_not_live", "type_not_confirmed", "scroll_no_effect", "expect_not_found", "capture_failed", "open_not_confirmed", "focus_lost"];
+
 function imctl(...args) {
   const py = resolvePython();
   if (!py.path) {
@@ -83,10 +117,13 @@ function imctl(...args) {
     });
     return { ok: true, out: out.trim() };
   } catch (e) {
-    // G23（0.1.2）：镜像不在线时 imctl 拒绝输入（退出码 3，stderr 带 mirror_not_live: 行）——
-    // 原样透传那一行，不归类为 imctl unavailable（这是可恢复的调用方错误，不是环境缺失）
-    const guard = (String(e.stderr || "") + "\n" + String(e.stdout || "")).match(/^mirror_not_live:.*$/m);
-    if (guard) return { ok: false, out: guard[0].trim() };
+    // G23（0.1.2）/ G26：镜像不在线（mirror_not_live）或粘贴未上屏（type_not_confirmed）时
+    // imctl 拒绝输入并在 stderr 带前缀行 —— 原样透传那一行，不归类为 imctl unavailable
+    const combined = String(e.stderr || "") + "\n" + String(e.stdout || "");
+    for (const prefix of IMCTL_PASS_THROUGH) {
+      const line = combined.split("\n").find((l) => l.startsWith(prefix + ":"));
+      if (line) return { ok: false, out: line.trim() };
+    }
     const raw = String(e.stderr || e.stdout || e.message);
     // Collapse Python tracebacks / spawn errors into one actionable line so phone_* fail cleanly and tests can skip (graceful degradation).
     if (/No module named|ModuleNotFoundError|ImportError|Traceback \(most recent/.test(raw)) {
@@ -683,17 +720,22 @@ function phoneStatus() { return imctl("status"); }
 function phoneLaunch() { return imctl("launch"); }
 function phoneTap(args) {
   if (typeof args.x !== "number" || typeof args.y !== "number") return { error: "x,y (0-1 normalized) required" };
-  return imctl("tap", String(args.x), String(args.y));
+  const a = ["tap", String(args.x), String(args.y)];
+  if (args.expect) a.push("--expect", args.expect);
+  return imctl(...a);
 }
 function phoneLongpress(args) {
   if (typeof args.x !== "number" || typeof args.y !== "number") return { error: "x,y required" };
-  return imctl("longpress", String(args.x), String(args.y), String(args.duration || 0.8));
+  const a = ["longpress", String(args.x), String(args.y), String(args.duration || 0.8)];
+  if (args.expect) a.push("--expect", args.expect);
+  return imctl(...a);
 }
 function phoneSwipe(args) {
   const { from, to, ms } = args;
   if (!Array.isArray(from) || !Array.isArray(to)) return { error: "from:[x,y], to:[x,y] required" };
   const a = ["swipe", String(from[0]), String(from[1]), String(to[0]), String(to[1])];
   if (ms) a.push("--ms", String(ms));
+  if (args.expect) a.push("--expect", args.expect);
   return imctl(...a);
 }
 // 镜像自带菜单 Home Screen ⌘1 / App Switcher ⌘2 可靠且不需前台（AXPress，非贴边手势）。
@@ -711,15 +753,26 @@ function phoneAppSwitcher() {
   return imctl("app-switcher");
 }
 function phoneScroll(args = {}) {
-  return imctl("scroll", args.direction || "down", String(args.distance || 0.5));
+  const a = ["scroll", args.direction || "down", String(args.distance || 0.5)];
+  if (args.expect) a.push("--expect", args.expect);
+  return imctl(...a);
 }
 function phoneType(args) {
   if (!args.text) return { error: "text required" };
-  return imctl("type", args.text);
+  // Options first, then `--`, then the free text: the text is a positional and
+  // may start with "-" (argparse would otherwise treat it as an option).
+  // Invariant: --expect and its value are two separate argv elements.
+  const a = ["type"];
+  if (args.replace) a.push("--replace");
+  if (args.expect) a.push("--expect", args.expect);
+  a.push("--", args.text);
+  return imctl(...a);
 }
 function phoneKey(args) {
   if (!args.key) return { error: "key required (return/delete/up/down/left/right)" };
-  return imctl("key", args.key);
+  const a = ["key", args.key];
+  if (args.expect) a.push("--expect", args.expect);
+  return imctl(...a);
 }
 function phoneOcr() { return imctl("ocr"); }
 function phoneFind(args) {
@@ -792,18 +845,18 @@ const TOOLS = [
   // iPhone device-use（imctl）
   { name: "phone_status", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, live, overlay, paused).", args: {}, fn: phoneStatus },
   { name: "phone_launch", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and clicks Resume when the connection is paused.", args: {}, fn: phoneLaunch },
-  { name: "phone_screenshot", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Screenshot the iPhone screen (the Mirroring window, captured by window id so it works even when covered).", args: {}, fn: phoneScreenshot },
-  { name: "phone_ocr", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. OCR the iPhone screen into text with coordinates.", args: {}, fn: phoneOcr },
-  { name: "phone_find", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen.", args: { text: "string" }, fn: phoneFind },
-  { name: "phone_tap", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates. Refused with mirror_not_live when the mirror is paused.", args: { x: "number", y: "number" }, fn: phoneTap },
-  { name: "phone_longpress", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Long-press at {x, y} for an optional duration in seconds.", args: { x: "number", y: "number", duration: "number?" }, fn: phoneLongpress },
-  { name: "phone_swipe", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe (mouse drag) from [x,y] to [x,y] over an optional duration in ms, for gestures such as Home Screen paging; to move a list use phone_scroll.", args: { from: "array", to: "array", ms: "number?" }, fn: phoneSwipe },
+  { name: "phone_screenshot", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Screenshot the iPhone screen (the Mirroring window, captured by window id so it works even when covered). Fails with capture_failed instead of returning another window's pixels.", args: {}, fn: phoneScreenshot },
+  { name: "phone_ocr", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. OCR the iPhone screen into text with coordinates. Fails with capture_failed instead of returning another window's pixels.", args: {}, fn: phoneOcr },
+  { name: "phone_find", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen. Fails with capture_failed instead of returning another window's pixels.", args: { text: "string" }, fn: phoneFind },
+  { name: "phone_tap", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates. Refused with mirror_not_live when the mirror is paused. Optional expect: text that must be on screen (OCR) first, else nothing is sent.", args: { x: "number", y: "number", expect: "string?" }, fn: phoneTap },
+  { name: "phone_longpress", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Long-press at {x, y} for an optional duration in seconds. Optional expect: text that must be on screen (OCR) first, else nothing is sent.", args: { x: "number", y: "number", duration: "number?", expect: "string?" }, fn: phoneLongpress },
+  { name: "phone_swipe", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe (mouse drag) from [x,y] to [x,y] over an optional duration in ms, for gestures such as Home Screen paging; to move a list use phone_scroll. Optional expect: text that must be on screen (OCR) first, else nothing is sent.", args: { from: "array", to: "array", ms: "number?", expect: "string?" }, fn: phoneSwipe },
   { name: "phone_home", desc: "EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl swipe.", args: {}, fn: phoneHome },
   { name: "phone_app_switcher", desc: "EXPERIMENTAL. Open the iPhone App Switcher via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl gesture.", args: {}, fn: phoneAppSwitcher },
-  { name: "phone_scroll", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll the list under the mirror up or down by about `distance` window heights (default 0.5), using trackpad-style scroll events.", args: { direction: "string?", distance: "number?" }, fn: phoneScroll },
-  { name: "phone_type", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe).", args: { text: "string" }, fn: phoneType },
-  { name: "phone_key", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right.", args: { key: "string" }, fn: phoneKey },
-  { name: "phone_open", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app via the mirroring Spotlight menu command/shortcut, type the name, OCR-pick the matching app row and tap it; returns to the home screen when not found.", args: { app: "string" }, fn: phoneOpen },
+  { name: "phone_scroll", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll up or down by `distance` window heights (0 < distance <= 3, default 0.5) using trackpad-style scroll events. Reports scroll_no_effect when the screen did not change (list end, or the view does not scroll). Optional expect: text that must be on screen (OCR) first, else nothing is sent.", args: { direction: "string?", distance: "number?", expect: "string?" }, fn: phoneScroll },
+  { name: "phone_type", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe). Restores the clipboard only after OCR sees the text, else reports type_not_confirmed and keeps the text. replace=true selects all and overwrites the field. Optional expect: on-screen text (OCR), else nothing is sent.", args: { text: "string", replace: "boolean?", expect: "string?" }, fn: phoneType },
+  { name: "phone_key", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right. Optional expect: text that must be on screen (OCR) first, else nothing is sent.", args: { key: "string", expect: "string?" }, fn: phoneKey },
+  { name: "phone_open", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app: Home Screen, Spotlight via the menu, clear, type the name, OCR-pick the exact row and tap it; confirms the app opened (frame diff + OCR), taps the Top Hit icon when the label tap does nothing, else open_not_confirmed, back on the Home Screen.", args: { app: "string" }, fn: phoneOpen },
 ];
 
 // ── 统一参数校验（全工具入口门禁，返回 null=通过 / string=错误）──
@@ -868,12 +921,28 @@ function validateArgs(name, a) {
       return null;
     case "phone_tap": case "phone_longpress":
       if (!N(a.x) || !N(a.y) || a.x < 0 || a.x > 1 || a.y < 0 || a.y > 1) return `${name}: x,y normalized 0-1 required`;
+      if (a.expect !== undefined && !S(a.expect, 200)) return `${name}: expect must be a string of 1-200 characters`;
       return null;
     case "phone_swipe":
       if (!XY(a.from) || !XY(a.to)) return "phone_swipe: from/to [x,y] arrays required";
+      if (a.expect !== undefined && !S(a.expect, 200)) return "phone_swipe: expect must be a string of 1-200 characters";
+      return null;
+    case "phone_scroll":
+      if (a.direction !== undefined && a.direction !== "up" && a.direction !== "down")
+        return "phone_scroll: direction must be up|down";
+      if (a.distance !== undefined && (!N(a.distance) || a.distance <= 0 || a.distance > 3))
+        return "phone_scroll: distance is in window heights, 0 < distance <= 3 (default 0.5)";
+      if (a.expect !== undefined && !S(a.expect, 200)) return "phone_scroll: expect must be a string of 1-200 characters";
       return null;
     case "phone_type": case "phone_find":
       if (!S(a.text, 5000)) return `${name}: text string (max 5000) required`;
+      if (name === "phone_type" && a.replace !== undefined && typeof a.replace !== "boolean")
+        return "phone_type: replace must be a boolean";
+      if (name === "phone_type" && a.expect !== undefined && !S(a.expect, 200))
+        return "phone_type: expect must be a string of 1-200 characters";
+      return null;
+    case "phone_key":
+      if (a.expect !== undefined && !S(a.expect, 200)) return "phone_key: expect must be a string of 1-200 characters";
       return null;
     case "phone_open":
       if (!S(a.app, 200)) return "phone_open: app string (max 200) required";
@@ -897,6 +966,19 @@ function send(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
 }
 
+// tools/call 结果统一出口（F23）：进程比磁盘旧时，把 staleServerNote() 的一行提示加在
+// 第一个 text 内容块的开头（单独一行）；纯图片结果没有 text 块则补一个。只加提示 ——
+// 不改变工具执行、isError 返回码或其余内容块；tools/list / initialize 不加。
+function sendToolResult(id, content, isError) {
+  const note = staleServerNote();
+  if (note) {
+    const firstText = content.find(b => b?.type === "text");
+    if (firstText) firstText.text = `${note}\n${firstText.text}`;
+    else content.unshift({ type: "text", text: note });
+  }
+  send({ jsonrpc: "2.0", id, result: { content, ...(isError ? { isError: true } : {}) } });
+}
+
 rl.on("line", async (line) => {
   if (!line.trim()) return;
   let msg;
@@ -904,7 +986,8 @@ rl.on("line", async (line) => {
   const { id, method, params } = msg;
   try {
     if (method === "initialize") {
-      send({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "noracu", version: (() => { try { return JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")).version; } catch { return "0.0.0"; } })() } } });
+      // F23：版本号用启动时快照的 LOADED.version，不在握手时现读 —— 进程旧了它也不会误报新版本
+      send({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "noracu", version: LOADED.version } } });
     } else if (method === "notifications/initialized") {
       // no response
     } else if (method === "tools/list") {
@@ -915,28 +998,28 @@ rl.on("line", async (line) => {
     } else if (method === "tools/call") {
       const name = params?.name;
       const tool = TOOLS.find(t => t.name === name);
-      if (!tool) { send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: `unknown tool: ${name}` }], isError: true } }); return; }
+      if (!tool) { sendToolResult(id, [{ type: "text", text: `unknown tool: ${name}` }], true); return; }
       let r;
       if (process.env.NORACU_READ_ONLY === "1" && !READ_ONLY_TOOLS.has(name)) {
-        send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: `ERROR: ${name} blocked by NORACU_READ_ONLY=1 (observation-only mode)` }], isError: true } });
+        sendToolResult(id, [{ type: "text", text: `ERROR: ${name} blocked by NORACU_READ_ONLY=1 (observation-only mode)` }], true);
         return;
       }
       const verr = validateArgs(name, params?.arguments || {});
-      if (verr) { send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: `ERROR: ${verr}` }], isError: true } }); return; }
+      if (verr) { sendToolResult(id, [{ type: "text", text: `ERROR: ${verr}` }], true); return; }
       try { r = await tool.fn(params?.arguments || {}); }
       catch (e) { r = { error: String(e?.message ?? e).slice(0, 400) }; }
       if (r?.error) {
-        send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: `ERROR: ${r.error}` }], isError: true } });
+        sendToolResult(id, [{ type: "text", text: `ERROR: ${r.error}` }], true);
       } else if (r?.ok === false) {
         // imctl 子进程失败（imctl 缺失、Mirroring 窗口无法置前）返回 { ok:false, out }，
         // 此前被当作成功文本下发 —— 统一在此标记为工具错误（一处覆盖所有 phone_* 工具）
-        send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: `ERROR: ${r.out}` }], isError: true } });
+        sendToolResult(id, [{ type: "text", text: `ERROR: ${r.out}` }], true);
       } else if (r?.image) {
         const content = [{ type: "image", data: r.image, mimeType: r.mime || "image/png" }];
         if (r.meta) content.push({ type: "text", text: JSON.stringify(r.meta) });
-        send({ jsonrpc: "2.0", id, result: { content } });
+        sendToolResult(id, content);
       } else {
-        send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: typeof r?.text === "string" ? r.text : (r?.out ?? JSON.stringify(r)) }] } });
+        sendToolResult(id, [{ type: "text", text: typeof r?.text === "string" ? r.text : (r?.out ?? JSON.stringify(r)) }]);
       }
     } else if (method === "ping") {
       send({ jsonrpc: "2.0", id, result: {} });

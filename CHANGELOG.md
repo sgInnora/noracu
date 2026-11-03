@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.1.3] — 2026-11-04
+
+### Fixed
+- `phone_open` is far more reliable: it opens Spotlight from the Home Screen
+  using Spotlight's own shortcut (trying once more if the phone ignores it),
+  clears the field and re-reads results, matches very short app names such as
+  "X", and confirms the app actually came to the foreground — tapping the app
+  icon when tapping its name does nothing.
+- One- and two-letter names such as "X" no longer run past the 30-second tool
+  limit: short labels are read with a fast multi-scale OCR pass instead of slow
+  strip-by-strip reads. `phone_find` and the `expect` guard find them too.
+- `phone_open` no longer taps the wrong result when OCR momentarily misses a
+  short app name. In testing, opening "X" could open a web search instead while
+  reporting success.
+- `phone_type` keeps the typed text on the clipboard until the phone shows it
+  (verified by OCR) and only then restores your previous clipboard; it also
+  restores the clipboard if an error happens before the paste. For a single
+  character the restore also happens when the phone shows the paste several
+  seconds late — and never before. Nothing is pasted if another app or device
+  (Universal Clipboard) changes the clipboard just before the paste. Adds a
+  `replace` option to overwrite an existing field.
+- `phone_scroll` validates its distance (in screen-heights) and reports when
+  nothing on screen moved.
+- `phone_launch` reports whether the mirror is actually live, and says so when
+  the session is still paused.
+- Moving the pointer over the iPhone Mirroring window no longer looks like a
+  paused session, and resuming a paused session never clicks the window's own
+  close or minimize buttons.
+- Screenshots never silently fall back to grabbing an arbitrary screen region;
+  a capture failure is reported as unconfirmed instead of acting on the wrong
+  pixels. After bringing iPhone Mirroring to the front, noracu waits for a real
+  frame instead of failing on a blank transition frame.
+- Before every input event, noracu asks macOS afresh whether iPhone Mirroring
+  is still the frontmost window, and sends nothing otherwise.
+
+### Security
+- Phone screenshots taken for OCR were written to the shared temp directory,
+  readable by other local users, and never deleted. They now go to an
+  owner-only directory and are deleted as soon as they have been read. If you
+  ran an earlier version, delete leftover `imctl_*.png` files from your temp
+  directory (for example `/tmp`).
+
+### Added
+- Optional `expect` guard on phone input tools: nothing is sent unless the
+  expected text is currently on screen.
+- The server reports when its running process is older than the files on disk,
+  so a stale server is visible to the client.
+
+### Known issues
+- Unchanged from 0.1.2: on iPhone 17 Pro Max + macOS 26, iPhone Mirroring draws
+  the phone larger than its window; the right column and bottom row stay out of
+  reach. Still under investigation.
+- A single character typed with `phone_type` that leaves no new character on
+  screen (for example replacing "X" with "X") cannot be confirmed; the clipboard
+  then keeps the typed character rather than risk pasting your previous
+  clipboard into the phone.
+
 ## [0.1.2] — 2026-11-02
 
 ### Fixed

@@ -1,7 +1,7 @@
 # Tool reference
 
 > Auto-generated from the running server (`node scripts/gen-tools.mjs`) — always in sync with the implementation.
-> noracu v0.1.2 · 35 tools
+> noracu v0.1.3 · 35 tools
 
 ## Mac layer (computer-use)
 
@@ -46,16 +46,16 @@
 |---|---|---|
 | `phone_status` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, live, overlay, paused). |
 | `phone_launch` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and clicks Resume when the connection is paused. |
-| `phone_screenshot` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Screenshot the iPhone screen (the Mirroring window, captured by window id so it works even when covered). |
-| `phone_ocr` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. OCR the iPhone screen into text with coordinates. |
-| `phone_find` | text:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen. |
-| `phone_tap` | x:number?, y:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates. Refused with mirror_not_live when the mirror is paused. |
-| `phone_longpress` | x:number?, y:number?, duration:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Long-press at {x, y} for an optional duration in seconds. |
-| `phone_swipe` | from:array?, to:array?, ms:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe (mouse drag) from [x,y] to [x,y] over an optional duration in ms, for gestures such as Home Screen paging; to move a list use phone_scroll. |
+| `phone_screenshot` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Screenshot the iPhone screen (the Mirroring window, captured by window id so it works even when covered). Fails with capture_failed instead of returning another window's pixels. |
+| `phone_ocr` | — | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. OCR the iPhone screen into text with coordinates. Fails with capture_failed instead of returning another window's pixels. |
+| `phone_find` | text:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen. Fails with capture_failed instead of returning another window's pixels. |
+| `phone_tap` | x:number?, y:number?, expect:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Tap at {x, y} in normalized 0-1 coordinates. Refused with mirror_not_live when the mirror is paused. Optional expect: text that must be on screen (OCR) first, else nothing is sent. |
+| `phone_longpress` | x:number?, y:number?, duration:number?, expect:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Long-press at {x, y} for an optional duration in seconds. Optional expect: text that must be on screen (OCR) first, else nothing is sent. |
+| `phone_swipe` | from:array?, to:array?, ms:number?, expect:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Swipe (mouse drag) from [x,y] to [x,y] over an optional duration in ms, for gestures such as Home Screen paging; to move a list use phone_scroll. Optional expect: text that must be on screen (OCR) first, else nothing is sent. |
 | `phone_home` | — | EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl swipe. |
 | `phone_app_switcher` | — | EXPERIMENTAL. Open the iPhone App Switcher via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl gesture. |
-| `phone_scroll` | direction:string?, distance:number? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll the list under the mirror up or down by about `distance` window heights (default 0.5), using trackpad-style scroll events. |
-| `phone_type` | text:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe). |
-| `phone_key` | key:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right. |
-| `phone_open` | app:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app via the mirroring Spotlight menu command/shortcut, type the name, OCR-pick the matching app row and tap it; returns to the home screen when not found. |
+| `phone_scroll` | direction:string?, distance:number?, expect:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll up or down by `distance` window heights (0 < distance <= 3, default 0.5) using trackpad-style scroll events. Reports scroll_no_effect when the screen did not change (list end, or the view does not scroll). Optional expect: text that must be on screen (OCR) first, else nothing is sent. |
+| `phone_type` | text:string?, replace:boolean?, expect:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe). Restores the clipboard only after OCR sees the text, else reports type_not_confirmed and keeps the text. replace=true selects all and overwrites the field. Optional expect: on-screen text (OCR), else nothing is sent. |
+| `phone_key` | key:string?, expect:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right. Optional expect: text that must be on screen (OCR) first, else nothing is sent. |
+| `phone_open` | app:string? | EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app: Home Screen, Spotlight via the menu, clear, type the name, OCR-pick the exact row and tap it; confirms the app opened (frame diff + OCR), taps the Top Hit icon when the label tap does nothing, else open_not_confirmed, back on the Home Screen. |
 

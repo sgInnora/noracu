@@ -106,6 +106,9 @@ def ensure_frontmost() -> None:
 
     CGEvents are delivered to the frontmost app; if another window
     covers the mirroring window, taps would land on the wrong target.
+    F31: when the app had to be activated (possibly switching Spaces), wait
+    until the window yields a real frame before returning, so the caller's
+    next capture is not a transition frame refused as capture_failed.
     """
     if _run_osascript(_FRONTMOST_SCRIPT) == "true":
         return
@@ -119,6 +122,30 @@ def ensure_frontmost() -> None:
     time.sleep(0.4)  # let the window server settle
     if _run_osascript(_FRONTMOST_SCRIPT) != "true":
         raise WindowError("could not bring iPhone Mirroring to front")
+    _wait_capturable()
+
+
+def _wait_capturable(timeout_s: float = 2.0, poll_s: float = 0.2) -> bool:
+    """Poll until the mirror window gives a valid frame (F31); best effort.
+
+    Uses verify.window_luma(), which refuses off-screen windows and blank
+    transition frames (F25). Returns True once a frame passes, False after
+    ``timeout_s`` — it never raises: a caller whose own capture still fails
+    reports capture_failed as before.
+    """
+    import time
+
+    from . import verify  # runtime import: verify imports this module
+
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            verify.window_luma()
+            return True
+        except Exception:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll_s)
 
 
 def get_bounds() -> WindowBounds:
@@ -157,7 +184,10 @@ def get_bounds() -> WindowBounds:
 # "iPhone in use", …) that group gains child elements (image / static text / button). Overlay text
 # is localized, so the decision never matches on text — only on structure (child count, classes).
 # Labels can span multiple lines and nameless elements coerce to the literal "missing value";
-# both are normalized so one element = exactly one `<class>\t<label>` line.
+# both are normalized so one element = exactly one `<class>\t<label>\t<subrole>\t<child classes>`
+# line (tabs inside labels are collapsed too). F28: the subrole and, for groups, the classes of
+# their children let parse_overlay_ex tell the window's own hover controls (close / minimize /
+# zoom buttons and the small toolbar group) apart from a real overlay.
 _OVERLAY_SCRIPT = '''
 on collapseBreaks(s)
     set tid to AppleScript's text item delimiters
@@ -166,6 +196,10 @@ on collapseBreaks(s)
     set AppleScript's text item delimiters to " "
     set s to parts as text
     set AppleScript's text item delimiters to return
+    set parts to text items of s
+    set AppleScript's text item delimiters to " "
+    set s to parts as text
+    set AppleScript's text item delimiters to tab
     set parts to text items of s
     set AppleScript's text item delimiters to " "
     set s to parts as text
@@ -195,7 +229,20 @@ tell application "System Events"
                         if v is not "missing value" then set lbl to v
                     end try
                 end if
-                set out to out & c & tab & (my collapseBreaks(lbl)) & linefeed
+                set sr to ""
+                try
+                    set sr to (subrole of e) as text
+                    if sr is "missing value" then set sr to ""
+                end try
+                set kids to ""
+                if c is "group" then
+                    try
+                        repeat with k in (UI elements of e)
+                            set kids to kids & ((class of k) as text) & ","
+                        end repeat
+                    end try
+                end if
+                set out to out & c & tab & (my collapseBreaks(lbl)) & tab & sr & tab & kids & linefeed
             end repeat
             return out
         end tell
@@ -204,12 +251,29 @@ end tell
 '''
 
 # Clicks the Resume control of the paused overlay. Only ever invoked after _OVERLAY_SCRIPT
-# reported exactly one button under group 1 (static script, no interpolated parameters).
+# reported exactly one overlay button under group 1 (static script, no interpolated
+# parameters). F29: "button 1 of group 1" was the window's Close button whenever the
+# pointer rested on the window, so window controls are skipped by AX subrole and the
+# click happens only when exactly one other button remains; prints CLICKED or SKIP.
 _CLICK_RESUME_SCRIPT = '''
 tell application "System Events"
     tell process "iPhone Mirroring"
         tell window 1
-            click button 1 of group 1
+            set target to missing value
+            set n to 0
+            repeat with b in (buttons of group 1)
+                set sr to ""
+                try
+                    set sr to (subrole of b) as text
+                end try
+                if sr is not "AXCloseButton" and sr is not "AXMinimizeButton" and sr is not "AXZoomButton" and sr is not "AXFullScreenButton" then
+                    set n to n + 1
+                    set target to contents of b
+                end if
+            end repeat
+            if n is not 1 then return "SKIP"
+            click target
+            return "CLICKED"
         end tell
     end tell
 end tell
@@ -251,52 +315,92 @@ def get_window_info() -> dict | None:
 
 
 def is_frontmost() -> bool:
-    """True when iPhone Mirroring is the frontmost application."""
+    """True when iPhone Mirroring is the frontmost application, asked fresh on every call.
+
+    F26 runs this right before synthesized input events. F30: the in-process
+    NSWorkspace.frontmostApplication() query used before is a snapshot in a process
+    without a run loop (imctl's case) — after Finder came to the front it still answered
+    "iPhone Mirroring", so the re-checks inside one operation could never fire. System
+    Events reads the live process list (about 0.1 s per osascript call). Any failure
+    counts as not frontmost, so input is refused rather than sent blind.
+    """
     try:
         return _run_osascript(_FRONTMOST_SCRIPT) == "true"
-    except WindowError:
+    except (WindowError, subprocess.TimeoutExpired, OSError):
         return False
 
 
-def parse_overlay(raw: str) -> dict:
-    """Parse _OVERLAY_SCRIPT output into {"live", "overlay", "buttons"}.
+# F28: controls iPhone Mirroring adds to group 1 while the pointer rests on its window
+# (the title-bar buttons), identified by AX subrole — never by localized text.
+_CHROME_SUBROLES = frozenset(
+    {"AXCloseButton", "AXMinimizeButton", "AXZoomButton", "AXFullScreenButton"}
+)
+
+
+def parse_overlay_ex(raw: str) -> tuple[dict, bool]:
+    """Parse _OVERLAY_SCRIPT output into ({"live", "overlay", "buttons"}, hover).
 
     Rules (structure only, never localized text):
-      - "" (group 1 has no children)          -> live=True,  overlay=None, buttons=0
-      - child lines "<class>\t<name-or-value>"  -> live=False, overlay=static texts joined with " / "
-                                                   (None when no text), buttons=button count
-      - "NO_WINDOW" / "NO_GROUP" / unparseable -> live=None,  overlay=None, buttons=0
+      - "" (group 1 has no children)            -> live=True,  overlay=None, buttons=0
+      - child lines "<class>\\t<label>[\\t<subrole>\\t<child classes>]"
+                                                -> live=False, overlay=static texts joined
+                                                   with " / " (None when no text),
+                                                   buttons=button count
+      - "NO_WINDOW" / "NO_GROUP" / unparseable  -> live=None,  overlay=None, buttons=0
+
+    F28: while the pointer rests on the mirror window, group 1 also holds the window's own
+    title-bar buttons (subroles AXCloseButton / AXMinimizeButton / AXZoomButton) and a small
+    toolbar (a group whose children are only buttons). hover is True when those buttons are
+    present; they and the toolbar group are not an overlay and are never counted. Without
+    them the rules above apply unchanged: any other child still means not live.
     """
     unknown = {"live": None, "overlay": None, "buttons": 0}
     if raw is None:
-        return unknown
+        return unknown, False
     if raw.strip() in ("NO_WINDOW", "NO_GROUP"):
-        return unknown
+        return unknown, False
     # Keep lines as-is (a trailing tab is significant: "button\t" means a nameless button);
     # only filter out blank lines.
     lines = [ln for ln in raw.split("\n") if ln.strip()]
     if not lines:
-        return {"live": True, "overlay": None, "buttons": 0}
-    buttons = 0
-    texts: list[str] = []
+        return {"live": True, "overlay": None, "buttons": 0}, False
+    elements = []
     for ln in lines:
         parts = ln.split("\t", 1)
         if len(parts) != 2:
-            return unknown  # unexpected format -> unknown, never guess
-        cls, label = parts[0].strip(), parts[1].strip()
-        if cls == "button":
-            buttons += 1
-        elif cls == "static text" and label:
-            texts.append(label)
+            return unknown, False  # unexpected format -> unknown, never guess
+        cls, rest = parts[0].strip(), parts[1]
+        if rest.count("\t") >= 2:  # current script: label, subrole, child classes
+            label, subrole, kids = rest.rsplit("\t", 2)
+        else:  # two-field form (label only)
+            label, subrole, kids = rest, "", ""
+        child_classes = [k.strip() for k in kids.split(",") if k.strip()]
+        elements.append((cls, label.strip(), subrole.strip(), child_classes))
+    hover = any(c == "button" and s in _CHROME_SUBROLES for c, _, s, _ in elements)
+    rest_els = [e for e in elements if not (e[0] == "button" and e[2] in _CHROME_SUBROLES)]
+    if hover:
+        # The hover toolbar: a group holding only buttons (or nothing yet, mid-animation).
+        rest_els = [
+            e for e in rest_els if not (e[0] == "group" and all(k == "button" for k in e[3]))
+        ]
+    if not rest_els:
+        return {"live": True, "overlay": None, "buttons": 0}, hover
+    buttons = sum(1 for e in rest_els if e[0] == "button")
+    texts = [e[1] for e in rest_els if e[0] == "static text" and e[1]]
     return {
         "live": False,
         "overlay": " / ".join(texts) if texts else None,
         "buttons": buttons,
-    }
+    }, hover
 
 
-def get_overlay() -> dict:
-    """Return the current overlay state: {"live", "overlay", "buttons"}.
+def parse_overlay(raw: str) -> dict:
+    """Parse _OVERLAY_SCRIPT output into {"live", "overlay", "buttons"} (see parse_overlay_ex)."""
+    return parse_overlay_ex(raw)[0]
+
+
+def overlay_snapshot() -> tuple[dict, bool]:
+    """(overlay state, hover) from one probe; the state is what get_overlay() returns.
 
     Fail-open: any osascript failure (app not running, AX hiccup, timeout) returns
     live=None so callers can decide; this never raises.
@@ -306,8 +410,13 @@ def get_overlay() -> dict:
         # str.strip() would eat it and make the last line unparseable.
         raw = _run_osascript(_OVERLAY_SCRIPT, strip=False)
     except Exception:
-        return {"live": None, "overlay": None, "buttons": 0}
-    return parse_overlay(raw)
+        return {"live": None, "overlay": None, "buttons": 0}, False
+    return parse_overlay_ex(raw)
+
+
+def get_overlay() -> dict:
+    """Return the current overlay state: {"live", "overlay", "buttons"} (fail-open)."""
+    return overlay_snapshot()[0]
 
 
 def is_paused(overlay: dict | None = None) -> bool | None:
@@ -326,24 +435,69 @@ def is_paused(overlay: dict | None = None) -> bool | None:
     return None
 
 
+def _move_pointer_off_window() -> bool:
+    """Move the pointer just outside the mirror window (a move, never a click).
+
+    F28/F29: with the pointer on the window its title-bar buttons share group 1 with
+    the overlay; moving off hides them before resume() reads and clicks. Picks the
+    first point beside the window that lies on an active display. Best effort:
+    returns False when Quartz is unavailable or nothing qualifies.
+    """
+    try:
+        import Quartz  # type: ignore
+
+        b = get_bounds()
+        err, ids, count = Quartz.CGGetActiveDisplayList(16, None, None)
+        if err:
+            return False
+        rects = [Quartz.CGDisplayBounds(d) for d in list(ids)[:count]]
+        candidates = [
+            (b.x - 24, b.y + b.height / 2),
+            (b.x + b.width + 24, b.y + b.height / 2),
+            (b.x + b.width / 2, b.y + b.height + 24),
+            (b.x + b.width / 2, b.y - 24),
+        ]
+        for x, y in candidates:
+            for r in rects:
+                if (r.origin.x <= x < r.origin.x + r.size.width
+                        and r.origin.y <= y < r.origin.y + r.size.height):
+                    ev = Quartz.CGEventCreateMouseEvent(
+                        None, Quartz.kCGEventMouseMoved, (x, y), Quartz.kCGMouseButtonLeft
+                    )
+                    Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def resume() -> bool:
     """Click the Resume control when the session is paused (language-independent).
 
-    Live already -> True. Paused overlay with exactly one button -> click it, then poll up
-    to ~6 s (0.5 s interval) until the stream is live again. Anything else (multiple
-    buttons, no button, unknown state) -> do not click, return False. The phone may still
-    ask for Face ID / passcode on its own screen; that part cannot be automated from the Mac.
+    Live already -> True. F28/F29: when the pointer rests on the window its title-bar
+    buttons appear in the same AX group, so the pointer is first moved off the window
+    and the state read again; window controls are never counted or clicked. Paused
+    overlay with exactly one other button -> click it, then poll up to ~6 s (0.5 s
+    interval) until the stream is live again. Anything else (several buttons, none,
+    unknown state) -> do not click, return False. The iPhone must be locked and near
+    the Mac for the stream to come back.
     """
     import time
 
-    overlay = get_overlay()
+    overlay, hover = overlay_snapshot()
+    if hover:
+        _move_pointer_off_window()
+        time.sleep(0.6)
+        overlay, hover = overlay_snapshot()
     if overlay["live"] is True:
         return True
     if overlay["live"] is not False or overlay["buttons"] != 1:
         return False
     try:
-        _run_osascript(_CLICK_RESUME_SCRIPT)
-    except WindowError:
+        clicked = _run_osascript(_CLICK_RESUME_SCRIPT)
+    except (WindowError, subprocess.TimeoutExpired):
+        return False
+    if clicked != "CLICKED":
         return False
     for _ in range(12):  # up to ~6 s for the stream to come back
         time.sleep(0.5)
