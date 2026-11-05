@@ -1,6 +1,6 @@
 {
   "name": "noracu",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "mcpName": "io.github.sgInnora/noracu",
   "description": "Local MCP server: macOS apps and a browser by element index, plus iPhone Mirroring (experimental).",
   "type": "module",

@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import sys
 import tempfile
+import time
 
 from . import gestures, input, verify, vision
 from .vision import CaptureError
@@ -225,16 +227,108 @@ def _cmd_type(args) -> int:
     guard = _require_expect(args)
     if guard is not None:
         return guard
-    if input.type_text(args.text, replace=args.replace):
+    report = {}
+    if input.type_text(args.text, replace=args.replace, report=report):
         print(f"typed {args.text!r}")
         return 0
+    count_before = report.get("count_before")
+    late = _watch_late_paste(args.text, baseline=count_before)
+    if late is not None:
+        # F38: the paste did land, just late — report it so the caller does not
+        # retype it. The clipboard is deliberately NOT restored here: type_text()
+        # restores only under its own checks (a rise seen inside its window, the
+        # minimum hold, an untouched changeCount); after the fact, leaving the
+        # typed text on the clipboard is the choice that can never hand the phone
+        # the user's original clipboard (possibly a password).
+        print(f"typed {args.text!r} (the paste showed up late, during an extra "
+              f"{late:.0f}s check after the 2.5s confirmation window; the clipboard "
+              "still holds the typed text)")
+        return 0
+    watched = (f" or a further {LATE_PASTE_WATCH_S:.0f}s check"
+               if _late_paste_probe(args.text) else
+               " (one-character text cannot be confirmed by OCR afterwards)")
+    if args.replace and count_before:
+        # F41: the text was on screen before the paste, and a field replaced with
+        # the same text shows no change at all
+        advice = ("the text was already on screen before this paste, and replacing a "
+                  "field with the same text shows no change — read the screen "
+                  "(phone_ocr / phone_screenshot): if the field shows the text, it "
+                  "holds it")
+    else:
+        advice = ("it may still land: read the screen (phone_ocr / phone_screenshot) "
+                  "before typing again, or retype with replace=true")
     print(
-        "type_not_confirmed: the paste did not show on screen within 2.5s; "
-        "the clipboard still holds the typed text and your previous clipboard "
-        "was not restored",
+        "type_not_confirmed: the paste did not show on screen within the 2.5s "
+        f"confirmation window{watched} — {advice}; the clipboard still holds the "
+        "typed text and your previous clipboard was not restored",
         file=sys.stderr,
     )
     return 4
+
+
+# F38 (2026-11-05 real-device): a paste reported unconfirmed after 2.5 s showed up a
+# few seconds later, and the caller's retry typed the text twice ("… case … case").
+# Before type_not_confirmed, keep watching — read-only, no second Cmd+V — for up to
+# this long.
+# F42: on the device a paste reached the phone up to more than 10 s after Cmd+V.
+LATE_PASTE_WATCH_S = 15.0  # needs two consecutive sightings ~1 s apart
+
+
+def _late_paste_probe(text):
+    """The OCR probe for ``text``, or None when OCR cannot confirm it (< 2 chars)."""
+    return verify.text_probe(text)
+
+
+def _watch_late_paste(text, *, baseline=None, read_screen=None, sleep=time.sleep,
+                      clock=time.monotonic, watch_s=LATE_PASTE_WATCH_S):
+    """Seconds into the watch until ``text`` showed up on screen, or None.
+
+    Read-only: it never pastes again. ``baseline`` is type_text()'s pre-paste
+    count of the text's probe (F41); the paste counts as arrived once the count
+    is above it in TWO consecutive readable frames (one OCR misread is not
+    enough). Without a baseline (type_text() could not read the screen before
+    the paste) the watch's own first two readable frames set it — the higher
+    count, as in type_text(): text already on screen elsewhere is then never
+    taken for the paste, at the price of missing a paste that landed before
+    those frames (reported unconfirmed — the caller is told to read the
+    screen before typing again). Text too short for a probe is
+    not watched at all (None at once). A capture failure breaks the run of
+    sightings (F25), never counts as one. ``read_screen``, ``sleep`` and
+    ``clock`` are injectable for tests.
+    """
+    if _late_paste_probe(text) is None:
+        return None
+    if read_screen is None:
+        read_screen = vision.read_screen
+    floor = baseline
+    floor_reads = []  # without a baseline: the counts of the first two readable frames
+    t0 = clock()
+    run = 0
+    # a first sighting always gets its confirming read, even past the window,
+    # and that read follows after a short pause rather than the usual second
+    while clock() - t0 < watch_s or run == 1:
+        try:
+            hits = read_screen()
+        except Exception as exc:
+            if not verify.is_capture_error(exc):
+                raise
+            hits = None
+        if hits is None:
+            run = 0
+        else:
+            seen = verify.probe_count(text, hits)
+            if floor is None:
+                floor_reads.append(seen)  # no pre-paste count: these frames set the floor
+                if len(floor_reads) == 2:
+                    floor = max(floor_reads)
+            elif seen > floor:
+                run += 1
+                if run >= 2:
+                    return clock() - t0
+            else:
+                run = 0
+        sleep(0.4 if run == 1 else 1.0)
+    return None
 
 
 def _cmd_key(args) -> int:
@@ -274,6 +368,20 @@ def _cmd_find(args) -> int:
     return 0
 
 
+def _open_deadline_kwargs(now=time.time) -> dict:
+    """open_app's time budget from NORACU_OPEN_DEADLINE_EPOCH, an absolute time the
+    server sets well before its own timeout (counted from the spawn, so start-up
+    and opening Spotlight are inside it). {} → open_app's default."""
+    try:
+        epoch = float(os.environ.get("NORACU_OPEN_DEADLINE_EPOCH", ""))
+    except ValueError:
+        return {}
+    if not math.isfinite(epoch) or epoch <= 0:  # NaN, inf or nonsense
+        return {}
+    # already past → 0: open_app goes back to the Home Screen without clearing or typing
+    return {"deadline_s": max(0.0, epoch - now())}
+
+
 def _cmd_open(args) -> int:
     guard = _require_live()
     if guard is not None:
@@ -281,14 +389,32 @@ def _cmd_open(args) -> int:
     # Open Spotlight here (not inside open_app) so a failure can be
     # reported as its own condition instead of a bogus "app not found".
     try:
+        return _open_and_report(args)
+    except SystemExit:
+        # Stopped from outside (the server's timeout sends SIGTERM, imctl turns it
+        # into SystemExit) — anywhere in open, not only inside open_app: leave the
+        # phone on the Home Screen rather than in Spotlight with text typed in.
+        # Best effort: the server sends SIGKILL 1.5 s after the SIGTERM.
+        try:
+            gestures.home_via_menu()
+        except BaseException:
+            pass
+        raise
+
+
+def _open_and_report(args) -> int:
+    tidy = {}  # open_app records whether its trip back to the Home Screen worked
+    try:
         # F34: one retry — on the device the Spotlight command was once
-        # ignored right after an app closed. Each try starts from the Home
-        # Screen, so a second try cannot toggle an open Spotlight shut.
+        # ignored right after an app closed. Each try goes Home first; when Home
+        # lands back in Spotlight (iOS 27, F43) the gate reports it open instead
+        # of toggling it shut.
         if not (gestures.open_spotlight_checked()
                 or gestures.open_spotlight_checked()):
             result = "spotlight_unavailable"
         else:
-            result = gestures.open_app(args.app, spotlight_open=True)
+            result = gestures.open_app(args.app, spotlight_open=True, report=tidy,
+                                       **_open_deadline_kwargs())
     except (WindowError, CaptureError):
         # F25: the Spotlight gate and the result matching both read the
         # mirroring window's pixels; without them nothing about the
@@ -297,16 +423,43 @@ def _cmd_open(args) -> int:
     if result == "opened":
         print(f"opened {args.app!r}")
         return 0
+    # every unsuccessful path ends with a trip back to the Home Screen; say so only
+    # when it worked
+    home_note = ("back on the Home Screen" if tidy.get("home") else
+                 "could not go back to the Home Screen — Spotlight may still be open")
+    # the app-not-found lines mention the Home Screen only when the trip back failed
+    stuck = "" if tidy.get("home") else f"; {home_note}"
     if result == "not_found":
-        print(f"app not found: {args.app!r}")
+        print(f"app not found: {args.app!r} (Spotlight's Top Hit did not show exactly "
+              f"this name — use the name the phone shows under the app icon){stuck}")
         return 1
+    if result == "no_top_hit":
+        if os.environ.get("NORACU_TOPHIT_LABELS", "").strip():
+            print(f"app not found: {args.app!r} (Spotlight showed no Top Hit labelled "
+                  f"{', '.join(repr(x) for x in gestures.TOP_HIT_LABELS)} — no app by that "
+                  f"name, or NORACU_TOPHIT_LABELS does not match your iPhone's label){stuck}")
+        else:
+            print(f"app not found: {args.app!r} (Spotlight showed no Top Hit — no app by that "
+                  "name, or the iPhone is not set to English: phone_open reads Spotlight's "
+                  f"\"Top Hit\" label; set NORACU_TOPHIT_LABELS to the label your iPhone shows){stuck}")
+        return 1
+    if result == "deadline":
+        print(f"open_not_confirmed: ran out of time opening {args.app!r} (the Mac may be "
+              f"under heavy load); {home_note}", file=sys.stderr)
+        return 4
+    if result == "not_typed":
+        print(f"open_not_confirmed: the name {args.app!r} was pasted into Spotlight but never "
+              "showed up on the phone (a paste can take several seconds to reach the iPhone, "
+              "or be lost; an iPhone not set to English also needs NORACU_TOPHIT_LABELS) — "
+              f"nothing was tapped; {home_note}; retry phone_open", file=sys.stderr)
+        return 4
     if result == "spotlight_unavailable":
         print("spotlight unavailable (could not reach the Home Screen, the menu command failed, or the screen did not change)")
         return 1
     # "not_confirmed" (F24): the row — and possibly the Top Hit icon —
     # was tapped but the app never verifiably opened; the phone is
     # back on the Home Screen.
-    print(f"open_not_confirmed: tapped {args.app!r} in Spotlight but the app did not open; back on the Home Screen", file=sys.stderr)
+    print(f"open_not_confirmed: tapped {args.app!r} in Spotlight but the app did not open; {home_note}", file=sys.stderr)
     return 4
 
 
@@ -329,9 +482,22 @@ def _cmd_launch(_args) -> int:
     live = gestures.launch()
     if live is False:
         # F29: never report "ready" while the overlay is still up.
+        from .window import is_setup_screen
+
+        if is_setup_screen():
+            # F37: a welcome / setup screen is the user's to finish; nothing was clicked.
+            print(
+                "mirror_setup_required: iPhone Mirroring is showing a setup or welcome "
+                "screen (its window is not phone-shaped) — finish it in the iPhone "
+                "Mirroring window yourself (noracu never clicks through setup screens), "
+                "then call phone_launch again",
+                file=sys.stderr,
+            )
+            return 3
         print(
-            "mirror_not_live: iPhone Mirroring is still paused — lock the iPhone, keep it "
-            "near the Mac, then call phone_launch again",
+            "mirror_not_live: iPhone Mirroring is not live yet — if it shows a paused "
+            "notice, lock the iPhone and keep it near the Mac; if it is reconnecting, wait "
+            "a few seconds and check phone_status; then call phone_launch again",
             file=sys.stderr,
         )
         return 3

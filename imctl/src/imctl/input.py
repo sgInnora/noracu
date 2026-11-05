@@ -375,10 +375,11 @@ class PendingRestore:
 
 
 def type_text(text: str, *, replace: bool = False, pasteboard=None,
-              chord=None, before_check=None, ocr_check=None,
+              chord=None, before_check=None, ocr_check=None, hud_check=None,
               sleep=time.sleep, clock=time.monotonic,
               timeout_s: float = 2.5, poll_s: float = 0.15,
-              min_hold_s: float = 0.3, pending: list | None = None) -> bool:
+              min_hold_s: float = 0.3, pending: list | None = None,
+              report: dict | None = None, restore: bool = True) -> bool:
     """Type text via clipboard paste (IME-safe), confirmed on screen.
 
     Direct CGEvent keystroke synthesis breaks under CJK IMEs and is
@@ -394,7 +395,8 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     ``landed`` — did the paste show up? This decides the return
     value. The whole-window luma frame diff is the fast path; when
     it never fires within ``timeout_s``, a single OCR probe is the
-    fallback. Either one confirms the paste.
+    fallback. Either one confirms the paste (the frame diff not
+    while the phone shows its paste-progress box — F44 below).
 
     ``restore_ok`` — may the user's clipboard be restored? ONLY an
     OCR hit grants this. The frame diff merely proves "the picture
@@ -442,6 +444,39 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     only when the caller has established the focus (e.g. guarded by
     a preceding expect/verify step).
 
+    F41: for text of two or more characters the default OCR check used to
+    ask only "is the text on screen?" — so text that was already there (a
+    search-history chip with the same query, an older message) licensed a
+    restore at once, and a paste that the phone read late could then paste
+    the user's ORIGINAL clipboard. The default checks now count the text's
+    probe before the pasteboard write — the higher of two reads 0.3 s
+    apart, so a read that misses an occurrence cannot fake a rise — and
+    license a restore only when the count RISES over it, in two reads 0.3 s
+    apart. Without a pre-paste count (a read failed) OCR never licenses a
+    restore for such text, and the paste can only be confirmed by the
+    frame diff. ``report`` (a dict), when given, receives that pre-paste
+    count as ``count_before`` (None: unknown), for a caller that keeps
+    watching after a False result.
+
+    ``restore=False``: once Cmd+V may be on its way the user's clipboard is
+    never put back — no restore here and no PendingRestore — and it keeps
+    ``text``; only an error before Cmd+V still restores it. open_app uses
+    this (F42): a paste can reach the phone more than 10 s late, and
+    Spotlight can show the name in its own suggestions before that, so a
+    licensed restore could still paste the user's clipboard into the search.
+
+    F44: a paste the phone is slow to fetch puts up its "Pasting from <Mac>…"
+    progress box, and that box alone moves the frame diff. So when the frame
+    diff fired but OCR did not see the text, ``hud_check`` (one more screen
+    read) looks for the box: while it shows, the paste is still on its way —
+    not landed, the result is False and the caller's late watch takes over. A
+    capture failure there keeps the frame diff's verdict. ``hud_check`` is
+    injectable; by default it reads the screen only with the real frame diff
+    (an injected ``before_check`` gets no real read here). The default OCR
+    checks never license a restore from a read that shows the box — a paste,
+    this one or an earlier one, is still on its way and could fetch the
+    restored clipboard — and the box's own words never count as the text.
+
     ``pending`` (F33): when a one-character paste was not licensed for a
     restore here — not seen within the checks, or landed while OCR stayed
     blind — and the caller passes a list, a PendingRestore is appended to
@@ -474,6 +509,9 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     # too the clipboard keeps holding ``text``, as before.
     single = verify.is_short_text(text, limit=1)
     sweep_before = [None]
+    # F41: the probe count of a 2+ character text before the paste (None = unknown)
+    multi = not single and verify.text_probe(text) is not None
+    count_before = [None]
 
     def sweep_read():
         return vision.read_screen(language_correction=False, sweep=True)
@@ -481,15 +519,32 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     def defer_restore():
         # F33: hand the caller what it needs to restore later, on evidence.
         before = sweep_before[0]
-        if pending is None or not single or before is None:
+        if pending is None or not single or before is None or not restore:
             return
 
-        pending.append(PendingRestore(pasteboard, saved, saved_change,
-                                      verify.RepeatedSighting(text, before).add,
+        sighting = verify.RepeatedSighting(text, before)
+
+        def confirm(hits):
+            # F44: as in ocr_check — a read showing the paste-progress box is
+            # no evidence (a paste is still on its way)
+            return not verify.shows_paste_hud(hits) and sighting.add(hits)
+
+        pending.append(PendingRestore(pasteboard, saved, saved_change, confirm,
                                       sent_at=t0, clock=clock,
                                       min_hold_s=min_hold_s))
 
     pre_read = single and before_check is None
+    pre_count = multi and ocr_check is None
+    if hud_check is None:
+        if before_check is None:
+            def hud_check() -> bool:
+                # F44: one more look for the phone's paste-progress box (a
+                # sweep for a single character, like every read of it)
+                return verify.shows_paste_hud(sweep_read() if single else vision.read_screen())
+        else:
+            def hud_check() -> bool:
+                # an injected frame diff (tests) gets no real screen read here
+                return False
     if before_check is None:
         def before_check():
             # Baseline luma is captured here, right before Cmd+V, so the
@@ -511,11 +566,30 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 evidence = verify.RepeatedSighting(text, sweep_before[0])
                 deadline = clock() + 4.0
                 while True:
-                    if evidence.add(sweep_read()):
+                    hits = sweep_read()
+                    # F44: a read showing the paste-progress box is no evidence —
+                    # a paste is still on its way, and a restore now could hand it
+                    # the user's clipboard
+                    if not verify.shows_paste_hud(hits) and evidence.add(hits):
                         return True
                     if clock() >= deadline:
                         return False
                     sleep(0.3)
+            if multi:
+                # F41: only a rise over the pre-paste count is the paste, and it
+                # must show in two reads (one misread is no license to restore)
+                if count_before[0] is None:
+                    return False
+                for i in range(2):
+                    if i:
+                        sleep(0.3)
+                    hits = vision.read_screen()
+                    # F44: no license while the paste-progress box shows — a paste
+                    # (this one or an earlier one) is still on its way
+                    if (verify.shows_paste_hud(hits)
+                            or verify.probe_count(text, hits) <= count_before[0]):
+                        return False
+                return True
             return verify.screen_shows_text(text, vision.read_screen)
 
     sent = [False]  # True from the moment a Cmd+V may be on its way
@@ -539,6 +613,22 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 if not verify.is_capture_error(exc):
                     raise
                 sweep_before[0] = None
+
+        if pre_count:
+            # F41: count the text before the paste — the higher of two reads
+            # 0.3 s apart (a redraw or the select-all highlight can hide an
+            # occurrence from one read). A capture failure in either leaves it
+            # unknown: then OCR can never license a restore for this paste.
+            try:
+                first = verify.probe_count(text, vision.read_screen())
+                sleep(0.3)
+                count_before[0] = max(first, verify.probe_count(text, vision.read_screen()))
+            except Exception as exc:
+                if not verify.is_capture_error(exc):
+                    raise
+                count_before[0] = None
+        if report is not None:
+            report["count_before"] = count_before[0]
 
         saved = pasteboard.dataForType_("public.utf8-plain-text")
         saved_change = pasteboard.changeCount()
@@ -594,6 +684,18 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             if not verify.is_capture_error(exc):
                 raise
             restore_ok = False
+        if landed and not restore_ok:
+            # F44: the frame diff fired but OCR did not see the text. If the
+            # phone shows its "Pasting from …" progress box, the box was the
+            # change and the paste is still on its way: not landed. A capture
+            # failure tells nothing either way and keeps the frame diff's
+            # verdict; any other error propagates (after Cmd+V: no restore).
+            try:
+                if hud_check():
+                    landed = False
+            except Exception as exc:
+                if not verify.is_capture_error(exc):
+                    raise
         if not landed:
             landed = restore_ok
 
@@ -603,7 +705,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             defer_restore()
             return False
 
-        if restore_ok:
+        if restore_ok and restore:
             # Hold the paste long enough for the asynchronous
             # pasteboard read before putting the user's data back.
             elapsed = clock() - t0
@@ -615,8 +717,9 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 if saved is not None:
                     pasteboard.setData_forType_(saved, "public.utf8-plain-text")
         else:
-            # landed but OCR is blind to it (short/cropped text): success,
-            # but the clipboard keeps `text` — see the docstring's tradeoff.
+            # landed but OCR is blind to it (short/cropped text), or the
+            # caller keeps the clipboard (restore=False): success, but the
+            # clipboard keeps `text` — see the docstring's tradeoff.
             defer_restore()
         return True
     except BaseException:

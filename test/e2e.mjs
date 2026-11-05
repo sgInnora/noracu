@@ -73,12 +73,13 @@ async function spawnServer(env = {}) {
       } catch {}
     }
   });
-  const callOn = (name, args = {}) => new Promise((resolve) => {
+  const rpcOn = (method, params = {}) => new Promise((resolve) => {
     const id = ++mid;
-    pend.set(id, (msg) => resolve(msg.result));
-    p.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) + "\n");
+    pend.set(id, resolve);
+    p.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   });
-  return { proc: p, call: callOn };
+  const callOn = (name, args = {}) => rpcOn("tools/call", { name, arguments: args }).then((msg) => msg.result);
+  return { proc: p, call: callOn, rpc: rpcOn };
 }
 
 // 1. initialize
@@ -227,6 +228,158 @@ check("imctl bundled (imctl/src/imctl/cli.py)", existsSync(new URL("../imctl/src
     const r = await s.call("phone_status");
     check("G10：imctl 缺失时 phone_status 报 isError", r?.isError && String(r?.content?.[0]?.text).includes("ERROR"), r?.content?.[0]?.text?.slice(0, 80));
   } finally { s.proc.kill(); }
+}
+
+// 11b–11f run a fake python as imctl; CI sets NORACU_IMCTL_DIR=/nonexistent for the whole run,
+// so each of them points it at its own temp dir (the fake ignores the module path; only the cwd must exist).
+// 11b. F39：imctl 子进程卡死（忽略 SIGTERM）时 server 仍须响应 —— 假 python：pyobjc 探测通过，
+// 每次 imctl 调用都挂起且忽略 SIGTERM。旧实现（execFileSync）下连 ping 都无响应（CI 安全：不碰硬件）
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const fake = join(dir, "python3");
+  writeFileSync(fake, "#!/bin/bash\n# probe passes; every imctl call hangs and ignores SIGTERM\nif [ \"$1\" = \"-c\" ]; then exit 0; fi\ntrap '' TERM\nsleep 8\n", { mode: 0o700 });
+  const s = await spawnServer({ NORACU_PYTHON: fake, NORACU_IMCTL_DIR: dir });
+  try {
+    let statusDone = false;
+    s.call("phone_status").then(() => { statusDone = true; });
+    await new Promise((r) => setTimeout(r, 500)); // the hung imctl child is running now
+    const t0 = Date.now();
+    const pong = await Promise.race([s.rpc("ping"), new Promise((r) => setTimeout(() => r(null), 3000))]);
+    check("F39：imctl 卡死时 server 仍响应 ping", pong?.result !== undefined && !statusDone, pong ? `${Date.now() - t0} ms, phone_status still pending` : "no reply within 3 s");
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 11c. F40：并发的 phone_* 调用必须串行执行（不交错点击/粘贴/剪贴板）—— 假 python 记录每次 imctl
+// 调用的起止时刻；两个调用同时发出，第二个必须在第一个结束后才开始（CI 安全：不碰硬件）
+{
+  const { mkdtempSync, writeFileSync, readFileSync: rf, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const fake = join(dir, "python3");
+  const log = join(dir, "calls.log");
+  writeFileSync(fake, `#!/bin/bash\nif [ "$1" = "-c" ]; then exit 0; fi\necho "start $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> "${log}"\nsleep 1\necho "end $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> "${log}"\necho '{"running": false}'\n`, { mode: 0o700 });
+  const s = await spawnServer({ NORACU_PYTHON: fake, NORACU_IMCTL_DIR: dir });
+  try {
+    await Promise.all([s.call("phone_status"), s.call("phone_status")]);
+    const ev = rf(log, "utf8").trim().split("\n").map((l) => l.split(" "));
+    const ok = ev.length === 4 && ev[0][0] === "start" && ev[1][0] === "end" && ev[2][0] === "start" && ev[3][0] === "end" && Number(ev[2][1]) >= Number(ev[1][1]);
+    check("F40：并发 phone_* 调用串行执行", ok, ev.map((e) => e.join(" ")).join(" | "));
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 11d. F39/F40：超时路径 —— 第一次调用卡死（自身与一个孙进程都忽略 SIGTERM，持续写心跳），
+// NORACU_PHONE_TIMEOUT_MS=1000：调用须在 ~1 s 返回 imctl_timeout；整个进程组随后被 SIGKILL；
+// 下一次 phone 调用要等进程组真正退出才开始，且开始后不再有任何心跳（CI 安全：不碰硬件）
+{
+  const { mkdtempSync, writeFileSync, readFileSync: rf, existsSync: ex, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const fake = join(dir, "python3");
+  const log = join(dir, "beats.log");
+  const hang = join(dir, "hang");
+  const now = `perl -MTime::HiRes=time -e 'printf "%.3f", time'`;
+  writeFileSync(fake, `#!/bin/bash
+if [ "$1" = "-c" ]; then exit 0; fi
+if [ -e "${hang}" ]; then
+  rm -f "${hang}"
+  trap '' TERM
+  ( trap '' TERM; while true; do echo "g $(${now})" >> "${log}"; sleep 0.1; done ) &
+  while true; do echo "c $(${now})" >> "${log}"; sleep 0.1; done
+fi
+echo "next $(${now})" >> "${log}"
+echo '{"running": false}'
+`, { mode: 0o700 });
+  writeFileSync(hang, "");
+  const s = await spawnServer({ NORACU_PYTHON: fake, NORACU_IMCTL_DIR: dir, NORACU_PHONE_TIMEOUT_MS: "1000" });
+  try {
+    const t0 = Date.now();
+    const r1 = await s.call("phone_status");
+    const dt = Date.now() - t0;
+    const r2 = await s.call("phone_status");
+    await new Promise((r) => setTimeout(r, 400)); // any survivor would keep beating meanwhile
+    const lines = ex(log) ? rf(log, "utf8").trim().split("\n").map((l) => l.split(" ")) : [];
+    const next = Number((lines.find((l) => l[0] === "next") || [])[1]);
+    const lastBeat = Math.max(...lines.filter((l) => l[0] === "c" || l[0] === "g").map((l) => Number(l[1])));
+    const timedOut = r1?.isError && String(r1?.content?.[0]?.text).startsWith("ERROR: imctl_timeout:");
+    check("F39：超时 ~1 s 内返回 imctl_timeout", timedOut && dt < 2500, `${dt} ms`);
+    check("F40：被杀进程组退出后下一次调用才开始，且无孙进程残留", !r2?.isError && Number.isFinite(next) && lastBeat < next, `last beat ${lastBeat}, next start ${next}`);
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 11e. F40：客户端取消（notifications/cancelled）一个还在排队的 phone 调用 —— 轮到它时直接跳过，
+// 不启动 imctl，也不回响应（MCP：被取消的请求不应答）；第一个调用照常完成（CI 安全：不碰硬件）
+{
+  const { mkdtempSync, writeFileSync, readFileSync: rf, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const fake = join(dir, "python3");
+  const log = join(dir, "calls.log");
+  writeFileSync(fake, `#!/bin/bash\nif [ "$1" = "-c" ]; then exit 0; fi\necho "run" >> "${log}"\nsleep 1\necho '{"running": false}'\n`, { mode: 0o700 });
+  const s = await spawnServer({ NORACU_PYTHON: fake, NORACU_IMCTL_DIR: dir });
+  try {
+    const first = s.call("phone_status");
+    const idSecond = 90001;
+    let secondReplied = false;
+    s.proc.stdout.on("data", (d) => {
+      for (const line of String(d).split("\n")) {
+        try { if (JSON.parse(line).id === idSecond) secondReplied = true; } catch {}
+      }
+    });
+    s.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: idSecond, method: "tools/call", params: { name: "phone_status", arguments: {} } }) + "\n");
+    s.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: idSecond, reason: "test" } }) + "\n");
+    const r1 = await first;
+    await new Promise((r) => setTimeout(r, 2500)); // the skipped job's turn has passed by now
+    const pong = await s.rpc("ping");             // the queue and the server still work
+    const runs = rf(log, "utf8").trim().split("\n").length;
+    check("F40：已取消的排队调用不执行、不应答", !r1?.isError && !secondReplied && runs === 1 && pong?.result !== undefined, `runs=${runs} replied=${secondReplied}`);
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 11f. F39/F40：MCP 客户端通常用 SIGTERM 停止 server —— 正在运行的 imctl 进程组（自身与孙进程
+// 都忽略 SIGTERM、持续写心跳）须随 server 一起被杀，server 照常退出（未开浏览器时）（CI 安全：不碰硬件）
+{
+  const { mkdtempSync, writeFileSync, readFileSync: rf, existsSync: ex, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const fake = join(dir, "python3");
+  const log = join(dir, "beats.log");
+  writeFileSync(fake, `#!/bin/bash
+if [ "$1" = "-c" ]; then exit 0; fi
+trap '' TERM
+( trap '' TERM; while true; do echo g >> "${log}"; sleep 0.1; done ) &
+while true; do echo c >> "${log}"; sleep 0.1; done
+`, { mode: 0o700 });
+  const s = await spawnServer({ NORACU_PYTHON: fake, NORACU_IMCTL_DIR: dir });
+  try {
+    const count = () => (ex(log) ? rf(log, "utf8").trim().split("\n").length : 0);
+    s.call("phone_status");                         // hangs: the fake imctl never answers
+    // wait until both beat loops are running (a slow CI runner can take a while to start them)
+    for (let i = 0; i < 100 && count() < 4; i++) await new Promise((r) => setTimeout(r, 100));
+    const exited = new Promise((r) => s.proc.once("exit", (code, signal) => r({ code, signal })));
+    s.proc.kill("SIGTERM");
+    const res = await Promise.race([exited, new Promise((r) => setTimeout(() => r(null), 3000))]);
+    const atExit = count();
+    await new Promise((r) => setTimeout(r, 600));   // any survivor would keep beating meanwhile
+    const later = count();
+    check("F40：SIGTERM 时 server 退出并带走 imctl 进程组", res !== null && (res.code === 143 || res.signal === "SIGTERM") && atExit > 0 && later === atExit,
+      `exit=${JSON.stringify(res)} beats at exit ${atExit}, 600 ms later ${later}`);
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 11g. phone_open 未能回主屏时，server 会再用菜单命令补一次 —— 它靠 imctl 的原文识别这种情况，
+// 两处文案必须一致（CI 安全：只读文件）
+{
+  const src = readFileSync(new URL("../src/server.mjs", import.meta.url), "utf8");
+  const cli = readFileSync(new URL("../imctl/src/imctl/cli.py", import.meta.url), "utf8");
+  const m = src.match(/const OPEN_HOME_FAILED = "([^"]+)";/);
+  check("phone_open：server 识别的“未能回主屏”文案与 imctl 一致", !!m && cli.includes(m[1]), m?.[1]);
 }
 
 // 12. 0.1.2：MCP Registry 元数据 —— server.json 必须与 package.json 一致（CI 安全：只读文件，不碰硬件）

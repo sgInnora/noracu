@@ -85,56 +85,257 @@ const PYTHON_CANDIDATES = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"
 const PYOBJC_INSTALL = "python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit";
 let pythonProbe = null; // { path, tried } once resolved; path === null when nothing qualified
 function pythonArgv(path) { return path === "python3" ? ["/usr/bin/env", ["python3"]] : [path, []]; }
-function resolvePython() {
-  if (pythonProbe) return pythonProbe;
-  const tried = [];
-  for (const cand of (process.env.NORACU_PYTHON ? [process.env.NORACU_PYTHON] : PYTHON_CANDIDATES)) {
-    const [cmd, pre] = pythonArgv(cand);
+// F39 (2026-11-05): execFileSync's timeout only sends a signal and then keeps waiting for the
+// child to exit. On 2026-11-04 an imctl child stuck in an uninterruptible wait never exited, so
+// the whole server stopped answering — tools/call, tools/list, even ping — for minutes. Every
+// iPhone-layer subprocess now runs asynchronously under its own timer and in its own process
+// group. On expiry the group gets SIGTERM (imctl turns it into SystemExit, so its cleanup runs),
+// then SIGKILL after a short grace; the call resolves at once either way, and the event loop
+// stays free throughout. Invariant 1 holds: an argv array, never a shell string.
+const IMCTL_DEFAULT_TIMEOUT_MS = 30000;
+// open = Spotlight + type + several OCR reads + confirm; type = paste + 2.5 s check + late-paste watch
+const IMCTL_TIMEOUT_MS = new Map([["open", 45000], ["type", 45000]]);
+const IMCTL_MAX_OUTPUT = 10 * 1024 * 1024;
+// NORACU_PHONE_TIMEOUT_MS (an integer 1000–600000) replaces every phone_* subprocess timeout,
+// e.g. for a slow Mac. An invalid value is ignored with a warning on stderr.
+const PHONE_TIMEOUT_OVERRIDE = (() => {
+  const raw = process.env.NORACU_PHONE_TIMEOUT_MS;
+  if (raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 1000 && n <= 600000) return n;
+  process.stderr.write(`[noracu] ignoring NORACU_PHONE_TIMEOUT_MS=${JSON.stringify(raw)}: expected an integer from 1000 to 600000\n`);
+  return null;
+})();
+// open_app keeps its own time budget so that it, not the server's kill, ends a slow run (it then
+// goes back to the Home Screen). The server hands it an absolute deadline — counted from the
+// spawn, so interpreter start-up and opening Spotlight are inside it — this far before its own
+// timeout: room for the last tap, its confirmation reads and the trip back to the Home Screen.
+const OPEN_DEADLINE_MARGIN_MS = 15000;   // at most 40 % of the timeout (a small NORACU_PHONE_TIMEOUT_MS)
+// The Home Screen trip the server makes itself after an `open` timeout still holds the input
+// queue, so it gets a short limit of its own (a queued call gives up after QUEUE_WAIT_LIMIT_MS).
+const TIDY_MENU_TIMEOUT_MS = 6000;
+// What imctl prints when phone_open could not get back to the Home Screen (cli._open_and_report).
+const OPEN_HOME_FAILED = "could not go back to the Home Screen — Spotlight may still be open";
+const KILL_GRACE_MS = 1500;   // SIGTERM → SIGKILL
+const REAP_WAIT_MS = 1000;    // after SIGKILL, how long the input queue waits for the group to go
+
+// Children that outlived their timeout. The input queue (below) does not start the next phone or
+// Mac action until each of them has exited or was given up on (KILL_GRACE_MS + REAP_WAIT_MS), so a
+// killed imctl can never act at the same time as the next call.
+const lingering = new Set();
+// Every running child, so a server that exits does not leave a detached imctl acting on its own.
+// The exit hook cannot wait for a grace period, so it kills outright (SIGKILL): an imctl that
+// keeps tapping after its server is gone is worse than skipped cleanup.
+const activeChildren = new Set();
+process.on("exit", () => { for (const c of activeChildren) signalGroup(c, "SIGKILL"); });
+// An MCP client usually stops the server with a signal, and "exit" does not fire for an
+// unhandled one. The server then exits as the default action would, killing its children first —
+// unless another listener handles the signal too: Playwright does while it has a browser open,
+// closes that browser gracefully (the persistent profile is flushed) and decides about exiting
+// itself, exactly as before. Then the server stays up, and a running imctl only gets SIGTERM: it
+// tidies up (e.g. leaves Spotlight) and the input queue waits for it as usual. (On SIGINT
+// Playwright exits once the browser is closed, and the exit hook then kills any child still
+// running — its tidy-up is best effort there.)
+for (const [sig, n] of [["SIGTERM", 15], ["SIGINT", 2], ["SIGHUP", 1]]) {
+  process.on(sig, () => {
+    const exiting = process.listenerCount(sig) <= 1;
+    for (const c of activeChildren) signalGroup(c, exiting ? "SIGKILL" : "SIGTERM");
+    if (exiting) process.exit(128 + n);
+  });
+}
+
+function signalGroup(child, sig) {
+  try { process.kill(-child.pid, sig); return; } catch { /* no group (spawn failed) or already gone */ }
+  try { child.kill(sig); } catch { /* already gone */ }
+}
+
+async function runAsync(cmd, argv, opts) {
+  // A child left behind by a timed-out step must be gone before the next one starts — across
+  // calls (the input queue drains too) and within one call (e.g. phone_home's menu command timing
+  // out, then its gesture fallback).
+  if (lingering.size) await Promise.all([...lingering]);
+  return spawnTimed(cmd, argv, opts);
+}
+
+function spawnTimed(cmd, argv, { timeoutMs, cwd, env }) {
+  return new Promise((resolve) => {
+    let stdout = "", stderr = "", size = 0, done = false, exited = false, child = null, timer = null;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ stdout, stderr, ...r });
+    };
+    const terminate = () => {
+      if (exited) return;
+      signalGroup(child, "SIGTERM");
+      const gone = new Promise((res) => {
+        const killer = setTimeout(() => {
+          if (exited) return;
+          signalGroup(child, "SIGKILL");
+          child.stdout?.destroy(); child.stderr?.destroy();  // let go of a child that will not die
+        }, KILL_GRACE_MS);
+        const giveUp = setTimeout(res, KILL_GRACE_MS + REAP_WAIT_MS);
+        child.once("close", () => { clearTimeout(killer); clearTimeout(giveUp); res(); });
+      });
+      lingering.add(gone);
+      gone.then(() => lingering.delete(gone));
+    };
     try {
-      execFileSync(cmd, [...pre, "-c", "import Quartz, Vision, AppKit"], { timeout: 20000, stdio: ["ignore", "ignore", "ignore"] });
-      pythonProbe = { path: cand, tried };
-      return pythonProbe;
-    } catch { tried.push(cand); }
-  }
-  pythonProbe = { path: null, tried };
-  return pythonProbe;
+      // detached: own process group, so osascript / screencapture grandchildren go with it
+      child = spawn(cmd, argv, { cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    } catch (error) {
+      finish({ code: null, error });
+      return;
+    }
+    activeChildren.add(child);
+    timer = setTimeout(() => { terminate(); finish({ code: null, timedOut: true }); }, timeoutMs);
+    const collect = (which) => (chunk) => {
+      if (done) return;
+      size += chunk.length;
+      if (size > IMCTL_MAX_OUTPUT) { terminate(); finish({ code: null, overflow: true }); return; }
+      if (which === "out") stdout += chunk; else stderr += chunk;
+    };
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", collect("out"));
+    child.stderr.on("data", collect("err"));
+    child.on("error", (error) => { activeChildren.delete(child); finish({ code: null, error }); });
+    child.on("close", (code, signal) => { exited = true; activeChildren.delete(child); finish({ code, signal }); });
+  });
+}
+
+// The probe result is cached for the life of the process only when it is definite: a candidate
+// that imports pyobjc, or every candidate failing outright (missing, or exiting non-zero). A probe
+// that timed out (a loaded or stuck Mac) is not cached, so the next phone_* call probes again
+// instead of reporting "imctl unavailable" until a restart.
+let pythonProbing = null; // the in-flight probe, so concurrent first calls share one
+function resolvePython() {
+  if (pythonProbe) return Promise.resolve(pythonProbe);
+  if (pythonProbing) return pythonProbing;
+  const probing = (async () => {
+    const tried = [];
+    let definite = true;
+    try {
+      for (const cand of (process.env.NORACU_PYTHON ? [process.env.NORACU_PYTHON] : PYTHON_CANDIDATES)) {
+        const [cmd, pre] = pythonArgv(cand);
+        const r = await runAsync(cmd, [...pre, "-c", "import Quartz, Vision, AppKit"], { timeoutMs: 20000 });
+        if (!r.error && !r.timedOut && r.code === 0) { pythonProbe = { path: cand, tried }; return pythonProbe; }
+        // definite: the interpreter is missing (ENOENT) or ran and exited non-zero; a timeout, a
+        // signal or any other spawn error says nothing lasting about it
+        if (!(r.error?.code === "ENOENT" || (!r.error && !r.timedOut && r.code !== null && !r.signal))) definite = false;
+        tried.push(r.timedOut ? `${cand} (timed out)` : cand);
+      }
+    } catch { definite = false; }
+    const result = { path: null, tried };
+    if (definite) pythonProbe = result;
+    return result;
+  })();
+  pythonProbing = probing;
+  const clear = () => { if (pythonProbing === probing) pythonProbing = null; };
+  probing.then(clear, clear);
+  return probing;
 }
 
 // imctl 拒绝输入时在 stderr 打印 `前缀: 说明` 行。这些是可恢复的调用方错误（不是环境缺失），
 // 原样透传匹配到的那一行，不归类为 imctl unavailable。后续任务会往列表里追加更多前缀。
-const IMCTL_PASS_THROUGH = ["mirror_not_live", "type_not_confirmed", "scroll_no_effect", "expect_not_found", "capture_failed", "open_not_confirmed", "focus_lost"];
+// "app not found" (phone_open, printed on stdout) is taken from stdout or stderr as one whole line, so a
+// warning on stderr or a long label list cannot hide the "could not go back" note retryOpenHome looks for.
+const IMCTL_PASS_THROUGH = ["mirror_not_live", "mirror_setup_required", "type_not_confirmed", "scroll_no_effect", "expect_not_found", "capture_failed", "open_not_confirmed", "focus_lost", "app not found"];
 
-function imctl(...args) {
-  const py = resolvePython();
+// What a timed-out command may have left behind, appended to imctl_timeout.
+const IMCTL_TIMEOUT_HINT = new Map([
+  ["type", " — the clipboard may still hold the typed text"],
+  ["open", " — Spotlight may still be open"],
+]);
+
+async function imctl(...args) {
+  const py = await resolvePython();
   if (!py.path) {
     return { ok: false, out: `imctl unavailable: no python3 with pyobjc found (tried ${py.tried.join(", ")}) — run \`${PYOBJC_INSTALL}\` for the python3 you want, or set NORACU_PYTHON=/path/to/python3 (see README)` };
   }
   const [cmd, pre] = pythonArgv(py.path);
-  try {
-    const out = execFileSync(cmd, [...pre, "-m", "imctl.cli", ...args], {
-      timeout: 30000, encoding: "utf8", maxBuffer: 10 * 1024 * 1024,
-      cwd: IMCTL_DIR, env: { ...process.env, PYTHONPATH: join(IMCTL_DIR, "src"), PYTHONDONTWRITEBYTECODE: "1" },
-    });
-    return { ok: true, out: out.trim() };
-  } catch (e) {
-    // G23（0.1.2）/ G26：镜像不在线（mirror_not_live）或粘贴未上屏（type_not_confirmed）时
-    // imctl 拒绝输入并在 stderr 带前缀行 —— 原样透传那一行，不归类为 imctl unavailable
-    const combined = String(e.stderr || "") + "\n" + String(e.stdout || "");
-    for (const prefix of IMCTL_PASS_THROUGH) {
-      const line = combined.split("\n").find((l) => l.startsWith(prefix + ":"));
-      if (line) return { ok: false, out: line.trim() };
+  const timeoutMs = PHONE_TIMEOUT_OVERRIDE ?? IMCTL_TIMEOUT_MS.get(args[0]) ?? IMCTL_DEFAULT_TIMEOUT_MS;
+  // wait for any lingering child first, so the deadline below is counted from the actual spawn
+  if (lingering.size) await Promise.all([...lingering]);
+  const marginMs = Math.min(OPEN_DEADLINE_MARGIN_MS, timeoutMs * 0.4);
+  const r = await runAsync(cmd, [...pre, "-m", "imctl.cli", ...args], {
+    timeoutMs, cwd: IMCTL_DIR,
+    env: { ...process.env, PYTHONPATH: join(IMCTL_DIR, "src"), PYTHONDONTWRITEBYTECODE: "1",
+      NORACU_OPEN_DEADLINE_EPOCH: String((Date.now() + timeoutMs - marginMs) / 1000) },
+  });
+  if (r.timedOut) {
+    let hint = IMCTL_TIMEOUT_HINT.get(args[0]) ?? "";
+    if (args[0] === "open") {
+      // the killed imctl had no time to tidy up: once it is gone, go to the Home Screen from here
+      if (lingering.size) await Promise.all([...lingering]);
+      hint = (await mirrorMenu("Home Screen", TIDY_MENU_TIMEOUT_MS)) ? " — noracu then returned the phone to the Home Screen" : hint;
     }
-    const raw = String(e.stderr || e.stdout || e.message);
-    // Collapse Python tracebacks / spawn errors into one actionable line so phone_* fail cleanly and tests can skip (graceful degradation).
-    if (/No module named|ModuleNotFoundError|ImportError|Traceback \(most recent/.test(raw)) {
-      const mod = (raw.match(/No module named '([^']+)'/) || [])[1];
-      return { ok: false, out: `imctl unavailable: ${py.path} is missing ${mod ? `the ${mod} module` : "a module"} — run \`${PYOBJC_INSTALL}\` for that python, or set NORACU_PYTHON (see README)` };
-    }
-    if (/ENOENT|No such file or directory/.test(raw)) {
-      return { ok: false, out: `imctl unavailable: cannot run imctl at ${IMCTL_DIR} — the bundled imctl/ directory is missing or NORACU_IMCTL_DIR points to the wrong place (see README)` };
-    }
-    return { ok: false, out: raw.slice(0, 500) };
+    return { ok: false, out: `imctl_timeout: phone ${args[0]} did not finish within ${timeoutMs / 1000}s (the Mac may be under heavy load) — the action may have partly run${hint}; check phone_status / phone_screenshot before retrying` };
   }
+  if (r.overflow) {
+    return { ok: false, out: `imctl_output_overflow: phone ${args[0]} printed more than 10 MB and was stopped` };
+  }
+  if (!r.error && r.code === 0) return { ok: true, out: r.stdout.trim() };
+  const message = r.error ? String(r.error.message || r.error) : `imctl exited with code ${r.code}${r.signal ? ` (${r.signal})` : ""}`;
+  // G23（0.1.2）/ G26：镜像不在线（mirror_not_live）或粘贴未上屏（type_not_confirmed）时
+  // imctl 拒绝输入并在 stderr 带前缀行 —— 原样透传那一行，不归类为 imctl unavailable
+  const combined = String(r.stderr || "") + "\n" + String(r.stdout || "");
+  for (const prefix of IMCTL_PASS_THROUGH) {
+    const line = combined.split("\n").find((l) => l.startsWith(prefix + ":"));
+    if (line) return { ok: false, out: await retryOpenHome(args, line.trim()) };
+  }
+  const raw = String(r.stderr || r.stdout || message);
+  // Collapse Python tracebacks / spawn errors into one actionable line so phone_* fail cleanly and tests can skip (graceful degradation).
+  if (/No module named|ModuleNotFoundError|ImportError|Traceback \(most recent/.test(raw)) {
+    const mod = (raw.match(/No module named '([^']+)'/) || [])[1];
+    return { ok: false, out: `imctl unavailable: ${py.path} is missing ${mod ? `the ${mod} module` : "a module"} — run \`${PYOBJC_INSTALL}\` for that python, or set NORACU_PYTHON (see README)` };
+  }
+  if (/ENOENT|No such file or directory/.test(raw)) {
+    return { ok: false, out: `imctl unavailable: cannot run imctl at ${IMCTL_DIR} — the bundled imctl/ directory is missing or NORACU_IMCTL_DIR points to the wrong place (see README)` };
+  }
+  return { ok: false, out: await retryOpenHome(args, raw.slice(0, 500)) };
+}
+
+// phone_open could not get back to the Home Screen (its menu trip failed on a loaded Mac): try once
+// more from here, with the menu command that needs no frontmost window.
+async function retryOpenHome(args, out) {
+  if (args[0] !== "open" || !out.includes(OPEN_HOME_FAILED)) return out;
+  if (!(await mirrorMenu("Home Screen", TIDY_MENU_TIMEOUT_MS))) return out;
+  return out.replace(OPEN_HOME_FAILED, "noracu then returned the phone to the Home Screen");
+}
+
+// F40: phone_* and mac_* drive the same real mouse, keyboard, clipboard and windows. Until F39
+// every one of them ran synchronously, so tool calls were implicitly serialized; now that imctl
+// runs asynchronously, two concurrent calls (MCP clients do issue parallel tool calls) could
+// interleave taps and pastes and race on the clipboard. They go through one FIFO queue instead.
+// A job's own timeout starts when it runs, not while it waits; the next job also waits for any
+// child a timed-out job left behind (see `lingering`). ping, tools/list and browser_* never wait.
+// A queued job that the client cancelled (notifications/cancelled), or that waited longer than
+// QUEUE_WAIT_LIMIT_MS, is dropped without acting: a tap or paste that runs long after the client
+// gave up would land on whatever is on screen by then.
+const QUEUE_WAIT_LIMIT_MS = 60000;
+const CANCELLED = Symbol("cancelled");  // a skipped job's result: the dispatcher sends nothing
+const queuedRequests = new Set();     // ids of jobs waiting in the queue (not yet started)
+const cancelledRequests = new Set();  // ids among them the client cancelled
+let inputChain = Promise.resolve();
+function serializedInput(fn, requestId) {
+  const queuedAt = Date.now();
+  if (requestId !== undefined) queuedRequests.add(requestId);
+  // setImmediate: after a synchronous mac_* job the event loop polls I/O once before the next job
+  // starts, so a notifications/cancelled line already sent for it is read first
+  const result = inputChain.then(() => new Promise((r) => setImmediate(r))).then(() => {
+    queuedRequests.delete(requestId);
+    if (requestId !== undefined && cancelledRequests.delete(requestId)) return CANCELLED;
+    const waited = Date.now() - queuedAt;
+    if (waited > QUEUE_WAIT_LIMIT_MS) {
+      return { error: `input_busy: an earlier phone/Mac action kept the input queue busy for ${Math.round(waited / 1000)}s; nothing was done — retry` };
+    }
+    return fn();
+  });
+  const drain = () => Promise.all([...lingering]).then(() => {});
+  inputChain = result.then(drain, drain);
+  return result;
 }
 
 // ── Mac 层 ──
@@ -440,12 +641,9 @@ async function macPasteImpl(args) {
   return { text: `pasted ${text.length} chars (clipboard restored: ${restored}) (frontmost: ${g.fm ?? "unknown"})` };
 }
 
-function macMenuCommand(args) {
-  // AX 菜单栏遍历找命令并 AXPress（本地化安全）
-  // 安全：静态脚本 + argv 传参（结构性消除 JXA 注入）
-  const { app, command } = args;
-  if (!app || !command) return { error: "app + command required" };
-  const script = `
+// AX 菜单栏遍历找命令并 AXPress（本地化安全）
+// 安全：静态脚本 + argv 传参（结构性消除 JXA 注入）
+const MENU_COMMAND_SCRIPT = `
     function run(argv) {
       const se = Application("System Events");
       const proc = se.processes.byName(argv[0]);
@@ -460,7 +658,10 @@ function macMenuCommand(args) {
       }
       return "not-found";
     }`;
-  const r = sh("/usr/bin/osascript", ["-l", "JavaScript", "-e", script, "--", String(app), String(command)], 15000);
+function macMenuCommand(args) {
+  const { app, command } = args;
+  if (!app || !command) return { error: "app + command required" };
+  const r = sh("/usr/bin/osascript", ["-l", "JavaScript", "-e", MENU_COMMAND_SCRIPT, "--", String(app), String(command)], 15000);
   return { text: r.ok ? r.out : "menu command failed: " + r.out.slice(0, 150) };
 }
 
@@ -740,16 +941,18 @@ function phoneSwipe(args) {
 }
 // 镜像自带菜单 Home Screen ⌘1 / App Switcher ⌘2 可靠且不需前台（AXPress，非贴边手势）。
 // 菜单优先；标签不匹配（非英文 macOS）或镜像未连接时回退 imctl 手势，行为向后兼容。
-function mirrorMenu(command) {
-  const m = macMenuCommand({ app: "iPhone Mirroring", command });
-  return typeof m.text === "string" && m.text.startsWith("executed");
+// F39: like imctl, the menu command runs asynchronously under a timer, so a stuck System Events
+// cannot freeze the server either.
+async function mirrorMenu(command, timeoutMs = 15000) {
+  const r = await runAsync("/usr/bin/osascript", ["-l", "JavaScript", "-e", MENU_COMMAND_SCRIPT, "--", "iPhone Mirroring", command], { timeoutMs });
+  return !r.timedOut && !r.error && r.code === 0 && r.stdout.trim().startsWith("executed");
 }
-function phoneHome() {
-  if (mirrorMenu("Home Screen")) return { ok: true, out: "home (mirror menu)" };
+async function phoneHome() {
+  if (await mirrorMenu("Home Screen")) return { ok: true, out: "home (mirror menu)" };
   return imctl("home");
 }
-function phoneAppSwitcher() {
-  if (mirrorMenu("App Switcher")) return { ok: true, out: "app switcher (mirror menu)" };
+async function phoneAppSwitcher() {
+  if (await mirrorMenu("App Switcher")) return { ok: true, out: "app switcher (mirror menu)" };
   return imctl("app-switcher");
 }
 function phoneScroll(args = {}) {
@@ -783,17 +986,23 @@ function phoneOpen(args) {
   if (!args.app) return { error: "app required" };
   return imctl("open", args.app);
 }
-function phoneScreenshot() {
+async function phoneScreenshot() {
   // Captured by imctl by CGWindow id, so it is the Mirroring window's own pixels even when another window covers it.
   const file = join(tmpdir(), `noracu-phone-${randomUUID().slice(0, 8)}.png`);
-  const r = imctl("screenshot", file);
-  if (!r.ok) return { error: r.out.slice(0, 300) };
   try {
-    const data = readFileSync(file).toString("base64");
-    unlinkSync(file);
-    return { image: data, mime: "image/png" };
-  } catch (e) {
-    return { error: "screenshot file missing: " + String(e.message).slice(0, 150) };
+    const r = await imctl("screenshot", file);
+    if (!r.ok) return { error: r.out.slice(0, 300) };
+    try {
+      return { image: readFileSync(file).toString("base64"), mime: "image/png" };
+    } catch (e) {
+      return { error: "screenshot file missing: " + String(e.message).slice(0, 150) };
+    }
+  } finally {
+    // the phone's screen is private: remove the PNG on every path, timeouts and failures included —
+    // and once more after any killed child is gone, in case it wrote the file on its way out
+    const remove = () => { try { unlinkSync(file); } catch { /* never written, or already gone */ } };
+    remove();
+    if (lingering.size) Promise.all([...lingering]).then(remove);
   }
 }
 
@@ -843,8 +1052,8 @@ const TOOLS = [
   { name: "browser_evaluate", desc: "Evaluate JavaScript in the page and return the result.", args: { js: "string" }, fn: browserEvaluate },
   { name: "browser_close", desc: "Close the browser.", args: {}, fn: browserClose },
   // iPhone device-use（imctl）
-  { name: "phone_status", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, live, overlay, paused).", args: {}, fn: phoneStatus },
-  { name: "phone_launch", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and clicks Resume when the connection is paused.", args: {}, fn: phoneLaunch },
+  { name: "phone_status", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, live, overlay, paused, setup — true when a setup or welcome screen is showing that the user must finish).", args: {}, fn: phoneStatus },
+  { name: "phone_launch", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Ensure iPhone Mirroring is running, brought to the front, and clicks Resume when the connection is paused. Never clicks through a setup or welcome screen: reports mirror_setup_required instead.", args: {}, fn: phoneLaunch },
   { name: "phone_screenshot", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Screenshot the iPhone screen (the Mirroring window, captured by window id so it works even when covered). Fails with capture_failed instead of returning another window's pixels.", args: {}, fn: phoneScreenshot },
   { name: "phone_ocr", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. OCR the iPhone screen into text with coordinates. Fails with capture_failed instead of returning another window's pixels.", args: {}, fn: phoneOcr },
   { name: "phone_find", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Locate text on the iPhone screen. Fails with capture_failed instead of returning another window's pixels.", args: { text: "string" }, fn: phoneFind },
@@ -854,9 +1063,9 @@ const TOOLS = [
   { name: "phone_home", desc: "EXPERIMENTAL. Go to the iPhone Home Screen via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl swipe.", args: {}, fn: phoneHome },
   { name: "phone_app_switcher", desc: "EXPERIMENTAL. Open the iPhone App Switcher via the iPhone Mirroring menu (works without python/pyobjc when the mirror is connected); falls back to an imctl gesture.", args: {}, fn: phoneAppSwitcher },
   { name: "phone_scroll", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll up or down by `distance` window heights (0 < distance <= 3, default 0.5) using trackpad-style scroll events. Reports scroll_no_effect when the screen did not change (list end, or the view does not scroll). Optional expect: text that must be on screen (OCR) first, else nothing is sent.", args: { direction: "string?", distance: "number?", expect: "string?" }, fn: phoneScroll },
-  { name: "phone_type", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe). Restores the clipboard only after OCR sees the text, else reports type_not_confirmed and keeps the text. replace=true selects all and overwrites the field. Optional expect: on-screen text (OCR), else nothing is sent.", args: { text: "string", replace: "boolean?", expect: "string?" }, fn: phoneType },
+  { name: "phone_type", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe). Restores the clipboard only after OCR sees the text appear (more often than before the paste) within its 2.5 s check; a paste that shows up a few seconds later is still reported as typed (do not type it again) but the clipboard keeps the typed text; otherwise type_not_confirmed, and the clipboard keeps the text. replace=true selects all and overwrites the field (over the same text nothing visibly changes, so that may report type_not_confirmed). Optional expect: on-screen text (OCR), else nothing is sent.", args: { text: "string", replace: "boolean?", expect: "string?" }, fn: phoneType },
   { name: "phone_key", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right. Optional expect: text that must be on screen (OCR) first, else nothing is sent.", args: { key: "string", expect: "string?" }, fn: phoneKey },
-  { name: "phone_open", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app: Home Screen, Spotlight via the menu, clear, type the name, OCR-pick the exact row and tap it; confirms the app opened (frame diff + OCR), taps the Top Hit icon when the label tap does nothing, else open_not_confirmed, back on the Home Screen.", args: { app: "string" }, fn: phoneOpen },
+  { name: "phone_open", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Open an app: Home Screen, Spotlight via the menu, clear, type the name (the clipboard keeps it), then tap only an exact label inside the Spotlight Top Hit card (suggestion, website and Settings rows of the same name are ignored, so a name the Top Hit card does not show is app not found; reads the English \"Top Hit\" label unless NORACU_TOPHIT_LABELS names the phone's own; a pasted name that never shows up in Spotlight, even after up to 15 s, is open_not_confirmed — retry); confirms the app opened (frame diff + OCR), taps the Top Hit icon when the label tap does nothing, else open_not_confirmed, back on the Home Screen.", args: { app: "string" }, fn: phoneOpen },
 ];
 
 // ── 统一参数校验（全工具入口门禁，返回 null=通过 / string=错误）──
@@ -990,6 +1199,10 @@ rl.on("line", async (line) => {
       send({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "noracu", version: LOADED.version } } });
     } else if (method === "notifications/initialized") {
       // no response
+    } else if (method === "notifications/cancelled") {
+      // F40: a queued phone/Mac call the client gave up on is skipped when its turn comes
+      // (only a call still waiting in the queue can be skipped; ids are never kept beyond that)
+      if (queuedRequests.has(params?.requestId)) cancelledRequests.add(params.requestId);
     } else if (method === "tools/list") {
       send({ jsonrpc: "2.0", id, result: { tools: TOOLS.map(t => ({
         name: t.name, description: t.desc,
@@ -1006,8 +1219,10 @@ rl.on("line", async (line) => {
       }
       const verr = validateArgs(name, params?.arguments || {});
       if (verr) { sendToolResult(id, [{ type: "text", text: `ERROR: ${verr}` }], true); return; }
-      try { r = await tool.fn(params?.arguments || {}); }
+      const run = () => tool.fn(params?.arguments || {});
+      try { r = await (/^(phone|mac)_/.test(name) ? serializedInput(run, id) : run()); }
       catch (e) { r = { error: String(e?.message ?? e).slice(0, 400) }; }
+      if (r === CANCELLED) return;  // the client cancelled it while it waited: no response (MCP)
       if (r?.error) {
         sendToolResult(id, [{ type: "text", text: `ERROR: ${r.error}` }], true);
       } else if (r?.ok === false) {

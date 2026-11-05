@@ -77,10 +77,10 @@ imctl status
 
 | Command | Description |
 |---------|-------------|
-| `status` | session + window info (JSON: running, window, window_id, onscreen, frontmost, live, overlay, paused) |
+| `status` | session + window info (JSON: running, window, window_id, onscreen, frontmost, live, overlay, paused, setup) |
 | `screenshot [PATH]` | capture the mirroring window to PNG by window id (works when covered) |
-| `resume` | click Resume when the window shows Connection Paused |
-| `launch` | ensure mirroring is running and frontmost |
+| `resume` | click Resume when the window shows Connection Paused (never on a setup or welcome screen) |
+| `launch` | ensure mirroring is running and frontmost; resumes a paused session, never clicks a setup screen (`mirror_setup_required`) |
 | `tap X Y` | tap at normalized coords (0-1) |
 | `longpress X Y [D]` | long-press (default 0.8s) |
 | `swipe FX FY TX TY [--ms]` | eased swipe between two points |
@@ -92,7 +92,7 @@ imctl status
 | `key K` | return / delete / up / down / left / right |
 | `ocr` | OCR the screen with coordinates |
 | `find TEXT` | locate text on screen |
-| `open APP` | open an app via Spotlight + OCR + tap |
+| `open APP` | open an app via Spotlight + OCR + tap (only an exact label inside the Top Hit card) |
 | `verify ACTION` | run a gesture and verify the screen changed |
 
 ## Python API

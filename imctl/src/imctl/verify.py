@@ -179,6 +179,45 @@ def mean_abs_diff(a: bytes, b: bytes) -> float:
 TYPE_MIN_DIFF = 0.5
 
 
+def text_probe(text: str) -> str | None:
+    """The OCR probe for ``text`` (screen_shows_text's rule: the first ≤12
+    characters after NFKC, lowercasing and whitespace removal), or None when
+    it is shorter than 2 characters — too short for OCR to confirm."""
+    probe = _compact(text)[:12]
+    return probe if len(probe) >= 2 else None
+
+
+def probe_count(text: str, hits) -> int | None:
+    """How many times ``text``'s probe occurs in the joined OCR ``hits``;
+    None when the text is too short for a probe. The phone's "Pasting from …"
+    box is left out (F44): its words are never the typed text, even when the
+    probe is a piece of them ("from", "pro" in a Mac named "M5pro")."""
+    probe = text_probe(text)
+    if probe is None:
+        return None
+    return _compact("".join(getattr(hit, "text", hit) for hit in hits
+                            if not _is_paste_hud(hit))).count(probe)
+
+
+# F44 (2026-11-05 real device, load ~25): when the phone is slow to fetch a paste
+# it shows a "Pasting from <Mac name>…" progress box mid-screen. That box alone
+# moves the whole-window frame diff past TYPE_MIN_DIFF while the text has not
+# arrived, and type_text() reported such pastes as typed. English UI only: an
+# iPhone in another language shows the box in that language, unrecognized here.
+PASTE_HUD_PROBE = "pastingfrom"
+
+
+def _is_paste_hud(hit) -> bool:
+    return PASTE_HUD_PROBE in _compact(getattr(hit, "text", hit))
+
+
+def shows_paste_hud(hits) -> bool:
+    """True when one OCR hit reads like the phone's "Pasting from …" progress
+    box (compared like probes: NFKC, lowercase, whitespace removed). While it
+    shows, a paste is still on its way to the phone."""
+    return any(_is_paste_hud(hit) for hit in hits)
+
+
 def screen_shows_text(text: str, read_screen) -> bool:
     """Report whether the OCR'd screen shows ``text`` (probe match).
 

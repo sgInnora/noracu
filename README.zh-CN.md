@@ -89,6 +89,10 @@ Claude Code：`claude mcp add noracu -- /绝对路径/TO/node /绝对路径/nora
 | 首次 `browser_launch` 卡住 | 一次性 Chromium 下载；或自动安装被关闭（`NORACU_DISABLE_AUTO_INSTALL=1`）→ 执行 `npx playwright install chromium` |
 | `phone_*` 报 `imctl unavailable: no python3 with pyobjc found` | 给某个 python3 装 pyobjc（`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`，通常选 Homebrew 的 python3）或设 `NORACU_PYTHON`——见[iPhone 层](#iphone-层实验性) |
 | `phone_*` 被拒并报 `mirror_not_live: …`（"Connection Paused"、"iPhone in Use"） | 镜像已暂停或 iPhone 被解锁——锁上 iPhone、放在 Mac 旁，然后调用 `phone_launch`（会点击 Resume） |
+| `phone_launch` 报 `mirror_setup_required` | iPhone Mirroring 正显示设置或欢迎页（例如升级 macOS 后首次启动）——请在 iPhone Mirroring 窗口里自己完成；noracu 从不替你点击这类页面 |
+| `imctl_timeout: phone … did not finish within …s` | Mac 负载过高或系统卡住——操作可能已部分执行，重试前先看 `phone_status` / `phone_screenshot`（`phone_open` 超时后 noracu 会回到主屏幕）；在此期间 server 仍会响应其他调用 |
+| `input_busy: …` | 前一个手机或 Mac 操作占用输入队列超过 60 秒；本次调用什么都没做——重试即可 |
+| 已安装的 App，`phone_open` 却报 app not found | 它只点 Spotlight「Top Hit」卡片里的标签——名字要和手机图标下显示的一致（例如 `拼多多`，而不是 `Pinduoduo`）。已安装却报 "Spotlight showed no Top Hit"，通常说明 iPhone 系统语言不是英文：`phone_open` 读的是 Spotlight 的 "Top Hit" 标签——把 `NORACU_TOPHIT_LABELS` 设成手机上显示的标签。报 `open_not_confirmed: … never showed up on the phone` 则是粘贴的名字没有到达手机（粘贴到 iPhone 可能要好几秒）——重试即可。`phone_open` 之后剪贴板里是 App 名字 |
 | 输入的文本被重新空格化（如 "no ra cu"） | 有 CJK 输入法在激活——用 `mac_paste` 代替 `mac_type` |
 | `element_no_longer_valid` | 快照超过 30 秒或界面变了——重跑 `mac_ax_state` / `browser_snapshot` 并用新索引 |
 
@@ -106,13 +110,13 @@ noracu 可以经 Apple 的 **iPhone Mirroring** 操作真实 iPhone。agent 在 
 
 **Python：** 驱动需要一个能导入 pyobjc（Quartz、Vision、AppKit）的 python3。设置 `NORACU_PYTHON`，或由 noracu 在首次调用 `phone_*` 时依次探测一次 `/opt/homebrew/bin/python3`、`/usr/local/bin/python3`、`python3`、`/usr/bin/python3`。Apple 自带的 `/usr/bin/python3` 通常没有 pyobjc；常见可用配置是 Homebrew 的 python3 加 `python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`。
 
-**镜像状态：** `phone_status` 返回 `live`（手机画面正在推流）、`overlay`（iPhone Mirroring 显示的替代文字，如 "Connection Paused"、"iPhone in Use"）和 `paused`（该覆盖层带 Resume 按钮）。判定依据是窗口结构，不是文字。镜像不在线时，`phone_tap`、`phone_longpress`、`phone_swipe`、`phone_scroll`、`phone_type`、`phone_key`、`phone_open` 会以 `mirror_not_live` 拒绝，而不是点到覆盖层上；`phone_ocr` / `phone_find` 的输出首行会给出警告。镜像闲置一段时间后会暂停；`phone_launch` 会把它置前并点击 Resume。
+**镜像状态：** `phone_status` 返回 `live`（手机画面正在推流）、`overlay`（iPhone Mirroring 显示的替代文字，如 "Connection Paused"、"iPhone in Use"）、`paused`（该覆盖层带 Resume 按钮）和 `setup`（需要用户自己完成的设置或欢迎页——noracu 从不点击）。判定依据是窗口结构和形状（镜像窗口是竖长或横长的手机形状，设置页接近正方形），不是文字。镜像不在线时，`phone_tap`、`phone_longpress`、`phone_swipe`、`phone_scroll`、`phone_type`、`phone_key`、`phone_open` 会以 `mirror_not_live` 拒绝，而不是点到覆盖层上；`phone_ocr` / `phone_find` 的输出首行会给出警告。镜像闲置一段时间后会暂停；`phone_launch` 会把它置前并点击 Resume。
 
 **隐私：** 手机上显示的一切——通知、短信、邮件、一次性验证码——都会变成工具输出，由你的 MCP client 发给它所用的模型。开始前打开专注模式、打开一个无关紧要的 App，并先用 `NORACU_READ_ONLY=1`（`phone_status`、`phone_screenshot`、`phone_ocr`、`phone_find` 仍可用；所有手机输入都会被拒绝）。iPhone Mirroring 设置好后，iPhone 的通知也会出现在 Mac 上。
 
 **首次成功路径：** `phone_status` → 若 `live` 不是 `true` 先 `phone_launch` → `phone_screenshot` → `phone_ocr` → `phone_find` + `phone_tap`。
 
-**已知限制：** 点击落在 OCR 识别到文字的位置，重复或识别错的标签可能点错；`phone_scroll` 用触控板式的滚动事件移动列表（竖向的 `phone_swipe` 拖拽不会滚动列表——它用于主屏翻页这类手势）；在一套实测环境（iPhone 17 Pro Max 运行 iOS 27.0.1，Mac 运行 macOS 26.6.2）上，iPhone Mirroring 在所有 View 尺寸下都把手机画面画得比窗口大约 17%，右列和最底行被裁掉、无法点到；在显示器之间移动窗口、切换主屏、重开 App 都无效，主要怀疑是 iOS 27 与 macOS 26 版本错位——边缘附近点不中时先看 `phone_screenshot`；`phone_open` 把 App 名输入 Spotlight 并只点击完全匹配的结果，找不到就回到主屏；`phone_home` / `phone_app_switcher` 走 iPhone Mirroring 菜单（英文 macOS），镜像连接时无需 python。
+**已知限制：** 点击落在 OCR 识别到文字的位置，重复或识别错的标签可能点错（若 Spotlight 的「Top Hit」里是同名的联系人或网站，`phone_open` 分辨不出它不是 App）；`phone_scroll` 用触控板式的滚动事件移动列表（竖向的 `phone_swipe` 拖拽不会滚动列表——它用于主屏翻页这类手势）；在一套实测环境（iPhone 17 Pro Max 运行 iOS 27.0.1，Mac 运行 macOS 26.6.2）上，iPhone Mirroring 在所有 View 尺寸下都把手机画面画得比窗口大约 17%，右列和最底行被裁掉、无法点到；在显示器之间移动窗口、切换主屏、重开 App 都无效，主要怀疑是 iOS 27 与 macOS 26 版本错位——边缘附近点不中时先看 `phone_screenshot`；`phone_open` 把 App 名输入 Spotlight，只有当 Spotlight 的「Top Hit」卡片显示的正是这个名字时才点击（同名的网页建议、网站和设置行一律不点），否则回到主屏——它读的是 Spotlight 的英文 "Top Hit" 标签，iPhone 设为其他语言时找不到任何 App，除非用 `NORACU_TOPHIT_LABELS` 指定那个标签；`phone_home` / `phone_app_switcher` 走 iPhone Mirroring 菜单（英文 macOS），镜像连接时无需 python。
 
 ## 环境变量
 
@@ -125,6 +129,9 @@ noracu 可以经 Apple 的 **iPhone Mirroring** 操作真实 iPhone。agent 在 
 | `NORACU_CLICLICK` | `/opt/homebrew/bin/cliclick` | cliclick 二进制路径 |
 | `NORACU_PYTHON` | 自动探测 | 运行随包 iPhone 驱动的 python3；须能导入 pyobjc（Quartz、Vision、AppKit）。未设置时依次尝试 `/opt/homebrew/bin/python3`、`/usr/local/bin/python3`、`python3`、`/usr/bin/python3` |
 | `NORACU_IMCTL_DIR` | 包内 `imctl/` | 覆盖驱动位置（仅开发用） |
+| `NORACU_PHONE_TIMEOUT_MS` | 30000（`phone_open` / `phone_type` 为 45000） | iPhone 层每一步的时限，1000–600000 毫秒；到时该步被终止并返回 `imctl_timeout` |
+| `NORACU_OCR_LANGUAGES` | `zh-Hans,en-US` | 识别 iPhone 画面的 OCR 语言及优先顺序（逗号分隔的 Vision 语言代码，如 `zh-Hant,en-US` 或 `en-US`；Vision 不支持的代码会被跳过并给出警告） |
+| `NORACU_TOPHIT_LABELS` | `Top Hit` | `phone_open` 要找的 Spotlight「Top Hit」分区标签，逗号分隔——iPhone 不是英文时，设成手机上实际显示的那个标签 |
 
 ## 安全
 

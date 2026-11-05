@@ -12,6 +12,8 @@ synthesized touch gestures — see the menu-command section below.
 from __future__ import annotations
 
 import math
+import os
+import re
 import subprocess
 import time
 import unicodedata
@@ -200,18 +202,18 @@ end run
 '''
 
 
-def _run_osascript(script: str, args: list[str] | None = None) -> str:
+def _run_osascript(script: str, args: list[str] | None = None, timeout: float = 10) -> str:
     """Run a static AppleScript; runtime values go through argv only."""
     cmd = ["osascript", "-e", script]
     if args:
         cmd += ["--"] + args
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise GestureError(f"osascript failed: {result.stderr.strip()}")
     return result.stdout.strip()
 
 
-def _view_menu_shortcut(item: str) -> tuple[str, int] | None:
+def _view_menu_shortcut(item: str, timeout: float = 10) -> tuple[str, int] | None:
     """Read a View menu item's shortcut — read-only, never clicks.
 
     Returns (cmdChar, cmdModifiers), or None when unreadable.
@@ -220,7 +222,7 @@ def _view_menu_shortcut(item: str) -> tuple[str, int] | None:
     8 means no key equivalent at all.
     """
     try:
-        raw = _run_osascript(_MENU_SHORTCUT_SCRIPT, [item])
+        raw = _run_osascript(_MENU_SHORTCUT_SCRIPT, [item], timeout=timeout)
     except (GestureError, OSError, subprocess.TimeoutExpired):
         return None
     char, sep, mods = raw.partition(",")
@@ -232,27 +234,29 @@ def _view_menu_shortcut(item: str) -> tuple[str, int] | None:
         return None
 
 
-def _run_view_menu_command(item: str) -> bool:
+def _run_view_menu_command(item: str, timeout: float = 10) -> bool:
     """Trigger a View menu command of iPhone Mirroring.
 
     Primary: the item's shortcut as a real Command chord (works on any
     UI language). Fallback: clicking the English menu item. Returns
     False when neither path works (app not running, localized menus…).
+    ``timeout`` bounds each osascript run it makes, including those that
+    bring the mirror to the front.
     """
-    shortcut = _view_menu_shortcut(item)
+    shortcut = _view_menu_shortcut(item, timeout=timeout)
     if shortcut is not None:
         char, mods = shortcut
         keycode = inp.keycode_for_char(char) if mods == 0 else None
         if keycode is not None:
             try:
-                ensure_frontmost()
+                ensure_frontmost(timeout=timeout)
                 inp._cmd_chord(keycode)
                 return True
-            except (inp.InputError, WindowError):
+            except (inp.InputError, WindowError, OSError, subprocess.TimeoutExpired):
                 pass  # fall through to clicking the menu item
     try:
-        ensure_frontmost()
-        _run_osascript(_CLICK_MENU_ITEM_SCRIPT, [item])
+        ensure_frontmost(timeout=timeout)
+        _run_osascript(_CLICK_MENU_ITEM_SCRIPT, [item], timeout=timeout)
         return True
     except (GestureError, OSError, subprocess.TimeoutExpired, WindowError):
         return False
@@ -275,7 +279,8 @@ def open_spotlight() -> bool:
 SPOTLIGHT_MIN_DIFF = 6.0
 
 
-def open_spotlight_checked(settle_s=1.0, *, luma=None, sleep=time.sleep, opener=None, home=None, home_settle_s=0.8) -> bool:
+def open_spotlight_checked(settle_s=1.0, *, luma=None, sleep=time.sleep, opener=None, home=None,
+                           home_settle_s=0.8, read_screen=None) -> bool:
     """Go to the Home Screen, open Spotlight, and confirm it (F17 guard).
 
     Two layers of protection, in order:
@@ -296,19 +301,53 @@ def open_spotlight_checked(settle_s=1.0, *, luma=None, sleep=time.sleep, opener=
     SPOTLIGHT_MIN_DIFF (calibrated for the single home-screen →
     Spotlight transition).
 
+    ③ F43 (2026-11-05 real-device, iOS 27): going Home from an app that
+    was opened from Spotlight lands back IN Spotlight, with the previous
+    query and its Top Hit card. The Spotlight command then closed it, and
+    that big change fooled layer ② into "opened" while the paste went to
+    the Home Screen (every phone_open right after a successful one
+    failed). When Home itself brought up a Top Hit card (none was on
+    screen before it), Spotlight is already open: it is reported as open
+    and no toggle is sent (the caller clears the old query first). A card
+    that was there before Home may be another app's (Safari shows one) with
+    Home ignored, so then — and when a read fails — layer ② decides. Known limit: a previous query
+    without a Top Hit card (no results) is not recognized, and the toggle
+    still closes that Spotlight.
+
     ``luma`` (default verify.window_luma), ``sleep``, ``opener``
-    (default open_spotlight) and ``home`` (default: View ▸ Home
-    Screen) are injectable so tests can drive this without a phone.
+    (default open_spotlight), ``home`` (default: View ▸ Home Screen)
+    and ``read_screen`` (default vision.read_screen) are injectable so
+    tests can drive this without a phone.
     """
     if luma is None:
         luma = verify.window_luma
+    if read_screen is None:
+        read_screen = vision.read_screen
     if opener is None:
         opener = open_spotlight
     if home is None:
         home = lambda: _run_view_menu_command("Home Screen")
+
+    def card():
+        # a Top Hit card header near the top of the window (Spotlight's sits at ny ≈ 0.14; a
+        # "Top Hit" line far down is no evidence), "none", or "unreadable"
+        try:
+            header = _tophit_header(read_screen())
+        except Exception as exc:
+            if not verify.is_capture_error(exc):
+                raise
+            return "unreadable"
+        return "card" if header is not None and header.ny < SPOTLIGHT_HEADER_MAX_NY else "none"
+
+    before_home = card()
     if not home():
         return False
     sleep(home_settle_s)
+    # F43: Home itself brought up a Top Hit card — Spotlight with the previous query: do not
+    # toggle it shut. A card that was already there before Home may be another app's own
+    # (Safari shows one too) with Home ignored; then, and when unsure, the gate below decides.
+    if before_home == "none" and card() == "card":
+        return True
     before = luma()
     if not opener():
         return False
@@ -326,6 +365,16 @@ _LABEL_LOOKALIKES = {
     "х": "x",  # Cyrillic small letter ha (U+0445)
     "Х": "x",  # Cyrillic capital letter ha (U+0425)
 }
+
+
+# open_spotlight_checked() takes a Top Hit header only this high up the window as proof that
+# Spotlight is open (the header measured at ny ≈ 0.14).
+SPOTLIGHT_HEADER_MAX_NY = 0.3
+
+# Spotlight's search field is at the bottom of the window (ny >= SEARCH_FIELD_NY) and echoes the
+# typed query. choose_app_hit never takes a label there; open_app reads that echo as the proof
+# that a late paste has reached the phone (F42).
+SEARCH_FIELD_NY = 0.88
 
 
 def _norm_label(s: str) -> str:
@@ -359,20 +408,37 @@ def choose_app_hit(hits: list, name: str) -> vision.OCRHit | None:
     forbidden: "X" must never hit "Xcode" or "X Corp". When several
     rows match, the topmost (smallest ny) wins. Returns None when
     nothing qualifies.
+
+    F35 (2026-11-05 real-device): an exact label is not an app. The
+    query "Pinduoduo" matched a Chrome *suggestion* row of that name
+    (the app's own Top Hit label reads 拼多多), the tap opened a web
+    search, and the open was reported as confirmed. Only a row INSIDE
+    the Top Hit card counts now: below the "Top Hit" header and at
+    most TOP_HIT_CARD_SPAN under it — the same geometry the icon
+    fallback in open_app() already relies on. No header, or no exact
+    label inside the card → None: "not found" beats opening the
+    wrong thing. Suggestion, website and Settings deep-link rows of
+    the same name are never candidates.
     """
     want = _norm_label(name)
+    header = _tophit_header(hits)
+    if header is None:
+        return None
     best = None
     for hit in hits:
         if _norm_label(hit.text) != want:
             continue
-        if hit.ny >= 0.88:
+        if hit.ny >= SEARCH_FIELD_NY:
             continue  # the search field echoing the query
+        if not header.ny < hit.ny <= header.ny + TOP_HIT_CARD_SPAN:
+            continue  # outside the Top Hit card (F35)
         if best is None or hit.ny < best.ny:
             best = hit
     return best
 
 
-def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep):
+def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep,
+                 deadline=None, clock=time.monotonic):
     """Read the screen up to ``attempts`` times for a Spotlight result row.
 
     Each pass calls ``read_screen()`` for OCR hits and hands them to
@@ -388,26 +454,37 @@ def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep):
     single-character labels, and they are recognized more reliably
     without it. F27: Vision's full-frame pass can also skip such a label
     entirely (the app "X" on 2026-11-04), so a short name that both
-    reads miss gets a third read with the minimumTextHeight sweep —
-    ``read_screen(language_correction=False, sweep=True)``. The match
+    reads miss gets a third read that adds the minimumTextHeight sweep
+    to the default pass on the same frame —
+    ``read_screen(language_correction=False, also_sweep=True)`` (F35:
+    the Top Hit header must be in the same read as the label). The match
     stays exact either way. Long names keep the exact original
-    read/sleep sequence.
+    read/sleep sequence. ``deadline`` (a ``clock()`` value) is checked
+    before every read; once reached, no further read happens.
     """
     short = len(_norm_label(name)) <= 2
+
+    def expired():
+        return deadline is not None and clock() >= deadline
+
+    reads = [{}]
+    if short:
+        # F35: the sweep finds the one-letter label, but choose_app_hit also
+        # needs the "Top Hit" header from the SAME frame — the last read uses
+        # both the default pass and the sweep (also_sweep), not the sweep alone.
+        reads += [{"language_correction": False},
+                  {"language_correction": False, "also_sweep": True}]
     for i in range(attempts):
-        hit = choose_app_hit(read_screen(), name)
-        if hit is not None:
-            return hit
-        if short:
-            hit = choose_app_hit(read_screen(language_correction=False), name)
-            if hit is not None:
-                return hit
-            hit = choose_app_hit(
-                read_screen(language_correction=False, sweep=True), name)
-            if hit is not None:
-                return hit
-        if i + 1 < attempts:
+        if i:
+            if expired():
+                return None
             sleep(delay_s)
+        for kwargs in reads:
+            if expired():
+                return None  # out of time before this read (open_app reports it)
+            hit = choose_app_hit(read_screen(**kwargs), name)
+            if hit is not None:
+                return hit
     return None
 
 
@@ -416,22 +493,83 @@ def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep):
 # 0.218，单位为窗口高度比例）。
 SPOTLIGHT_ICON_ABOVE_LABEL = 0.052
 
+# Top Hit 卡片的纵向范围：卡片内的行在 "Top Hit" 标题下方、且距标题不超过这个
+# 窗高比例。2026-11-05（macOS 27.2 / iOS 27）实测：标题 0.136，卡片内标签 0.24，
+# 下一个分区标题 "Suggestions" 0.294，第一条建议行 0.336 —— 0.15 落在卡片与
+# 建议区之间。choose_app_hit()（F35）与 open_app() 的图标兜底共用这一个值。
+TOP_HIT_CARD_SPAN = 0.15
+
 # 待真机标定：打开 App 前后整窗 luma 帧差下限。
 OPEN_MIN_DIFF = 12.0
+
+# open_app's own time budget (seconds). The server stops `open` at 45 s from outside; a run
+# that is killed there can leave Spotlight open with the name typed in. open_app checks this
+# budget before every read pass and tap and, once it is spent, goes back to the Home Screen
+# and reports "deadline" instead (F39).
+OPEN_DEADLINE_S = 38.0
+
+# F42 (2026-11-05 real-device): a paste reached the phone anywhere from 1.5 s to more than 10 s
+# after Cmd+V — the text travels to the iPhone only when it pastes. When type_text did not see
+# the paste arrive, open_app keeps reading Spotlight, one pass a second, for up to this long
+# (within its budget). Once the search field shows the name, the query is in, and one more pass
+# is enough — a Top Hit card alone may still be the previous query's.
+OPEN_LATE_PASTE_S = 15.0   # a later device run under load saw ~15 s from Cmd+V to the echo
+OPEN_LATE_PASTE_PASSES = 30   # a cap for injected clocks; the time limit normally ends it first
+
+
+# The Spotlight "Top Hit" section label phone_open looks for. English by default;
+# NORACU_TOPHIT_LABELS (comma-separated) supplies the label of an iPhone set to another
+# language, exactly as the phone shows it (no unverified translations built in).
+def _tophit_labels(raw):
+    # ASCII and full-width commas, and the ideographic enumeration comma
+    parts = re.split(r"[,，、]", raw or "")
+    labels = tuple(_norm_label(x) for x in parts if x.strip())
+    return labels or (_norm_label("Top Hit"),)
+
+
+TOP_HIT_LABELS = _tophit_labels(os.environ.get("NORACU_TOPHIT_LABELS"))
+
+
+def _field_echo(hits, name) -> bool:
+    """True when the search field shows exactly ``name`` (F42).
+
+    The field is the bottom zone (ny >= SEARCH_FIELD_NY); OCR may read the
+    magnifier glyph in front of the text as a "Q". Exact after _norm_label,
+    like every other label comparison here.
+    """
+    want = _norm_label(name)
+    for hit in hits:
+        if hit.ny < SEARCH_FIELD_NY:
+            continue
+        got = _norm_label(hit.text)
+        # the magnifier glyph may come back as "Q", "Q." or "Q:" in front of the text
+        if got == want or re.sub(r"^q[\s.,:;·•]*", "", got, count=1) == want:
+            return True
+    return False
 
 
 def _tophit_header(hits):
     """The OCR hit for the Spotlight "Top Hit" card header, or None.
 
     Matched exactly after _norm_label (case-folding, trailing
-    punctuation), so a list row that merely contains the words can
-    never pose as the card header.
+    punctuation) against TOP_HIT_LABELS, so a list row that merely
+    contains the words can never pose as the card header. Several
+    matches → the first in reading order (the topmost).
     """
-    want = _norm_label("Top Hit")
     for hit in hits:
-        if _norm_label(hit.text) == want:
+        if _norm_label(hit.text) in TOP_HIT_LABELS:
             return hit
     return None
+
+
+# open_app's tidy-up trip to the Home Screen must fit inside the time the server leaves after
+# its deadline (two 10 s osascript runs did not), so it uses shorter ones.
+TIDY_OSASCRIPT_TIMEOUT_S = 4.0
+
+
+def home_via_menu(timeout: float = TIDY_OSASCRIPT_TIMEOUT_S) -> bool:
+    """View ▸ Home Screen in iPhone Mirroring (what open_app uses to tidy up)."""
+    return _run_view_menu_command("Home Screen", timeout=timeout)
 
 
 def _tap_and_confirm_open(nx, ny, *, luma, sleep, tap, read_screen):
@@ -459,7 +597,9 @@ def _tap_and_confirm_open(nx, ny, *, luma, sleep, tap, read_screen):
 
 def open_app(name: str, *, spotlight_open: bool = False,
              read_screen=None, luma=None, sleep=time.sleep, tap=None,
-             home=None, clear_text=None, type_text=None) -> str:
+             home=None, clear_text=None, type_text=None,
+             clock=time.monotonic, deadline_s: float | None = OPEN_DEADLINE_S,
+             report: dict | None = None) -> str:
     """Open an app by name: Spotlight → clear → type → OCR → tap → CONFIRM.
 
     ``spotlight_open`` lets a caller that already ran
@@ -480,7 +620,9 @@ def open_app(name: str, *, spotlight_open: bool = False,
     keeps the previous Spotlight query, so the new name would be
     appended to it and no result row would match (F17). Results are
     then read up to twice (find_app_hit) because they can lag the
-    keystrokes.
+    keystrokes — or, when type_text did not see the paste arrive, once a
+    second for up to OPEN_LATE_PASTE_S (F42): once the search field shows
+    the name, one more pass.
 
     The top hit is never opened with Return — it may belong to a
     different app than the requested one.
@@ -497,28 +639,37 @@ def open_app(name: str, *, spotlight_open: bool = False,
     (still moving → the last read is authoritative).
     ② tap the row, then confirm via _tap_and_confirm_open (frame
     diff ≥ OPEN_MIN_DIFF and the "Top Hit" header gone).
-    ③ when that tap did nothing and the hit sits inside the Top Hit
-    card — the "Top Hit" header above the hit, less than 0.15 away —
-    tap the icon SPOTLIGHT_ICON_ABOVE_LABEL above the label and
-    confirm the same way. Any other hit gets NO second tap: an
-    upward offset there could land on a different app's row.
+    ③ when that tap did nothing and the post-tap read still shows the
+    exact label inside the Top Hit card (choose_app_hit, F35), tap the
+    icon SPOTLIGHT_ICON_ABOVE_LABEL above THAT label and confirm the
+    same way. Otherwise NO second tap: an upward offset from a stale
+    position could land on a different app's row.
     ④ still nothing confirmed → back to the Home Screen (View ▸
     Home Screen), reported as not_confirmed.
 
     A capture failure after the hit is found (WindowError /
     CaptureError, F25) counts as unconfirmed — no further taps.
 
-    Returns "opened"; "not_found" (no row matched; back on the Home
-    Screen); "not_confirmed" (row — and possibly the Top Hit icon —
-    tapped but the app never verifiably opened; back on the Home
-    Screen); or "spotlight_unavailable" (Spotlight could not be
+    Returns "opened"; "not_found" (a Top Hit card was seen, but never
+    with exactly this name; back on the Home Screen); "no_top_hit" (no
+    read showed Spotlight's "Top Hit" header at all — no such app, or a
+    non-English iPhone; back on the Home Screen); "not_confirmed" (row
+    — and possibly the Top Hit icon — tapped but the app never
+    verifiably opened; back on the Home Screen); "not_typed" (type_text
+    did not see the paste arrive and the search field never showed the
+    name during the late-paste reads either — the name may never have
+    reached the phone, so this is no evidence the app is missing; back on
+    the Home Screen);
+    "deadline" (the OPEN_DEADLINE_S budget ran out before a tap; back on
+    the Home Screen); or "spotlight_unavailable" (Spotlight could not be
     opened; nothing was typed or tapped).
 
     ``read_screen`` (default vision.read_screen), ``luma`` (default
     verify.window_luma), ``sleep``, ``tap`` (default inp.tap),
     ``home`` (default View ▸ Home Screen), ``clear_text`` and
     ``type_text`` are injectable so tests can drive this without a
-    phone.
+    phone. ``report`` (a dict), when given, receives ``home``: whether
+    the last trip back to the Home Screen worked.
     """
     if read_screen is None:
         read_screen = vision.read_screen
@@ -527,22 +678,43 @@ def open_app(name: str, *, spotlight_open: bool = False,
     if tap is None:
         tap = inp.tap
     if home is None:
-        home = lambda: _run_view_menu_command("Home Screen")
+        home = home_via_menu
+
+    def tidy():
+        # back to the Home Screen; the caller learns whether that worked
+        ok = bool(home())
+        if report is not None:
+            report["home"] = ok
+        return ok
+
     if clear_text is None:
         clear_text = inp.clear_text
     pending: list = []
     if type_text is None:
         def type_text(text):
-            return inp.type_text(text, pending=pending)
+            # F42: never give the clipboard back here — the name can reach the phone more
+            # than 10 s after Cmd+V, and Spotlight can show it in its own suggestions before
+            # that; a restore in between would paste the user's clipboard into the search
+            return inp.type_text(text, pending=pending, restore=False)
     raw_read = read_screen
+    deadline = None if deadline_s is None else clock() + deadline_s
+    saw_top_hit = [False]
+    saw_echo = [False]
 
     def read_screen(**kwargs):
-        # F33: every later read is also evidence for a clipboard restore
-        # type_text could not license in time (a paste that landed late).
+        # F33: every later read is also evidence for a clipboard restore an
+        # injected type_text may have handed over (the default never does: F42).
         hits = raw_read(**kwargs)
         for restore in pending:
             restore.offer(hits)
+        if _tophit_header(hits) is not None:
+            saw_top_hit[0] = True  # tells "not_found" apart from "no_top_hit"
+        if _field_echo(hits, name):
+            saw_echo[0] = True  # F42: the name is in the search field — the paste arrived
         return hits
+
+    def out_of_time():
+        return deadline is not None and clock() >= deadline
 
     short = len(_norm_label(name)) <= 2
 
@@ -554,26 +726,64 @@ def open_app(name: str, *, spotlight_open: bool = False,
         return read_screen(also_sweep=True) if short else read_screen()
 
     # F34: one retry — on the device the Spotlight command was once ignored
-    # right after an app closed. Each try starts from the Home Screen, so a
-    # second try cannot toggle an open Spotlight shut.
+    # right after an app closed. Each try goes Home first; when Home lands back in
+    # Spotlight (iOS 27, F43) the gate reports it open instead of toggling it shut.
     if not spotlight_open and not (open_spotlight_checked()
                                    or open_spotlight_checked()):
         return "spotlight_unavailable"
+    if out_of_time():
+        # the budget was spent before anything was typed (a tiny
+        # NORACU_PHONE_TIMEOUT_MS, or a slow start) — do not clear or type at all
+        tidy()
+        return "deadline"
     clear_text()  # iOS kept the last query; new input would append (F17)
     sleep(0.3)
     typed = type_text(name)
     sleep(1.5)  # wait for Spotlight results
-
-    # F33: a paste type_text did not see arrive may still be on its way (on
-    # the device it once showed up 8-10 s after Cmd+V): one more read pass.
-    hit = find_app_hit(read_screen, name, attempts=3 if typed is False else 2,
-                       sleep=sleep)
+    hit = None
+    if typed is not False:
+        hit = find_app_hit(read_screen, name, attempts=2, sleep=sleep,
+                           deadline=deadline, clock=clock)
+    if hit is None and not saw_echo[0]:
+        # F33/F42: the name is not in the search field yet — the paste may still be on its
+        # way, whether type_text missed it or took another change for it (a clear that
+        # landed late redraws the results: seen on the device after a back-to-back open)
+        limit = clock() + OPEN_LATE_PASTE_S
+        if deadline is not None:
+            limit = min(limit, deadline)
+        echo_passes = 0
+        for i in range(OPEN_LATE_PASTE_PASSES):
+            # the pass right after the first echo still runs past the limit (the results
+            # trail the query by a moment), but never past the open budget
+            confirming = echo_passes == 1
+            if i:
+                stop_at = deadline if confirming else limit
+                if stop_at is not None and clock() >= stop_at:
+                    break
+                sleep(1.0)
+            hit = find_app_hit(read_screen, name, attempts=1, sleep=sleep,
+                               deadline=deadline if confirming else limit, clock=clock)
+            if hit is not None:
+                break
+            # only the search field showing the name proves the paste arrived — a Top Hit
+            # card may still be the previous query's; once it is in, one more pass
+            if saw_echo[0]:
+                echo_passes += 1
+                if echo_passes >= 2:
+                    break
     if hit is None:
         # Leave the phone tidy: back to the home screen (View ▸ Home Screen).
-        home()
-        return "not_found"
+        tidy()
+        if out_of_time():
+            return "deadline"
+        if not saw_echo[0]:
+            return "not_typed"  # F42: the name never showed up in the search field
+        return "not_found" if saw_top_hit[0] else "no_top_hit"
 
     try:
+        if out_of_time():
+            tidy()
+            return "deadline"
         # ① the Spotlight results can still be reflowing when
         # find_app_hit returns; re-read after 0.5s and re-pick.
         sleep(0.5)
@@ -590,22 +800,27 @@ def open_app(name: str, *, spotlight_open: bool = False,
                     hit = once_more
             # else: the two reads agree — the first hit stands
 
-        # ② tap the row (the label inside the Top Hit card) and confirm
+        if out_of_time():
+            tidy()
+            return "deadline"
+        # ② tap the row (the label inside the Top Hit card) and confirm.
+        # The post-tap read uses reread(): for a short name it also sweeps,
+        # so ③ can find the label again (F32/F35).
         opened, hits = _tap_and_confirm_open(
             hit.nx, hit.ny, luma=luma, sleep=sleep, tap=tap,
-            read_screen=read_screen)
+            read_screen=reread)
         if opened:
             return "opened"
 
-        # ③ the label tap did nothing and the hit sits inside the Top
-        # Hit card → tap the icon above the label. Anywhere else, no
-        # second tap: an upward offset could hit another app's row.
-        header = _tophit_header(hits)
-        if (header is not None and header.ny < hit.ny
-                and hit.ny - header.ny < 0.15):
+        # ③ the label tap did nothing → tap the icon above the label, but
+        # only where the post-tap read shows that label inside the Top Hit
+        # card NOW (choose_app_hit, F35) — never the first read's position:
+        # the results may have changed. No such label → no second tap.
+        again = choose_app_hit(hits, name)
+        if again is not None and not out_of_time():
             opened, _ = _tap_and_confirm_open(
-                hit.nx, hit.ny - SPOTLIGHT_ICON_ABOVE_LABEL,
-                luma=luma, sleep=sleep, tap=tap, read_screen=read_screen)
+                again.nx, again.ny - SPOTLIGHT_ICON_ABOVE_LABEL,
+                luma=luma, sleep=sleep, tap=tap, read_screen=reread)
             if opened:
                 return "opened"
     except Exception as exc:
@@ -615,7 +830,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
         # no further taps; wrap up unconfirmed below.
 
     # ④ leave the phone tidy and say the taps were not confirmed
-    home()
+    tidy()
     return "not_confirmed"
 
 
@@ -629,15 +844,19 @@ def status() -> dict:
 
     Keys: running; and when running: window {x,y,w,h} (AX bounds), window_id, onscreen, frontmost,
     live (True/False/null — is the phone stream up), overlay (text shown over the stream when not
-    live, e.g. a paused/connecting notice), paused (True/False, or null when the state is unknown).
+    live, e.g. a paused/connecting notice), paused (True/False, or null when the state is unknown),
+    setup (True when the overlay is a setup / welcome screen the user must finish — F37; then
+    paused is False: there is no Resume control to press).
     """
     from .window import (
         get_overlay, get_window_info, is_frontmost, is_paused, is_running,
+        is_setup_screen,
     )
 
     running = is_running()
     info = {"running": running}
     if running:
+        b = None
         try:
             b = get_bounds()
             info["window"] = {"x": b.x, "y": b.y, "w": b.width, "h": b.height}
@@ -651,7 +870,9 @@ def status() -> dict:
         overlay = get_overlay()
         info["live"] = overlay["live"]
         info["overlay"] = overlay["overlay"]
-        info["paused"] = is_paused(overlay)
+        setup = b is not None and is_setup_screen(overlay, b)
+        info["paused"] = False if setup else is_paused(overlay)
+        info["setup"] = setup
     return info
 
 

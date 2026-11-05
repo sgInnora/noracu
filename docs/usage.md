@@ -176,6 +176,8 @@ model — don't let it override the task.
 | `… blocked by NORACU_READ_ONLY=1` | you're in observation-only mode — unset it to act |
 | `browser_evaluate disabled by NORACU_DISABLE_EVAL=1` | eval kill-switch is on |
 | `mirror_not_live: …` | iPhone Mirroring shows an overlay (paused, "iPhone in Use") — lock the iPhone, keep it near the Mac, call `phone_launch` |
+| `mirror_setup_required: …` | iPhone Mirroring shows a setup or welcome screen — finish it yourself in its window, then call `phone_launch` |
+| `imctl_timeout: …` | a phone step ran past its time limit and was stopped — check `phone_status` / `phone_screenshot` before retrying (after `phone_open`, noracu goes back to the Home Screen); raise `NORACU_PHONE_TIMEOUT_MS` on a slow Mac |
 | `imctl unavailable: no python3 with pyobjc found …` | install pyobjc for a python3 (`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`) or set `NORACU_PYTHON` |
 
 ## 9. iPhone layer
@@ -213,9 +215,11 @@ phone_tap {"x": 0.50, "y": 0.06}
 → tapped (0.5, 0.06)
 ```
 
-`live` / `overlay` / `paused` come from the window's structure, not its
-language: a live mirror is a single empty hosting view; "Connection Paused",
-"iPhone in Use" and similar states add text and a button. While the mirror is
+`live` / `overlay` / `paused` / `setup` come from the window's structure and
+shape, not its language: a live mirror is a single empty hosting view;
+"Connection Paused", "iPhone in Use" and similar states add text and a button;
+a setup or welcome screen (`setup: true`) sits in a window that is not
+phone-shaped, and `phone_launch` never clicks it. While the mirror is
 not live, `phone_tap`, `phone_longpress`, `phone_swipe`, `phone_scroll`,
 `phone_type`, `phone_key` and `phone_open` refuse with `mirror_not_live`, and
 `phone_ocr` / `phone_find` start with a `warning: mirror not live …` line.
@@ -225,11 +229,20 @@ mirror by about half a window, with trackpad-style scroll events; a vertical
 `phone_swipe` drag does not scroll lists in iPhone Mirroring, so keep swipes
 for gestures such as Home Screen paging.
 
-`phone_type` pastes through the clipboard with a real Command-V chord (the
-previous text clipboard is restored). `phone_open {"app": "Calculator"}` opens
-Spotlight through iPhone Mirroring's own shortcut, pastes the name, and taps a
-result whose OCR text matches the name exactly; with no match it returns to the
-Home Screen and reports `app not found`.
+`phone_type` pastes through the clipboard with a real Command-V chord and
+restores the previous text clipboard once OCR sees the pasted text appear on
+the phone (more often than before the paste — text already on screen does not
+count). If the paste only shows up a few seconds late, it is still reported as
+typed — do not type it again — but the clipboard then keeps the typed text.
+`phone_open {"app": "Calculator"}` opens Spotlight through iPhone Mirroring's
+own shortcut, pastes the name, and taps it only when Spotlight's Top Hit card
+shows exactly that name (a web suggestion or Settings row with the same name
+is never tapped); otherwise it returns to the Home Screen and reports
+`app not found`. A paste can take several seconds to reach the iPhone: when the
+name never shows up, `phone_open` waits up to 15 s and then reports
+`open_not_confirmed` (retry) rather than `app not found`. Use the name the phone shows under the icon (`拼多多`, not
+`Pinduoduo`); it reads Spotlight's English "Top Hit" label, so on an iPhone
+set to another language set `NORACU_TOPHIT_LABELS` to the label the phone shows.
 
 Privacy: everything the phone shows — notifications, messages, one-time
 codes — becomes tool output that your MCP client sends to its model. Use a

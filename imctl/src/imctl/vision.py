@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import atexit
 import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -129,7 +131,56 @@ def capture_window(path: str | None = None) -> str:
     raise CaptureError("could not capture the iPhone Mirroring window by id")
 
 
-def ocr(image_path: str, languages: tuple[str, ...] = ("en-US", "zh-Hans"),
+# F36 (2026-11-05, macOS 27.2): Vision weights the languages in the order given. With
+# English first it returned no Chinese at all on a Spotlight frame (0 CJK hits; the
+# Top Hit label 拼多多 was missing, so phone_open could not find the app and every
+# Chinese `expect` failed). Chinese first read the same frame's Chinese AND its English
+# labels (it even read "Suggestions" correctly where English-first read
+# "Sugestions"), slightly faster. One shared default for ocr() and ocr_sweep().
+# NORACU_OCR_LANGUAGES (comma-separated, e.g. "zh-Hant,en-US" or "en-US") overrides it.
+DEFAULT_OCR_LANGUAGES: tuple[str, ...] = ("zh-Hans", "en-US")
+
+
+def _ocr_languages(raw: str | None) -> tuple[str, ...]:
+    # ASCII and full-width commas, and the ideographic enumeration comma
+    langs = tuple(x.strip() for x in re.split(r"[,，、]", raw or "") if x.strip())
+    return langs or DEFAULT_OCR_LANGUAGES
+
+
+OCR_LANGUAGES: tuple[str, ...] = _ocr_languages(os.environ.get("NORACU_OCR_LANGUAGES"))
+
+
+_SUPPORTED_LANGUAGES: set | None = None   # read once per process
+_WARNED_LANGUAGES: set = set()
+
+
+def _supported_languages(request, languages):
+    """``languages`` minus any Vision does not support (a typo in
+    NORACU_OCR_LANGUAGES must not break every OCR call); none left → the
+    defaults. Exact codes from Vision's list only (e.g. "en-US", not "en");
+    a dropped code is reported once on stderr. When the supported list cannot
+    be read, ``languages`` as given."""
+    global _SUPPORTED_LANGUAGES
+    if _SUPPORTED_LANGUAGES is None:
+        try:
+            res = request.supportedRecognitionLanguagesAndReturnError_(None)
+            found = res[0] if isinstance(res, tuple) else res
+            _SUPPORTED_LANGUAGES = {str(x) for x in (found or [])}
+        except Exception:
+            _SUPPORTED_LANGUAGES = set()
+    supported = _SUPPORTED_LANGUAGES
+    if not supported:
+        return tuple(languages)
+    kept = tuple(x for x in languages if x in supported)
+    for x in languages:
+        if x not in supported and x not in _WARNED_LANGUAGES:
+            _WARNED_LANGUAGES.add(x)
+            print(f"imctl: OCR language {x!r} is not supported by Vision here; skipped",
+                  file=sys.stderr)
+    return kept or tuple(x for x in DEFAULT_OCR_LANGUAGES if x in supported) or tuple(languages)
+
+
+def ocr(image_path: str, languages: tuple[str, ...] = OCR_LANGUAGES,
         language_correction: bool = True) -> list[OCRHit]:
     """Run Vision OCR on an image; return hits sorted reading-order.
 
@@ -162,7 +213,7 @@ def ocr(image_path: str, languages: tuple[str, ...] = ("en-US", "zh-Hans"),
     request = Vision.VNRecognizeTextRequest.alloc().init()
     request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
     if hasattr(request, "setRecognitionLanguages_"):
-        request.setRecognitionLanguages_(list(languages))
+        request.setRecognitionLanguages_(list(_supported_languages(request, languages)))
     request.setUsesLanguageCorrection_(language_correction)
 
     handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(
@@ -222,7 +273,7 @@ def dedupe_hits(hits: list[OCRHit], eps: float = 0.02) -> list[OCRHit]:
 SWEEP_MIN_TEXT_HEIGHTS = (0.018, 0.02, 0.022, 0.025, 0.03)
 
 
-def ocr_sweep(image_path: str, languages: tuple[str, ...] = ("en-US", "zh-Hans"),
+def ocr_sweep(image_path: str, languages: tuple[str, ...] = OCR_LANGUAGES,
               language_correction: bool = False,
               heights: tuple[float, ...] = SWEEP_MIN_TEXT_HEIGHTS) -> list[OCRHit]:
     """Full-frame OCR once per minimumTextHeight in ``heights``; merged hits (F27).
@@ -250,7 +301,7 @@ def ocr_sweep(image_path: str, languages: tuple[str, ...] = ("en-US", "zh-Hans")
         request = Vision.VNRecognizeTextRequest.alloc().init()
         request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
         if hasattr(request, "setRecognitionLanguages_"):
-            request.setRecognitionLanguages_(list(languages))
+            request.setRecognitionLanguages_(list(_supported_languages(request, languages)))
         request.setUsesLanguageCorrection_(language_correction)
         request.setMinimumTextHeight_(min_height)
         handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(

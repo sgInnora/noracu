@@ -64,12 +64,12 @@ end tell
 '''
 
 
-def _run_osascript(script: str, *, strip: bool = True) -> str:
+def _run_osascript(script: str, *, strip: bool = True, timeout: float = 10) -> str:
     result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=timeout,
     )
     if result.returncode != 0:
         raise WindowError(f"osascript failed: {result.stderr.strip()}")
@@ -101,7 +101,7 @@ def ensure_running() -> None:
         raise WindowError("iPhone Mirroring did not start within 10s")
 
 
-def ensure_frontmost() -> None:
+def ensure_frontmost(timeout: float = 10) -> None:
     """Bring the iPhone Mirroring window to the front.
 
     CGEvents are delivered to the frontmost app; if another window
@@ -109,18 +109,19 @@ def ensure_frontmost() -> None:
     F31: when the app had to be activated (possibly switching Spaces), wait
     until the window yields a real frame before returning, so the caller's
     next capture is not a transition frame refused as capture_failed.
+    ``timeout`` bounds each osascript run (a tidy-up passes a short one).
     """
-    if _run_osascript(_FRONTMOST_SCRIPT) == "true":
+    if _run_osascript(_FRONTMOST_SCRIPT, timeout=timeout) == "true":
         return
     subprocess.run(
         ["osascript", "-e", f'tell application "{APP_NAME}" to activate'],
         capture_output=True,
-        timeout=10,
+        timeout=timeout,
     )
     import time
 
     time.sleep(0.4)  # let the window server settle
-    if _run_osascript(_FRONTMOST_SCRIPT) != "true":
+    if _run_osascript(_FRONTMOST_SCRIPT, timeout=timeout) != "true":
         raise WindowError("could not bring iPhone Mirroring to front")
     _wait_capturable()
 
@@ -419,6 +420,46 @@ def get_overlay() -> dict:
     return overlay_snapshot()[0]
 
 
+# F37 (2026-11-05, macOS 27.2): the first launch after the macOS upgrade showed a welcome
+# screen ("iPhone on Your Mac …") in a 640×660 window. Its button made it look like the paused
+# overlay: phone_status reported paused=true, phone_launch told the user to lock the iPhone, and
+# resume() clicks an overlay's lone button as if it were Resume. The mirror window itself — live
+# or paused — is phone-shaped: elongated, portrait (measured 236×524, 329×727, 354×781 — about
+# 2.2:1) or, for an app that rotates, landscape. A setup, welcome or permission screen is close to
+# square, so a click is only ever sent on an elongated window. 1.7 keeps the 16:9 iPhone SE
+# (≈1.78) in and a wide dialog (e.g. 800×520 ≈ 1.54) out. Geometry, not text: language-
+# independent like the rest of the overlay probe.
+PHONE_MIN_ASPECT = 1.7
+
+
+def is_phone_shaped(bounds: WindowBounds | None = None) -> bool | None:
+    """True when the mirror window is elongated like a phone, portrait or landscape (F37).
+
+    The long side must be at least PHONE_MIN_ASPECT times the short side. None when the
+    bounds cannot be read.
+    """
+    try:
+        b = bounds if bounds is not None else get_bounds()
+    except Exception:
+        return None
+    if b.width <= 0 or b.height <= 0:
+        return None  # degenerate bounds say nothing about the shape
+    long_side, short_side = max(b.width, b.height), min(b.width, b.height)
+    return long_side >= PHONE_MIN_ASPECT * short_side
+
+
+def is_setup_screen(overlay: dict | None = None,
+                    bounds: WindowBounds | None = None) -> bool:
+    """True when an overlay is up in a window that is not phone-shaped (F37).
+
+    Such a screen (first-run welcome, setup, permission prompt) is the user's to
+    finish: resume() never clicks it and phone_launch says so. Unknown bounds → False.
+    """
+    if overlay is None:
+        overlay = get_overlay()
+    return overlay["live"] is False and is_phone_shaped(bounds) is False
+
+
 def is_paused(overlay: dict | None = None) -> bool | None:
     """True when the overlay shows a Resume control; False when live; None when unknown.
 
@@ -492,6 +533,10 @@ def resume() -> bool:
     if overlay["live"] is True:
         return True
     if overlay["live"] is not False or overlay["buttons"] != 1:
+        return False
+    if is_phone_shaped() is not True:
+        # F37: a button in a window that is not phone-shaped belongs to a setup /
+        # welcome / permission screen — never ours to click. Unknown bounds: no click either.
         return False
     try:
         clicked = _run_osascript(_CLICK_RESUME_SCRIPT)

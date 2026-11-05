@@ -1,5 +1,79 @@
 # Changelog
 
+## [0.1.4] — 2026-11-05
+
+### Fixed
+- `phone_open` only taps an exact label inside Spotlight's Top Hit card. A web
+  suggestion, website or Settings row with the same name could be tapped
+  before: in testing, opening "Pinduoduo" opened a Chrome search and reported
+  success. A name the Top Hit card does not show now returns app not found —
+  use the label the phone shows under the icon (e.g. `拼多多`). The error says
+  whether a Top Hit was seen at all. `phone_open` reads Spotlight's English
+  "Top Hit" label; for an iPhone set to another language, set
+  `NORACU_TOPHIT_LABELS` to the label it shows. When tapping the label
+  does nothing, the icon is tapped only above where the label is now, not where
+  it was a moment earlier. `phone_open` also keeps its own time budget and goes
+  back to the Home Screen when it runs out, or when it is stopped or hits its
+  time limit, instead of leaving Spotlight open, and says so when it could not
+  get back.
+- OCR reads Chinese. Vision ran English-first and returned almost no Chinese
+  text, so Chinese app names, `phone_find` and `expect` checks failed; Chinese
+  and English are now both read. `NORACU_OCR_LANGUAGES` sets other languages
+  (unsupported codes are skipped).
+- `phone_launch` never clicks through a setup or welcome screen. After a
+  macOS 27 upgrade, iPhone Mirroring's welcome screen was reported as a paused
+  session, `phone_launch` said to lock the iPhone, and a lone button there
+  would have been clicked as if it were Resume. noracu now reports
+  `mirror_setup_required` and leaves the screen to you, and `phone_status` adds
+  a `setup` field. A paused mirror is still resumed in portrait or landscape.
+- A stuck iPhone-layer subprocess can no longer freeze the server. iPhone
+  commands, including the menu commands behind `phone_home` and
+  `phone_app_switcher`, now run asynchronously under a time limit: on expiry
+  the command and everything it started are stopped, the call returns
+  `imctl_timeout` at once, and other requests — including `ping` — keep being
+  answered. `phone_open` and `phone_type` get 45 seconds (was 30);
+  `NORACU_PHONE_TIMEOUT_MS` sets another limit. A slow first check for the
+  iPhone driver's Python no longer disables the iPhone layer until restart.
+- Phone and Mac actions run one at a time, in the order they arrive, even when
+  an MCP client sends tool calls in parallel, so taps, typing and the clipboard
+  of two calls never interleave. A queued action the client cancels, or one that
+  waited more than 60 seconds (`input_busy`), is dropped without acting, and the
+  server stops its iPhone-layer processes when it exits.
+- `phone_type` keeps watching up to 15 more seconds for a paste that lands late
+  before reporting `type_not_confirmed`, and then says to read the screen before
+  retrying: retrying after a late paste typed the text twice. The text must be
+  seen in two consecutive screen reads.
+- `phone_type` no longer reports `typed` while the iPhone is still fetching a
+  slow paste: the "Pasting from …" box the phone shows meanwhile was taken for
+  the text arriving. While that box shows, the paste does not count; the
+  15-second check above then confirms it from the text itself, or the result is
+  `type_not_confirmed`. The box is recognized on an iPhone set to English.
+- A paste can reach the iPhone seconds after it was sent (from 1.5 s to more
+  than 10 s on the test device). When `phone_open` does not see the name arrive,
+  it keeps reading Spotlight for up to 15 seconds, and if the name never shows up
+  it reports `open_not_confirmed` (retry) instead of app not found.
+- `phone_open` right after another successful `phone_open` no longer fails. On
+  iOS 27, going Home from an app that was opened from Spotlight lands back in
+  Spotlight, and the Spotlight command then closed it, so the name was pasted
+  onto the Home Screen.
+- `phone_screenshot` deletes its temporary image on every path, including
+  timeouts.
+
+### Security
+- `phone_type` no longer gives your clipboard back just because the typed text
+  was already somewhere on the screen (for example a search-history entry with
+  the same words). It now counts the text before pasting and restores your
+  clipboard only when two screen reads afterwards both show it more often; until
+  then the clipboard keeps the typed text. Before, a paste that the phone read
+  late could have pasted your original clipboard contents instead.
+- `phone_open` no longer gives your clipboard back after pasting the app name:
+  the name can reach the iPhone seconds after it was sent, and a restore before
+  then could paste your previous clipboard into Spotlight. The clipboard keeps
+  the app name.
+- `phone_type` never gives your clipboard back while the iPhone still shows its
+  "Pasting from …" box: a paste is still on its way then and could fetch your
+  restored clipboard. The words in that box never count as the typed text.
+
 ## [0.1.3] — 2026-11-04
 
 ### Fixed

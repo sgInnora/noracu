@@ -92,19 +92,78 @@ def test_choose_app_hit():
     def hit(text, ny, nx=0.5, confidence=0.9):
         return OCRHit(text=text, nx=nx, ny=ny, confidence=confidence)
 
+    # F35: every candidate must sit inside the Top Hit card — below the
+    # header, at most TOP_HIT_CARD_SPAN under it. TOP is that header here
+    # (0.26 → the card reaches 0.41).
+    TOP = hit("Top Hit", 0.26)
+
     # ① the typed query echoes in the bottom search field (ny≈0.95) —
     #    only a result row above it (ny<0.88) counts; topmost row wins.
-    hits = [hit("Calculator", 0.95), hit("Calculator", 0.30), hit("Calculator", 0.50)]
+    hits = [TOP, hit("Calculator", 0.95), hit("Calculator", 0.30), hit("Calculator", 0.40)]
     assert choose_app_hit(hits, "Calculator").ny == 0.30
     # ② only the search field matches → nothing to tap
-    assert choose_app_hit([hit("Calculator", 0.95)], "Calculator") is None
+    assert choose_app_hit([TOP, hit("Calculator", 0.95)], "Calculator") is None
     # ③ case and surrounding whitespace don't matter
-    assert choose_app_hit([hit(" calculator ", 0.40)], "Calculator").ny == 0.40
-    assert choose_app_hit([hit("Calculator", 0.40)], "  CALCULATOR ").ny == 0.40
+    assert choose_app_hit([TOP, hit(" calculator ", 0.40)], "Calculator").ny == 0.40
+    assert choose_app_hit([TOP, hit("Calculator", 0.40)], "  CALCULATOR ").ny == 0.40
     # ④ partial matches are not the app
-    assert choose_app_hit([hit("Calculator Pro", 0.30)], "Calculator") is None
+    assert choose_app_hit([TOP, hit("Calculator Pro", 0.30)], "Calculator") is None
     # no hits at all
     assert choose_app_hit([], "Calculator") is None
+
+
+def test_choose_app_hit_top_hit_card_only():
+    """F35: only an exact label INSIDE the Top Hit card is a candidate.
+
+    The fixture is the 2026-11-05 14:23 real-device Spotlight frame for
+    the query "Pinduoduo" (positions from the 660×1440 screenshot): the
+    app's own Top Hit label reads 拼多多, a Chrome suggestion row reads
+    "Pinduoduo", and the Settings section has a 拼多多 deep-link row.
+    0.1.3 picked the suggestion row, tapped it and reported "opened".
+    """
+    from imctl.gestures import TOP_HIT_CARD_SPAN, choose_app_hit
+    from imctl.vision import OCRHit
+
+    P = lambda t, x, y: OCRHit(text=t, nx=x / 660, ny=y / 1440, confidence=1.0)
+    frame = [P("Top Hit", 75, 194), P("拼多多", 111, 347), P("Suggestions", 102, 424),
+             P("Pinduoduo", 156, 488), P("Settings", 81, 564), P("拼多多", 185, 643),
+             P("Apps", 175, 674), P("Pinduoduo", 190, 1194)]
+    # the suggestion row of the same name is never the app
+    assert choose_app_hit(frame, "Pinduoduo") is None
+    # the app's own label inside the card is
+    assert round(choose_app_hit(frame, "拼多多").ny, 3) == round(347 / 1440, 3)
+    # if the in-card label is missed, the Settings deep link is NOT a fallback
+    no_label = [h for h in frame if not (h.text == "拼多多" and h.ny < 0.3)]
+    assert choose_app_hit(no_label, "拼多多") is None
+    # no "Top Hit" header at all → nothing qualifies
+    assert choose_app_hit([h for h in frame if h.text != "Top Hit"], "拼多多") is None
+
+    # the card edge is inclusive; just past it is outside
+    def hit(text, ny):
+        return OCRHit(text=text, nx=0.2, ny=ny, confidence=0.9)
+    head = hit("Top Hit", 0.20)
+    assert choose_app_hit([head, hit("Notes", 0.20 + TOP_HIT_CARD_SPAN)], "Notes") is not None
+    assert choose_app_hit([head, hit("Notes", 0.20 + TOP_HIT_CARD_SPAN + 0.01)], "Notes") is None
+    # a label level with or above the header is not inside the card
+    assert choose_app_hit([head, hit("Notes", 0.20)], "Notes") is None
+    assert choose_app_hit([head, hit("Notes", 0.15)], "Notes") is None
+
+
+def test_ocr_default_languages_chinese_first():
+    """F36: Chinese first — English-first OCR returned no Chinese at all."""
+    import inspect
+
+    from imctl import vision
+
+    assert vision.DEFAULT_OCR_LANGUAGES == ("zh-Hans", "en-US")
+    for fn in (vision.ocr, vision.ocr_sweep):
+        assert inspect.signature(fn).parameters["languages"].default == vision.OCR_LANGUAGES
+    # NORACU_OCR_LANGUAGES override: comma-separated, blanks ignored, empty → default
+    assert vision._ocr_languages(None) == ("zh-Hans", "en-US")
+    assert vision._ocr_languages("") == ("zh-Hans", "en-US")
+    assert vision._ocr_languages(" , ") == ("zh-Hans", "en-US")
+    assert vision._ocr_languages("zh-Hant, en-US") == ("zh-Hant", "en-US")
+    assert vision._ocr_languages("en-US") == ("en-US",)
 
 
 def test_find_app_hit():
@@ -134,22 +193,24 @@ def test_find_app_hit():
         read.calls = calls
         return read
 
+    TOP = hit("Top Hit", 0.26)  # F35: rows count only inside the Top Hit card
+
     # ① first read already has the row → returned at once, no sleep
     sleeps.clear()
-    read = make_read([[hit("Calculator", 0.30)]])
+    read = make_read([[TOP, hit("Calculator", 0.30)]])
     assert find_app_hit(read, "Calculator", sleep=fake_sleep).ny == 0.30
     assert len(read.calls) == 1 and sleeps == []
 
     # ② first read empty, second has the row → exactly one 1.0s sleep
     sleeps.clear()
-    read = make_read([[], [hit("Calculator", 0.40)]])
+    read = make_read([[], [TOP, hit("Calculator", 0.40)]])
     assert find_app_hit(read, "Calculator", sleep=fake_sleep).ny == 0.40
     assert len(read.calls) == 2 and sleeps == [1.0]
 
     # ③ only the bottom search field echoes the query (ny=0.95) →
     #    None after two reads, one sleep between them
     sleeps.clear()
-    read = make_read([[hit("Calculator", 0.95)], [hit("Calculator", 0.95)]])
+    read = make_read([[TOP, hit("Calculator", 0.95)], [TOP, hit("Calculator", 0.95)]])
     assert find_app_hit(read, "Calculator", sleep=fake_sleep) is None
     assert len(read.calls) == 2 and sleeps == [1.0]
 
@@ -170,15 +231,16 @@ def test_short_app_names():
     # ① the one-letter app "X": every label OCR actually returns for
     #    it matches after _norm_label — still an EXACT match, never a
     #    substring/prefix one.
+    TOP = hit("Top Hit", 0.26)  # F35: rows count only inside the Top Hit card
     for label in ("X", "x", "×", "X.", "Ｘ"):
-        assert choose_app_hit([hit(label, 0.30)], "X").ny == 0.30, label
+        assert choose_app_hit([TOP, hit(label, 0.30)], "X").ny == 0.30, label
     # apps whose names merely contain or start with "x" don't match
     for other in ("Xcode", "X Corp", "Box"):
-        assert choose_app_hit([hit(other, 0.30)], "X") is None, other
+        assert choose_app_hit([TOP, hit(other, 0.30)], "X") is None, other
     # the search field echoing "X" at the bottom still doesn't count
-    assert choose_app_hit([hit("X", 0.95)], "X") is None
+    assert choose_app_hit([TOP, hit("X", 0.95)], "X") is None
     # several matching rows → the topmost (smallest ny) wins
-    hits = [hit("X", 0.50), hit("×", 0.30), hit("X.", 0.40)]
+    hits = [TOP, hit("X", 0.50), hit("×", 0.30), hit("X.", 0.40)]
     assert choose_app_hit(hits, "X").ny == 0.30
 
     # ② find_app_hit: short names get a second, language-correction-off
@@ -205,14 +267,14 @@ def test_short_app_names():
     # first read (correction on) misses, second (correction off) has
     # the row → hit, exactly those two calls, no sleep
     sleeps.clear()
-    read = make_read([[], [hit("×", 0.30)]])
+    read = make_read([[], [TOP, hit("×", 0.30)]])
     assert find_app_hit(read, "X", sleep=fake_sleep).ny == 0.30
     assert read.calls == ["default", False] and sleeps == []
 
     # long names: read_screen never receives language_correction=False
     # and the read/sleep sequence matches the original behavior
     sleeps.clear()
-    read = make_read([[], [hit("Settings", 0.40)]])
+    read = make_read([[], [TOP, hit("Settings", 0.40)]])
     assert find_app_hit(read, "Settings", sleep=fake_sleep).ny == 0.40
     assert read.calls == ["default", "default"] and sleeps == [1.0]
 
@@ -260,7 +322,7 @@ def test_open_spotlight_checked():
 
         ok = open_spotlight_checked(
             settle_s, luma=luma, sleep=sleeps.append, opener=opener,
-            home=home, home_settle_s=home_settle_s,
+            home=home, home_settle_s=home_settle_s, read_screen=lambda: [],
         )
         return ok, sleeps, order
 
@@ -272,6 +334,33 @@ def test_open_spotlight_checked():
         """
         q, r = divmod(total_diff, size)
         return bytes([q + 1] * r + [q] * (size - r))
+
+    # F43: Home itself brought up a Top Hit card (none before it): Spotlight is open with
+    # the previous query — no luma, no toggle
+    from imctl.vision import CaptureError, OCRHit
+    CARD = [OCRHit(text="Top Hit", nx=0.1, ny=0.14, confidence=1.0)]
+    calls = []
+    reads = [[], CARD]
+    ok = open_spotlight_checked(1.0, luma=lambda: calls.append("luma"), sleep=lambda s: None,
+                                opener=lambda: calls.append("opener"), home=lambda: True,
+                                read_screen=lambda: reads.pop(0))
+    assert ok is True and calls == [] and reads == []
+    #    a card that was already there before Home (another app's, Home ignored), or a
+    #    "Top Hit" line low in the window, is no proof: the old gate runs
+    for screens, left in (([CARD, CARD], 1),   # a card before Home: no second read needed
+                          ([[], [OCRHit(text="Top Hit", nx=0.1, ny=0.6, confidence=1.0)]], 0)):
+        frames3 = [b"\x00" * 100, bytes([200] * 100)]
+        ok = open_spotlight_checked(1.0, luma=lambda: frames3.pop(0), sleep=lambda s: None,
+                                    opener=lambda: True, home=lambda: True,
+                                    read_screen=lambda: screens.pop(0))
+        assert ok is True and frames3 == [] and len(screens) == left
+
+    def unreadable():
+        raise CaptureError("blank frame")
+    frames2 = [b"\x00" * 100, bytes([200] * 100)]
+    ok = open_spotlight_checked(1.0, luma=lambda: frames2.pop(0), sleep=lambda s: None,
+                                opener=lambda: True, home=lambda: True, read_screen=unreadable)
+    assert ok is True and frames2 == []
 
     # ⓪ home fails → False; nothing else happens at all (no sleep, no
     # luma, no opener — an extra scripted frame would raise IndexError)
@@ -385,8 +474,11 @@ def test_open_app_confirm():
     # ① the label tap opens the app: frame diff ≥ OPEN_MIN_DIFF and the
     #    "Top Hit" header is gone → "opened", exactly ONE tap, at the
     #    label; nothing else happens (no home, no icon tap)
+    # F35: the reads before the tap must show the Top Hit header — only a
+    # label inside that card is a candidate (CARD = header + label).
+    CARD = [HEADER, LABEL]
     res, taps, homes, sleeps, typed, cleared = run(
-        screens=[[LABEL], [LABEL], []], lumas=[ZEROS, OPENED])
+        screens=[CARD, CARD, []], lumas=[ZEROS, OPENED])
     assert res == "opened"
     assert taps == [(0.18, 0.27)]
     assert homes == [] and typed == ["X"] and cleared == [1]
@@ -396,22 +488,23 @@ def test_open_app_confirm():
     #    (header above, < 0.15 away) → second tap at the icon position,
     #    confirmed → "opened"
     res, taps, homes, sleeps, *_ = run(
-        screens=[[LABEL], [LABEL], [HEADER, LABEL], []],
+        screens=[CARD, CARD, [HEADER, LABEL], []],
         lumas=[ZEROS, UNCHANGED, ZEROS, OPENED])
     assert res == "opened"
     assert taps == [(0.18, 0.27), ICON]
     assert homes == []
     assert sleeps == [0.3, 1.5, 0.5, 1.0, 1.0]
 
-    # ③ the label tap does nothing but the hit is NOT inside the Top Hit
-    #    card → NO second tap, back on the Home Screen, "not_confirmed".
-    #    Three ways to be outside the card: no header at all, the header
-    #    below the hit, or the header too far above (≥ 0.15 away).
+    # ③ the label tap does nothing and the read AFTER that tap does not
+    #    show the hit inside the Top Hit card → NO second tap, back on
+    #    the Home Screen, "not_confirmed". Three ways to be outside the
+    #    card in that read: no header at all, the header below the hit,
+    #    or the header too far above (> TOP_HIT_CARD_SPAN away).
     for after in ([LABEL],                                 # no header
                   [LABEL, hit("Top Hit", 0.35, nx=0.18)],  # header below
-                  [hit("Top Hit", 0.05, nx=0.18), LABEL]):  # ≥ 0.15 above
+                  [hit("Top Hit", 0.05, nx=0.18), LABEL]):  # > span above
         res, taps, homes, *_ = run(
-            screens=[[LABEL], [LABEL], after], lumas=[ZEROS, UNCHANGED])
+            screens=[CARD, CARD, after], lumas=[ZEROS, UNCHANGED])
         assert res == "not_confirmed"
         assert taps == [(0.18, 0.27)]  # the label tap only
         assert homes == [1]
@@ -419,49 +512,126 @@ def test_open_app_confirm():
     # ④ both taps do nothing → back on the Home Screen, "not_confirmed",
     #    exactly two taps (label, then icon)
     res, taps, homes, *_ = run(
-        screens=[[LABEL], [LABEL], [HEADER, LABEL], [HEADER, LABEL]],
+        screens=[CARD, CARD, [HEADER, LABEL], [HEADER, LABEL]],
         lumas=[ZEROS, UNCHANGED, ZEROS, UNCHANGED])
     assert res == "not_confirmed"
     assert taps == [(0.18, 0.27), ICON]
     assert homes == [1]
 
     # ⑤ stability: the row moved between the two reads → the SECOND
-    #    position is tapped (the third read agrees → it stands)
-    moved = hit("X", 0.40, nx=0.30)
+    #    position is tapped (the third read agrees → it stands). Both
+    #    positions stay inside the Top Hit card (header 0.16, span 0.15).
+    moved = hit("X", 0.29, nx=0.30)
     res, taps, *_ = run(
-        screens=[[LABEL], [moved], [moved], []], lumas=[ZEROS, OPENED])
+        screens=[CARD, [HEADER, moved], [HEADER, moved], []],
+        lumas=[ZEROS, OPENED])
     assert res == "opened"
-    assert taps == [(0.30, 0.40)]
+    assert taps == [(0.30, 0.29)]
 
     #    …and when the third read moves again, the LAST one wins
-    moved2 = hit("X", 0.45, nx=0.35)
+    moved2 = hit("X", 0.30, nx=0.35)
     res, taps, *_ = run(
-        screens=[[LABEL], [moved], [moved2], []], lumas=[ZEROS, OPENED])
+        screens=[CARD, [HEADER, moved], [HEADER, moved2], []],
+        lumas=[ZEROS, OPENED])
     assert res == "opened"
-    assert taps == [(0.35, 0.45)]
+    assert taps == [(0.35, 0.30)]
+
+    #    F35: a "moved" row OUTSIDE the card (a suggestion row of the same
+    #    name) is no candidate at all — the first, in-card hit stands
+    stray = hit("X", 0.40, nx=0.30)
+    res, taps, *_ = run(
+        screens=[CARD, [HEADER, stray], []], lumas=[ZEROS, OPENED])
+    assert res == "opened"
+    assert taps == [(0.18, 0.27)]
 
     # ⑥ a capture failure after the hit is found → "not_confirmed", no
     #    additional taps (the icon tap never happens)
     boom = CaptureError("could not capture the iPhone Mirroring window by id")
     res, taps, homes, *_ = run(
-        screens=[[LABEL], [LABEL]], lumas=[ZEROS, boom])
+        screens=[CARD, CARD], lumas=[ZEROS, boom])
     assert res == "not_confirmed"
     assert taps == [(0.18, 0.27)]  # the label tap only — never the icon
     assert homes == [1]
 
     #    …also when the stability read itself fails: nothing is tapped
-    res, taps, homes, *_ = run(screens=[[LABEL], boom], lumas=[])
+    res, taps, homes, *_ = run(screens=[CARD, boom], lumas=[])
     assert res == "not_confirmed"
     assert taps == []
     assert homes == [1]
 
     # ⑦ no row ever matches → "not_found", back on the Home Screen,
-    #    nothing tapped (a long name: exactly two find_app_hit reads)
+    #    nothing tapped (a long name whose query the search field shows: exactly
+    #    two find_app_hit reads — F42: with the name in the field, no late reads)
+    ECHO_P = hit("Photos", 0.93)
     res, taps, homes, sleeps, *_ = run(
-        name="Photos", screens=[[], []], lumas=[])
-    assert res == "not_found"
+        name="Photos", screens=[[ECHO_P], [ECHO_P]], lumas=[])
+    assert res == "no_top_hit"  # F35: no read showed a Top Hit header at all
     assert taps == [] and homes == [1]
     assert sleeps == [0.3, 1.5, 1.0]  # find_app_hit's between-passes delay
+    #    a Top Hit card that never shows exactly this name → not_found
+    res, taps, homes, *_ = run(
+        name="Photos", screens=[[HEADER, hit("Photo Booth", 0.27), ECHO_P]] * 2, lumas=[])
+    assert res == "not_found" and taps == [] and homes == [1]
+
+    # ⑧ ③ re-locates the label in the post-tap read; when that read
+    #    shows the label somewhere else in the card, the icon above the NEW
+    #    position is tapped, not one computed from the stale first read
+    shifted = hit("X", 0.30, nx=0.25)
+    res, taps, *_ = run(
+        screens=[CARD, CARD, [HEADER, shifted], []],
+        lumas=[ZEROS, UNCHANGED, ZEROS, OPENED])
+    assert res == "opened"
+    assert taps == [(0.18, 0.27), (0.25, 0.30 - SPOTLIGHT_ICON_ABOVE_LABEL)]
+
+    # ⑨ the time budget — once spent, no further pass and no tap;
+    #    back on the Home Screen, "deadline"
+    t = [0.0]
+
+    def slow_read(**kwargs):
+        t[0] += 20.0  # every read takes 20 s
+        return []
+
+    homes = []
+    res = open_app("Photos", spotlight_open=True, read_screen=slow_read,
+                   luma=lambda: ZEROS, sleep=lambda s: None,
+                   tap=lambda x, y: (_ for _ in ()).throw(AssertionError("no tap")),
+                   home=lambda: homes.append(1) or True,
+                   clear_text=lambda: None, type_text=lambda text: True,
+                   clock=lambda: t[0], deadline_s=30.0)
+    assert res == "deadline" and homes == [1]
+    #    the budget is checked before EVERY read, not only between
+    #    passes — a short name's second read takes it past 30 s, so no third read
+    t[0] = 0.0
+    reads_x = []
+
+    def slow_read_x(**kwargs):
+        reads_x.append(kwargs)
+        t[0] += 20.0
+        return []
+
+    homes = []
+    res = open_app("X", spotlight_open=True, read_screen=slow_read_x,
+                   luma=lambda: ZEROS, sleep=lambda s: None,
+                   tap=lambda x, y: (_ for _ in ()).throw(AssertionError("no tap")),
+                   home=lambda: homes.append(1) or True,
+                   clear_text=lambda: None, type_text=lambda text: True,
+                   clock=lambda: t[0], deadline_s=30.0)
+    assert res == "deadline" and homes == [1] and len(reads_x) == 2
+    #    a hit found but the budget already spent → no tap either
+    t[0] = 0.0
+
+    def late_hit(**kwargs):
+        t[0] += 31.0
+        return CARD
+
+    homes = []
+    res = open_app("X", spotlight_open=True, read_screen=late_hit,
+                   luma=lambda: ZEROS, sleep=lambda s: None,
+                   tap=lambda x, y: (_ for _ in ()).throw(AssertionError("no tap")),
+                   home=lambda: homes.append(1) or True,
+                   clear_text=lambda: None, type_text=lambda text: True,
+                   clock=lambda: t[0], deadline_s=30.0)
+    assert res == "deadline" and homes == [1]
 
     # ── CLI mapping: _cmd_open turns the result strings into lines and
     #    exit codes (spotlight gate + open_app both mocked; no phone) ──
@@ -480,19 +650,46 @@ def test_open_app_confirm():
         # result → (exact line, exit code); not_confirmed goes to stderr
         for result, code, line, to_stderr in (
             ("opened", 0, "opened 'X'", False),
-            ("not_found", 1, "app not found: 'X'", False),
+            ("not_found", 1, "app not found: 'X' (Spotlight's Top Hit did not show "
+             "exactly this name — use the name the phone shows under the app icon)", False),
+            ("no_top_hit", 1, "app not found: 'X' (Spotlight showed no Top Hit — no app "
+             "by that name, or the iPhone is not set to English: phone_open reads "
+             "Spotlight's \"Top Hit\" label; set NORACU_TOPHIT_LABELS to the label your "
+             "iPhone shows)", False),
+            ("deadline", 4, "open_not_confirmed: ran out of time opening 'X' (the Mac "
+             "may be under heavy load); back on the Home Screen", True),
             ("not_confirmed", 4,
              "open_not_confirmed: tapped 'X' in Spotlight but the app "
              "did not open; back on the Home Screen", True),
+            ("not_typed", 4,
+             "open_not_confirmed: the name 'X' was pasted into Spotlight but never showed "
+             "up on the phone (a paste can take several seconds to reach the iPhone, or be "
+             "lost; an iPhone not set to English also needs NORACU_TOPHIT_LABELS) — nothing "
+             "was tapped; back on the Home Screen; retry phone_open", True),
         ):
             cli.gestures = SimpleNamespace(
                 open_spotlight_checked=lambda: True,
-                open_app=lambda name, spotlight_open=True: result)
+                open_app=lambda name, spotlight_open=True, report=None, **kw:
+                    (report.update(home=True) if report is not None else None) or result)
             args = p.parse_args(["open", "X"])
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 assert cli._cmd_open(args) == code
             assert (err.getvalue() if to_stderr else out.getvalue()).strip() == line
+
+        # the trip back to the Home Screen failed: the message must not claim it
+        for result, code in (("deadline", 4), ("not_confirmed", 4), ("not_typed", 4),
+                             ("not_found", 1), ("no_top_hit", 1)):
+            cli.gestures = SimpleNamespace(
+                open_spotlight_checked=lambda: True,
+                open_app=lambda name, spotlight_open=True, report=None, **kw:
+                    report.update(home=False) or result)
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                assert cli._cmd_open(p.parse_args(["open", "X"])) == code
+            text = out.getvalue() + err.getvalue()
+            assert "could not go back to the Home Screen — Spotlight may still be open" in text
+            assert "back on the Home Screen" not in text
     finally:
         cli._require_live = real_live
         cli.gestures = real_gestures
@@ -543,9 +740,11 @@ def test_type_text_confirm():
     state = {}  # fakes of the last run(), for asserting on runs that raise
 
     def run(text="hello world", *, replace=False, polls=(), ocr=False,
-            bump_on_poll=False, before_check=None, raise_on_poll=None):
+            bump_on_poll=False, before_check=None, raise_on_poll=None,
+            hud=None):
         """Drive type_text with fakes; returns (ok, pb, events, v_elapsed,
-        ocr_calls).
+        ocr_calls). ``hud`` scripts hud_check() (None: not injected; an
+        Exception instance raises); its calls land in state["hud_calls"].
 
         ``polls`` scripts the return values of changed() (an exhausted
         script reads as False). ``bump_on_poll`` makes each poll bump
@@ -597,10 +796,19 @@ def test_type_text_confirm():
             ocr_calls.append(1)
             return ocr
 
-        state["pb"], state["events"] = pb, events
+        hud_calls = []
+
+        def hud_check():
+            hud_calls.append(1)
+            if isinstance(hud, Exception):
+                raise hud
+            return hud
+
+        state["pb"], state["events"], state["hud_calls"] = pb, events, hud_calls
         ok = type_text(text, replace=replace, pasteboard=pb, chord=chord,
                        before_check=before_check or scripted_before_check,
                        ocr_check=ocr_check,
+                       hud_check=None if hud is None else hud_check,
                        sleep=sleep, clock=clock)
         v_elapsed = None if v_at[0] is None else now[0] - v_at[0]
         return ok, pb, events, v_elapsed, len(ocr_calls)
@@ -642,6 +850,38 @@ def test_type_text_confirm():
         assert pb_ops(events) == ["clear", "setString"]
         assert pb.data == b"hello world" and pb.count == 8
         assert ocr_calls == 1
+
+        # ①c (F44) frame diff fires, OCR does not see the text, and the
+        # phone shows its "Pasting from …" progress box: the box was the
+        # change, the paste is still on its way → False, no restore (the
+        # clipboard keeps the typed text); the box is looked for once.
+        from imctl.vision import CaptureError
+        ok, pb, events, _, ocr_calls = run(polls=[True], ocr=False, hud=True)
+        assert ok is False
+        assert pb_ops(events) == ["clear", "setString"]
+        assert pb.data == b"hello world" and pb.count == 8
+        assert ocr_calls == 1 and state["hud_calls"] == [1]
+        #    no progress box → landed, as in ①b; a capture failure while
+        #    looking tells nothing and keeps that verdict
+        ok, pb, events, _, _ = run(polls=[True], ocr=False, hud=False)
+        assert ok is True and pb.data == b"hello world"
+        assert state["hud_calls"] == [1]
+        ok, pb, events, _, _ = run(polls=[True], ocr=False,
+                                   hud=CaptureError("blank"))
+        assert ok is True and pb.data == b"hello world"
+        #    any other error from the look propagates, and after ⌘V the
+        #    clipboard is never restored
+        try:
+            run(polls=[True], ocr=False, hud=RuntimeError("ocr exploded"))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("a non-capture error from hud_check must propagate")
+        assert state["pb"].data == b"hello world"
+        #    OCR saw the text, or the frame diff never fired: no look at all
+        for polls, seen in (([True], True), ([False], True), ([False], False)):
+            run(polls=polls, ocr=seen, hud=True)
+            assert state["hud_calls"] == []
 
         # ② frame diff never fires, OCR confirms → True, restored; the
         # fallback OCR probe doubles as the restore license — called
@@ -723,7 +963,7 @@ def test_type_text_confirm():
         assert screen_shows_text("x", lambda: hits("xxx")) is False  # probe < 2 chars
         assert screen_shows_text("hello", lambda: []) is False
 
-        assert len(frontmost_calls) == 8  # one per run() above, never the real one
+        assert len(frontmost_calls) == 15  # one per run() above, never the real one
     finally:
         input_module.ensure_frontmost = real_frontmost
 
@@ -1488,6 +1728,10 @@ def test_resume_never_clicks_window_controls():
         patch(window, "_run_osascript", fake_osa)
         patch(window, "get_overlay",
               lambda: after.pop(0) if after else {"live": False, "overlay": None, "buttons": 1})
+        # F37: the mirror window is phone-shaped (measured 329×727 on macOS 27.2)
+        PHONE = window.WindowBounds(x=0, y=0, width=329, height=727)
+        bounds = {"b": PHONE}
+        patch(window, "get_bounds", lambda: bounds["b"])
 
         # hover over a paused overlay: pointer moved off, state re-read, lone button clicked
         snaps[:] = [(paused, True), (paused, False)]
@@ -1515,6 +1759,36 @@ def test_resume_never_clicks_window_controls():
         clicks[:] = ["SKIP"]
         assert window.resume() is False and scripts == [window._CLICK_RESUME_SCRIPT]
 
+        # F37: one button in a window that is NOT phone-shaped (the macOS 27
+        # first-run welcome screen: 640×660) → never clicked
+        scripts.clear()
+        welcome = {"live": False, "overlay": "iPhone on Your Mac / Stay up to date", "buttons": 1}
+        bounds["b"] = window.WindowBounds(x=0, y=0, width=640, height=660)
+        snaps[:] = [(welcome, False)]
+        assert window.resume() is False and scripts == []
+        assert window.is_setup_screen(welcome) is True
+        assert window.is_phone_shaped() is False
+        #    …but a landscape mirror (an app that rotates) is phone-shaped too:
+        #    its paused overlay IS resumed
+        bounds["b"] = window.WindowBounds(x=0, y=0, width=727, height=329)
+        assert window.is_phone_shaped() is True
+        snaps[:] = [(paused, False)]
+        clicks[:] = ["CLICKED"]
+        after[:] = [live]
+        assert window.resume() is True and scripts == [window._CLICK_RESUME_SCRIPT]
+        scripts.clear()
+        #    …and bounds that cannot be read mean no click
+        def no_bounds():
+            raise window.WindowError("no window")
+        patch(window, "get_bounds", no_bounds)
+        snaps[:] = [(paused, False)]
+        assert window.resume() is False and scripts == []
+        assert window.is_phone_shaped() is None and window.is_setup_screen(paused) is False
+        patch(window, "get_bounds", lambda: bounds["b"])
+        bounds["b"] = PHONE
+        assert window.is_setup_screen(paused) is False
+        assert window.is_setup_screen(live) is False
+
         # launch() returns the stream state instead of dropping resume()'s answer
         patch(gestures, "ensure_running", lambda: None)
         patch(window, "ensure_frontmost", lambda: None)
@@ -1532,6 +1806,16 @@ def test_resume_never_clicks_window_controls():
         with contextlib.redirect_stderr(err):
             assert cli._cmd_launch(None) == 3
         assert "mirror_not_live:" in err.getvalue()
+        #    F37: a setup / welcome screen → mirror_setup_required (still exit 3),
+        #    and the message never tells the user to lock the iPhone
+        bounds["b"] = window.WindowBounds(x=0, y=0, width=640, height=660)
+        patch(window, "get_overlay", lambda: {"live": False, "overlay": "iPhone on Your Mac", "buttons": 1})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._cmd_launch(None) == 3
+        assert err.getvalue().startswith("mirror_setup_required:")
+        assert "lock the iPhone" not in err.getvalue()
+        bounds["b"] = PHONE
         for state, text in ((True, "iPhone Mirroring ready"), (None, "stream state unknown")):
             patch(gestures, "launch", lambda s=state: s)
             out = io.StringIO()
@@ -1627,17 +1911,18 @@ def test_short_names_sweep_pass():
 
         def read(**kwargs):
             calls.append((kwargs.get("language_correction", "default"),
-                          kwargs.get("sweep", False)))
+                          kwargs.get("sweep", False) or kwargs.get("also_sweep", False)))
             return screens[len(calls) - 1]
 
         read.calls = calls
         return read
 
-    read = make_read([[], [], [hit("X", 0.30)]])
+    TOP = hit("Top Hit", 0.26)  # F35: rows count only inside the Top Hit card
+    read = make_read([[], [], [TOP, hit("X", 0.30)]])
     assert find_app_hit(read, "X", sleep=lambda s: None).ny == 0.30
     assert read.calls == [("default", False), (False, False), (False, True)]
     # long names: never a sweep read
-    read = make_read([[], [hit("Settings", 0.40)]])
+    read = make_read([[], [TOP, hit("Settings", 0.40)]])
     assert find_app_hit(read, "Settings", sleep=lambda s: None).ny == 0.40
     assert all(not sweep for _, sweep in read.calls)
 
@@ -1766,12 +2051,24 @@ def test_type_single_char_restore():
         # nothing new for 4 s: landed, but the clipboard keeps the typed text
         ok, pb, left = run([[X(0.2)], [X(0.2)], [X(0.2)]])
         assert ok and pb.data == b"X" and left == []
-        # the baseline sweep read could not capture: never restored, no further reads
+        # the baseline sweep read could not capture: never restored; the only
+        # further read is the F44 look for the paste-progress box (a sweep)
         ok, pb, left = run([verify.WindowError("blank"), [X(0.2), X(0.6)]])
-        assert ok and pb.data == b"X" and len(left) == 1
-        # the screen never held still: no baseline read, no restore, no reads at all
+        assert ok and pb.data == b"X" and len(left) == 0
+        # the screen never held still: no baseline read, no restore; again only
+        # the F44 look reads the screen
         ok, pb, left = run([[X(0.2)], [X(0.2), X(0.6)], [X(0.2), X(0.6)]], still=False)
-        assert ok and pb.data == b"X" and len(left) == 3
+        assert ok and pb.data == b"X" and len(left) == 2
+        # (F44) the phone shows its "Pasting from …" box after the frame diff
+        # fired and nothing new was seen: the paste is still on its way → False,
+        # never restored
+        box = [OCRHit(text="Pasting from “M5pro”…", nx=0.5, ny=0.47, confidence=1.0)]
+        ok, pb, left = run([verify.WindowError("blank"), box])
+        assert ok is False and pb.data == b"X" and left == []
+        #    the character at a new spot in two reads that also show the box (an
+        #    earlier paste still in flight): no evidence, never restored
+        ok, pb, left = run([[X(0.2)], [X(0.2), X(0.6)] + box, [X(0.2), X(0.6)] + box])
+        assert ok and pb.data == b"X" and left == []
     finally:
         for (mod, name), value in saved.items():
             setattr(mod, name, value)
@@ -1895,14 +2192,21 @@ def test_open_app_short_rows_and_deferred_restore():
                        clear_text=lambda: None, type_text=lambda t: True)
         return res, calls, taps
 
+    HEADER = hit("Top Hit", 0.16)  # F35: the Top Hit card header above TOP
+
     # F32: the stability re-read of a short name also sweeps; it sees both
     # rows, the top one stays the target
-    res, calls, taps = run("X", [[TOP], [TOP, SUGG], []])
+    res, calls, taps = run("X", [[HEADER, TOP], [HEADER, TOP, SUGG], []])
     assert res == "opened" and taps == [(0.18, 0.27)]
     assert calls[1] == {"also_sweep": True}
     # long names keep the plain re-read
-    res, calls, taps = run("Photos", [[hit("Photos", 0.27)], [hit("Photos", 0.27)], []])
+    res, calls, taps = run("Photos", [[HEADER, hit("Photos", 0.27)],
+                                      [HEADER, hit("Photos", 0.27)], []])
     assert res == "opened" and calls[1] == {}
+    # F35: when only the Chrome suggestion row of the same name is read (the
+    # Top Hit label missed in every pass), nothing is tapped: not_found
+    res, calls, taps = run("X", [[HEADER, SUGG, hit("X", 0.93)]] * 9)  # the field shows "X"
+    assert res == "not_found" and taps == []
 
     class Pasteboard:
         def __init__(self):
@@ -1988,6 +2292,18 @@ def test_open_app_short_rows_and_deferred_restore():
         assert pending[0].offer([X(0.2), X(0.6)]) is False    # first read of evidence
         assert pending[0].offer([X(0.6)]) is True and pb.data == b"orig"
 
+        #    (F44) reads that show the phone's "Pasting from …" box are no evidence:
+        #    a paste is still on its way
+        frames[:] = [b"\x00" * 8] * 3
+        pb, pending = Pasteboard(), []
+        assert type_text("X", pasteboard=pb, chord=lambda k, before_key=None: before_key and before_key(), sleep=sleep,
+                         clock=lambda: now[0], pending=pending)
+        box = OCRHit(text="Pasting from “M5pro”…", nx=0.5, ny=0.47, confidence=1.0)
+        assert pending[0].offer([X(0.2), X(0.6), box]) is False
+        assert pending[0].offer([X(0.2), X(0.6), box]) is False and pb.data == b"X"
+        assert pending[0].offer([X(0.6)]) is False            # first box-free read of evidence
+        assert pending[0].offer([X(0.6)]) is True and pb.data == b"orig"
+
         frames[:] = [b"\x00" * 8] * 3
         patch(vision, "read_screen", lambda language_correction=True, sweep=False: [])
         pb, pending = Pasteboard(), []
@@ -2002,18 +2318,22 @@ def test_open_app_short_rows_and_deferred_restore():
             def offer(self, hits):
                 offers.append(hits)
 
-        def fake_type(text, pending=None):
+        typed_kw = {}
+
+        def fake_type(text, pending=None, **kw):
+            typed_kw.update(kw)
             pending.append(Pending())
             return True
 
         patch(gestures.inp, "type_text", fake_type)
-        screens, lumas = [[TOP], [TOP, SUGG], []], [ZEROS, OPENED]
+        screens, lumas = [[HEADER, TOP], [HEADER, TOP, SUGG], []], [ZEROS, OPENED]
         res = open_app("X", spotlight_open=True,
                        read_screen=lambda **kw: screens.pop(0),
                        luma=lambda: lumas.pop(0), sleep=lambda s: None,
                        tap=lambda x, y: None, home=lambda: True,
                        clear_text=lambda: None)
         assert res == "opened" and len(offers) == 3
+        assert typed_kw == {"restore": False}  # F42: open_app never restores the clipboard
     finally:
         for (mod, name), value in saved.items():
             setattr(mod, name, value)
@@ -2029,7 +2349,7 @@ def test_open_app_short_rows_and_deferred_restore():
             return len(gate) == 2
 
         cli.gestures = SimpleNamespace(open_spotlight_checked=flaky,
-                                       open_app=lambda name, spotlight_open=True: "opened")
+                                       open_app=lambda name, spotlight_open=True, **kw: "opened")
         with contextlib.redirect_stdout(io.StringIO()):
             assert cli._cmd_open(argparse.Namespace(app="X")) == 0
         assert len(gate) == 2
@@ -2108,16 +2428,18 @@ def test_clipboard_race_and_late_paste():
             except ClipboardChanged:
                 pass
             assert chords == [] and pb.data == b"from another device"
-            if text == "X":  # the pre-read happened before our write
-                assert log.index("sweep") < log.index("write")
-            else:
-                assert "sweep" not in log
+            # the pre-paste read (a sweep for "X"; F41: a plain count for "hello")
+            # happened before our write
+            assert log.index("sweep") < log.index("write")
     finally:
         for (mod, name), value in saved.items():
             setattr(mod, name, value)
 
-    # F33: an unseen paste gets a third find pass; a seen one keeps two
-    TOP = OCRHit(text="X", nx=0.18, ny=0.27, confidence=0.9)
+    # F33: an unseen paste gets a third find pass; a seen one keeps two.
+    # F35: the reads that find the row show the Top Hit header above it.
+    HEADER = OCRHit(text="Top Hit", nx=0.18, ny=0.16, confidence=0.9)
+    LABEL = OCRHit(text="X", nx=0.18, ny=0.27, confidence=0.9)
+    TOP = [HEADER, LABEL]  # one OCR read of the Top Hit card
     OPENED = bytes([int(OPEN_MIN_DIFF) + 1] * 100)
 
     def run(typed, screens):
@@ -2130,10 +2452,75 @@ def test_clipboard_race_and_late_paste():
         return res, screens, homes
 
     # passes 1 and 2 read nothing (3 reads each for a short name); pass 3 finds it
-    res, left, homes = run(False, [[]] * 6 + [[TOP], [TOP], []])
+    res, left, homes = run(False, [[]] * 6 + [TOP, TOP, []])
     assert res == "opened" and left == [] and homes == []
-    res, left, homes = run(True, [[]] * 6 + [[TOP], [TOP], []])
-    assert res == "not_found" and len(left) == 3 and homes == [1]
+    #    F42: a paste type_text took as seen, while the search field does not show the
+    #    name yet, gets the late reads too (a clear that landed late can fake the change)
+    res, left, homes = run(True, [[]] * 6 + [TOP, TOP, []])
+    assert res == "opened" and left == [] and homes == []
+
+    # F42: an unseen paste may reach the phone more than 10 s later — keep reading, one pass
+    # a second, for up to OPEN_LATE_PASTE_S (fake clock: only the sleeps move it)
+    from imctl.gestures import OPEN_LATE_PASTE_S
+    SHOPEE = [HEADER, OCRHit(text="Shopee", nx=0.18, ny=0.27, confidence=0.9)]
+    OTHER = [HEADER, OCRHit(text="Shopee Partner", nx=0.18, ny=0.27, confidence=0.9)]
+
+    def run_late(screens, deadline_s=None):
+        now, lumas, homes = [0.0], [b"\x00" * 100, OPENED], []
+
+        def sleep(s):
+            now[0] += s
+        res = open_app("Shopee", spotlight_open=True,
+                       read_screen=lambda **kw: screens.pop(0),
+                       luma=lambda: lumas.pop(0), sleep=sleep,
+                       tap=lambda x, y: None, home=lambda: homes.append(1) or True,
+                       clear_text=lambda: None, type_text=lambda t: False,
+                       clock=lambda: now[0], deadline_s=deadline_s)
+        return res, screens, homes, now[0]
+
+    #    the paste shows up on the 9th read (~8 s on) → still opened
+    res, left, homes, _ = run_late([[]] * 8 + [SHOPEE, SHOPEE, []])
+    assert res == "opened" and left == [] and homes == []
+    #    nothing ever: reads stop at the time limit, not before → not_typed (the name may
+    #    never have reached the phone: no evidence the app is missing)
+    screens = [[]] * 30
+    res, left, homes, t = run_late(screens)
+    assert res == "not_typed" and homes == [1]
+    assert len(screens) == 30 - int(OPEN_LATE_PASTE_S) and t >= OPEN_LATE_PASTE_S
+    #    the search field shows the name (the paste is in) and the Top Hit card lacks it:
+    #    one more pass, then stop → not_found
+    ECHO = OCRHit(text="Shopee", nx=0.3, ny=0.93, confidence=0.9)
+    res, left, homes, t = run_late([[], OTHER + [ECHO], OTHER + [ECHO]] + [OTHER] * 10)
+    assert res == "not_found" and len(left) == 10 and homes == [1]
+    #    a Top Hit card but never the name in the field (e.g. the previous query's card):
+    #    no early stop — read to the time limit → not_typed
+    res, left, homes, t = run_late([OTHER] * 30)
+    assert res == "not_typed" and t >= OPEN_LATE_PASTE_S and homes == [1]
+    #    the name in the field but no Top Hit header the reader knows (another language):
+    #    no_top_hit, which points at NORACU_TOPHIT_LABELS
+    res, left, homes, t = run_late([[ECHO], [ECHO]] + [[ECHO]] * 10)
+    assert res == "no_top_hit" and len(left) == 10 and homes == [1]
+    #    the echo shows up on the last read before the time limit: the confirming pass still
+    #    runs past the limit (within the open budget) and finds the Top Hit
+    n_before = int(OPEN_LATE_PASTE_S) - 1
+    res, left, homes, t = run_late([[]] * n_before + [[ECHO], SHOPEE, SHOPEE, []], deadline_s=60.0)
+    assert res == "opened" and left == [] and homes == []
+    #    … but never past the open budget
+    res, left, homes, t = run_late([[]] * n_before + [[ECHO], SHOPEE, SHOPEE, []],
+                                   deadline_s=1.8 + OPEN_LATE_PASTE_S - 0.5)
+    assert res == "deadline" and homes == [1]
+    #    the field echo: exact, bottom zone only, a "Q" for the magnifier glyph tolerated
+    from imctl.gestures import _field_echo
+    assert _field_echo([ECHO], "shopee") and _field_echo([OCRHit(text="Q Shopee", nx=0.3,
+                                                                  ny=0.93, confidence=0.9)], "Shopee")
+    assert not _field_echo([OCRHit(text="Shopee", nx=0.3, ny=0.5, confidence=0.9)], "Shopee")
+    assert not _field_echo([OCRHit(text="Q Search", nx=0.3, ny=0.93, confidence=0.9)], "Shopee")
+    assert not _field_echo([OCRHit(text="Shopee Partner", nx=0.3, ny=0.93, confidence=0.9)], "Shopee")
+    assert _field_echo([OCRHit(text="Q.拼多多", nx=0.3, ny=0.93, confidence=0.9)], "拼多多")  # seen on the device
+    assert _field_echo([OCRHit(text="Q: QQ", nx=0.3, ny=0.93, confidence=0.9)], "QQ")
+    #    the open budget still wins over the late-paste wait
+    res, left, homes, _ = run_late([[]] * 30, deadline_s=5.0)
+    assert res == "deadline" and homes == [1]
 
 
 def test_screenshot_default_path_and_sigterm():
@@ -2224,7 +2611,7 @@ def test_bring_front_waits_for_a_frame():
         return r
 
     try:
-        patch(window, "_run_osascript", lambda script, strip=True: answers.pop(0))
+        patch(window, "_run_osascript", lambda script, strip=True, timeout=10: answers.pop(0))
         patch(window.subprocess, "run", lambda *a, **k: activations.append(1))
         patch(time_module, "sleep", lambda s: None)
         patch(verify, "window_luma", luma)
@@ -2285,3 +2672,561 @@ if __name__ == "__main__":
     test_screenshot_default_path_and_sigterm()
     test_bring_front_waits_for_a_frame()
     print("all smoke tests passed")
+
+
+def test_watch_late_paste_and_type_messages():
+    """F38: a paste unconfirmed at 2.5 s is watched (read-only) a little longer.
+
+    Seen later → "typed … (landed late …)", exit 0, no second paste; never
+    seen → type_not_confirmed that tells the caller to read the screen before
+    retyping; a capture failure during the watch is "not seen", never "seen".
+    """
+    import argparse
+    import contextlib
+    import io
+
+    from imctl import cli
+    from imctl.vision import CaptureError, OCRHit
+
+    def hits(*texts):
+        return [OCRHit(text=t, nx=0.5, ny=0.1 + i * 0.05, confidence=0.9)
+                for i, t in enumerate(texts)]
+
+    now = [0.0]
+
+    def sleep(s):
+        now[0] += s
+
+    def clock():
+        return now[0]
+
+    # type_text's pre-paste count (0 here) is the baseline; the text counts once it is
+    # seen in TWO consecutive frames — first seen on the third read → confirmed on the 4th
+    screens = [hits("Search"), hits("Search"), hits("iPhone 17 Pro Max case"),
+               hits("iPhone 17 Pro Max case")]
+    now[0] = 0.0
+    late = cli._watch_late_paste("iPhone 17 Pro Max case", baseline=0,
+                                 read_screen=lambda: screens.pop(0), sleep=sleep, clock=clock)
+    assert late == 2.4 and screens == []  # the confirming read follows 0.4 s after the first
+
+    #    a paste that already shows on the watch's FIRST frame is not swallowed
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", baseline=0, read_screen=lambda: hits("hello"),
+                                 sleep=sleep, clock=clock) == 0.4
+
+    #    a first sighting at the very end still gets its confirming read
+    screens_end = [hits("x"), hits("hello"), hits("hello")]
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", baseline=0, read_screen=lambda: screens_end.pop(0),
+                                 sleep=sleep, clock=clock, watch_s=1.2) == 1.4
+
+    # never seen → None after the watch window, no read beyond it
+    reads = []
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", baseline=0,
+                                 read_screen=lambda: reads.append(1) or hits("x"),
+                                 sleep=sleep, clock=clock, watch_s=3.0) is None
+    assert len(reads) == 3
+
+    #    one OCR blip is not enough: seen, not seen, seen, not seen … → None
+    blips = [hits("hello"), hits("x")] * 6
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", baseline=0, read_screen=lambda: blips.pop(0),
+                                 sleep=sleep, clock=clock, watch_s=8.0) is None
+
+    # F44: the words of the phone's "Pasting from …" box never count as the text ("pro"
+    #    is in "M5pro"); once the box is gone and the text shows twice, it counts
+    box = "Pasting from “M5pro”…"
+    seq = [hits(box), hits(box), hits(box), hits("pro"), hits("pro")]
+    now[0] = 0.0
+    late = cli._watch_late_paste("pro", baseline=0, read_screen=lambda: seq.pop(0),
+                                 sleep=sleep, clock=clock)
+    assert round(late, 6) == 3.4 and seq == []
+
+    # F41: with type_text's pre-paste count as the baseline, text that was already
+    # on screen (count 1 before the paste) only counts once it occurs MORE often
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", baseline=1, read_screen=lambda: hits("say hello"),
+                                 sleep=sleep, clock=clock) is None
+    screens2 = [hits("say hello"), hits("say hello", "hello"), hits("say hello", "hello")]
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", baseline=1, read_screen=lambda: screens2.pop(0),
+                                 sleep=sleep, clock=clock) == 1.4
+
+    # no pre-paste count (type_text could not read the screen): the watch's first readable
+    # frame is the floor, so text already on screen is never taken for the paste …
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", read_screen=lambda: hits("say hello"),
+                                 sleep=sleep, clock=clock) is None
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", read_screen=lambda: hits("hello"),
+                                 sleep=sleep, clock=clock) is None
+    #    … but a paste that shows up after those frames still counts (two sightings); the
+    #    floor is the higher count of the first two readable frames, and an unreadable frame
+    #    is not one of them
+    seq3 = [CaptureError("blank"), hits("say hello"), hits("say hello"),
+            hits("say hello", "hello"), hits("say hello", "hello")]
+
+    def reads3():
+        item = seq3.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+    now[0] = 0.0
+    assert round(cli._watch_late_paste("hello", read_screen=reads3, sleep=sleep,
+                                       clock=clock), 6) == 3.4 and seq3 == []
+    #    one floor frame under-counting (an occurrence missed) cannot fake a rise
+    seq4 = [hits("x"), hits("say hello"), hits("say hello"), hits("say hello")] + [hits("say hello")] * 20
+
+    def reads4():
+        return seq4.pop(0)
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", read_screen=reads4, sleep=sleep, clock=clock) is None
+
+    # capture failures are "not seen" and break the run; other errors propagate
+    def flaky():
+        raise CaptureError("could not capture the iPhone Mirroring window by id")
+    now[0] = 0.0
+    assert cli._watch_late_paste("hello", read_screen=flaky, sleep=sleep, clock=clock,
+                                 watch_s=2.0) is None
+    seq = [hits("hello"), CaptureError("blank frame"), hits("hello"), hits("hello")]
+
+    def broken_run():
+        item = seq.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+    now[0] = 0.0
+    assert round(cli._watch_late_paste("hello", baseline=0, read_screen=broken_run,
+                                       sleep=sleep, clock=clock), 6) == 1.8
+    def broken():
+        raise RuntimeError("boom")
+    now[0] = 0.0
+    try:
+        cli._watch_late_paste("hello", read_screen=broken, sleep=sleep, clock=clock)
+        assert False, "a non-capture error must propagate"
+    except RuntimeError:
+        pass
+
+    # one-character text is not watched at all: None at once, no read, no wait
+    now[0] = 0.0
+    assert cli._watch_late_paste("X", read_screen=lambda: 1 / 0, sleep=sleep,
+                                 clock=clock) is None
+    assert now[0] == 0.0
+
+    # _cmd_type wiring: unconfirmed + seen late → exit 0, "landed late"
+    real = (cli._require_live, cli._require_expect, cli.input.type_text, cli._watch_late_paste)
+    try:
+        cli._require_live = lambda: None
+        cli._require_expect = lambda args: None
+        seen_baseline = []
+
+        def unconfirmed(text, replace=False, report=None):
+            report["count_before"] = 1  # F41: type_text reports its pre-paste count
+            return False
+        cli.input.type_text = unconfirmed
+        args = argparse.Namespace(text="hello world", replace=False, expect=None)
+        cli._watch_late_paste = lambda text, baseline=None: seen_baseline.append(baseline) or 2.0
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert cli._cmd_type(args) == 0
+        assert "showed up late" in out.getvalue() and "extra 2s check" in out.getvalue()
+        #    never seen → exit 4 with the read-before-retyping advice
+        assert seen_baseline == [1]  # the watch got type_text's baseline
+        cli._watch_late_paste = lambda text, baseline=None: None
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._cmd_type(args) == 4
+        msg = err.getvalue()
+        assert msg.startswith("type_not_confirmed:") and "before typing again" in msg
+        assert "replace=true" in msg and "a further 15s check" in msg
+        #    replace=true over text that was already on screen: say why nothing changed
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._cmd_type(argparse.Namespace(text="hello world", replace=True,
+                                                    expect=None)) == 4
+        assert "already on screen before this paste" in err.getvalue()
+        assert "retype with replace=true" not in err.getvalue()
+        #    one character: the message does not claim a watch that never ran
+        args1 = argparse.Namespace(text="X", replace=False, expect=None)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._cmd_type(args1) == 4
+        assert "cannot be confirmed by OCR afterwards" in err.getvalue()
+        assert "further" not in err.getvalue()
+    finally:
+        (cli._require_live, cli._require_expect, cli.input.type_text,
+         cli._watch_late_paste) = real
+
+
+def test_status_reports_setup_screen():
+    """F37: status() says setup=true (and paused=false) for a welcome screen."""
+    from imctl import gestures, window
+
+    saved = {}
+
+    def patch(mod, name, value):
+        if (mod, name) not in saved:
+            saved[(mod, name)] = getattr(mod, name)
+        setattr(mod, name, value)
+
+    try:
+        patch(window, "is_running", lambda: True)
+        patch(window, "get_window_info", lambda: {"id": 546, "onscreen": True})
+        patch(window, "is_frontmost", lambda: True)
+        welcome = {"live": False, "overlay": "iPhone on Your Mac", "buttons": 1}
+        paused = {"live": False, "overlay": "Connection Paused", "buttons": 1}
+        for overlay, b, setup, paused_flag in (
+                (welcome, window.WindowBounds(x=0, y=0, width=640, height=660), True, False),
+                (paused, window.WindowBounds(x=0, y=0, width=329, height=727), False, True)):
+            patch(window, "get_overlay", lambda o=overlay: o)
+            patch(window, "get_bounds", lambda bb=b: bb)
+            patch(gestures, "get_bounds", lambda bb=b: bb)
+            info = gestures.status()
+            assert info["setup"] is setup and info["paused"] is paused_flag, info
+    finally:
+        for (mod, name), value in saved.items():
+            setattr(mod, name, value)
+
+
+def test_open_deadline_from_env():
+    """The server passes an absolute deadline, NORACU_OPEN_DEADLINE_EPOCH."""
+    import os
+
+    from imctl import cli
+
+    saved = os.environ.get("NORACU_OPEN_DEADLINE_EPOCH")
+    try:
+        now = lambda: 1000.0
+        for raw, want in (("1038", {"deadline_s": 38.0}), ("1002.5", {"deadline_s": 2.5}),
+                          ("999", {"deadline_s": 0.0}),   # already past → no budget at all
+                          ("", {}), ("abc", {}), ("nan", {}), ("0", {}), ("-3", {})):
+            os.environ["NORACU_OPEN_DEADLINE_EPOCH"] = raw
+            assert cli._open_deadline_kwargs(now=now) == want, raw
+        del os.environ["NORACU_OPEN_DEADLINE_EPOCH"]
+        assert cli._open_deadline_kwargs(now=now) == {}
+    finally:
+        if saved is None:
+            os.environ.pop("NORACU_OPEN_DEADLINE_EPOCH", None)
+        else:
+            os.environ["NORACU_OPEN_DEADLINE_EPOCH"] = saved
+
+
+def test_open_stopped_goes_home():
+    """A SIGTERM (SystemExit) during open leaves the phone on the Home Screen."""
+    import argparse
+    from types import SimpleNamespace
+
+    from imctl import cli
+
+    homes = []
+
+    def stopped(name, spotlight_open=True, **kw):
+        raise SystemExit(143)
+
+    real_live, real_gestures = cli._require_live, cli.gestures
+    try:
+        cli._require_live = lambda: None
+        cli.gestures = SimpleNamespace(open_spotlight_checked=lambda: True, open_app=stopped,
+                                       home_via_menu=lambda: homes.append(1) or True)
+        try:
+            cli._cmd_open(argparse.Namespace(app="Shopee"))
+            assert False, "SystemExit must propagate"
+        except SystemExit:
+            pass
+        assert homes == [1]
+    finally:
+        cli._require_live, cli.gestures = real_live, real_gestures
+
+
+def test_tophit_labels():
+    """NORACU_TOPHIT_LABELS supplies the Top Hit label of a non-English iPhone."""
+    from imctl import gestures
+    from imctl.vision import OCRHit
+
+    assert gestures._tophit_labels(None) == ("top hit",)
+    assert gestures._tophit_labels(" , ") == ("top hit",)
+    assert gestures._tophit_labels("Top Hit, 最佳搜索结果") == ("top hit", "最佳搜索结果")
+    saved = gestures.TOP_HIT_LABELS
+    try:
+        gestures.TOP_HIT_LABELS = gestures._tophit_labels("最佳搜索结果")
+        frame = [OCRHit(text="最佳搜索结果", nx=0.2, ny=0.14, confidence=1.0),
+                 OCRHit(text="拼多多", nx=0.17, ny=0.24, confidence=1.0)]
+        assert gestures.choose_app_hit(frame, "拼多多").ny == 0.24
+        # the English label no longer counts once a custom list is set
+        eng = [OCRHit(text="Top Hit", nx=0.2, ny=0.14, confidence=1.0), frame[1]]
+        assert gestures.choose_app_hit(eng, "拼多多") is None
+    finally:
+        gestures.TOP_HIT_LABELS = saved
+
+
+def test_phone_shape_rules():
+    """F37: elongated (≥ 1.7:1) either way is phone-shaped; near-square
+    or a wide dialog is not; degenerate bounds say nothing."""
+    from imctl import window
+
+    B = window.WindowBounds
+    assert window.is_phone_shaped(B(x=0, y=0, width=329, height=727)) is True   # portrait mirror
+    assert window.is_phone_shaped(B(x=0, y=0, width=727, height=329)) is True   # landscape mirror
+    assert window.is_phone_shaped(B(x=0, y=0, width=640, height=660)) is False  # welcome screen
+    assert window.is_phone_shaped(B(x=0, y=0, width=400, height=680)) is True   # exactly 1.7
+    assert window.is_phone_shaped(B(x=0, y=0, width=400, height=679)) is False
+    assert window.is_phone_shaped(B(x=0, y=0, width=750, height=1334)) is True  # iPhone SE 16:9
+    assert window.is_phone_shaped(B(x=0, y=0, width=800, height=520)) is False  # a wide dialog
+    assert window.is_phone_shaped(B(x=0, y=0, width=0, height=660)) is None
+    assert window.is_phone_shaped(B(x=0, y=0, width=640, height=0)) is None
+    off = {"live": False, "overlay": "x", "buttons": 1}
+    assert window.is_setup_screen(off, B(x=0, y=0, width=640, height=660)) is True
+    assert window.is_setup_screen(off, B(x=0, y=0, width=0, height=0)) is False
+    assert window.is_setup_screen({"live": True, "overlay": None, "buttons": 0},
+                                  B(x=0, y=0, width=640, height=660)) is False
+    assert window.is_setup_screen({"live": None, "overlay": None, "buttons": 0},
+                                  B(x=0, y=0, width=640, height=660)) is False
+
+
+def test_type_text_restore_needs_a_rise():
+    """F41: for text of 2+ characters the default OCR check counts the text before
+    the paste (the higher of two reads) and licenses a restore only on a RISE over
+    that count, seen in two reads.
+
+    Text already on screen (e.g. a search-history chip with the same query) used to
+    license an immediate restore; a paste read late by the phone could then paste
+    the user's ORIGINAL clipboard. Fully injected: pasteboard, chord, clock, frame
+    diff and the screen reads.
+    """
+    from imctl import input as input_module, verify, vision
+    from imctl.input import type_text
+    from imctl.vision import CaptureError, OCRHit
+
+    class Pasteboard:
+        def __init__(self):
+            self.data, self.count = b"orig", 7
+
+        def dataForType_(self, _t):
+            return self.data
+
+        def changeCount(self):
+            return self.count
+
+        def clearContents(self):
+            self.count += 1
+            self.data = None
+
+        def setString_forType_(self, s, _t):
+            self.data = s.encode()
+
+        def setData_forType_(self, d, _t):
+            self.data = d
+
+    def hits(*texts):
+        return [OCRHit(text=t, nx=0.5, ny=0.1 + i * 0.05, confidence=0.9) for i, t in enumerate(texts)]
+
+    def run(screens, *, frame_changes=False, restore=True, text="iPhone 17 Pro Max case"):
+        """screens: what each vision.read_screen() call returns (an Exception raises)."""
+        now = [0.0]
+        reads = []
+
+        def read(**kwargs):
+            item = screens.pop(0)
+            reads.append(kwargs)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        real_read, real_front = vision.read_screen, input_module.ensure_frontmost
+        vision.read_screen = read
+        input_module.ensure_frontmost = lambda: None
+        try:
+            pb, report = Pasteboard(), {}
+            ok = type_text(text, pasteboard=pb,
+                           chord=lambda k, before_key=None: before_key and before_key(),
+                           before_check=lambda: (lambda: frame_changes),
+                           sleep=lambda s: now.__setitem__(0, now[0] + s),
+                           clock=lambda: now[0], report=report, restore=restore)
+        finally:
+            vision.read_screen, input_module.ensure_frontmost = real_read, real_front
+        return ok, pb, report, reads
+
+    chip = "iPhone 17 Pro Max case"           # the same text, already on screen
+    # ① already on screen before (count 1 in both pre-reads), still 1 after, no frame
+    #    change: not confirmed, and the user's clipboard is NOT restored (it keeps the text)
+    screens = [hits(chip), hits(chip), hits(chip)]
+    ok, pb, report, reads = run(screens)
+    assert ok is False and pb.data == chip.encode() and report == {"count_before": 1}
+    assert screens == []  # two pre-reads; the first post-read already shows no rise
+    #    …same, but the frame changed: landed, yet still no restore (no rise)
+    ok, pb, report, _ = run([hits(chip), hits(chip), hits(chip)], frame_changes=True)
+    assert ok is True and pb.data == chip.encode()
+    # ② 0 before → 1 after, in two post-reads: the paste is seen → confirmed and restored
+    screens = [hits("Search"), hits("Search"), hits(chip), hits(chip)]
+    ok, pb, report, _ = run(screens)
+    assert ok is True and pb.data == b"orig" and report == {"count_before": 0}
+    assert screens == []
+    #    1 before → 2 after: a rise over the chip → restored
+    ok, pb, _, _ = run([hits(chip), hits(chip), hits(chip, chip), hits(chip, chip)])
+    assert ok is True and pb.data == b"orig"
+    # ③ a pre-paste read fails: count unknown → OCR never licenses a restore
+    ok, pb, report, _ = run([CaptureError("blank"), hits(chip)])
+    assert ok is False and pb.data == chip.encode() and report == {"count_before": None}
+    ok, pb, report, _ = run([hits(chip), CaptureError("blank"), hits(chip)])
+    assert ok is False and pb.data == chip.encode() and report == {"count_before": None}
+    ok, pb, report, _ = run([CaptureError("blank"), hits(chip)], frame_changes=True)
+    assert ok is True and pb.data == chip.encode()
+    # ④ one pre-read misses the chip (a redraw): the count is the higher one, so the
+    #    chip alone after the paste is no rise → no restore
+    ok, pb, report, _ = run([hits("Search"), hits(chip), hits(chip)])
+    assert ok is False and pb.data == chip.encode() and report == {"count_before": 1}
+    # ⑤ a rise in only one post-read (an OCR blip) licenses nothing
+    ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(chip), hits("Search")])
+    assert ok is False and pb.data == chip.encode() and report == {"count_before": 0}
+    # ⑥ restore=False (open_app): a confirmed paste still never gives the clipboard back
+    ok, pb, _, _ = run([hits("Search"), hits("Search"), hits(chip), hits(chip)], restore=False)
+    assert ok is True and pb.data == chip.encode()
+    # ⑦ (F44) the phone's "Pasting from …" box: its words never count as the text ("pro"
+    #    is in "M5pro"), and while it shows nothing licenses a restore — a paste is still
+    #    on its way and could fetch the restored clipboard
+    box = "Pasting from “M5pro”…"
+    ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(box), hits(box)], text="pro")
+    assert ok is False and pb.data == b"pro" and report == {"count_before": 0}
+    #    the text itself rises while a box still shows (an earlier paste in flight): no restore
+    ok, pb, _, _ = run([hits("Search"), hits("Search"), hits(chip, box), hits(chip, box)],
+                       frame_changes=True)
+    assert ok is True and pb.data == chip.encode()
+    assert verify.probe_count("pro", hits(box)) == 0
+    assert verify.probe_count("pro", hits("pro", box)) == 1
+    # the probe helpers
+    assert verify.text_probe("X") is None and verify.text_probe("ab") == "ab"
+    assert verify.probe_count("hello", hits("say hello", "hello")) == 2
+    assert verify.probe_count("X", hits("X")) is None
+
+
+def test_paste_hud_probe():
+    """F44: the phone's "Pasting from …" progress box is recognized in one OCR hit
+    (any case, spacing or quotes around the Mac's name); nothing else counts."""
+    from imctl import verify
+    from imctl.vision import OCRHit
+
+    def hits(*texts):
+        return [OCRHit(text=t, nx=0.5, ny=0.4 + i * 0.05, confidence=0.9) for i, t in enumerate(texts)]
+
+    assert verify.shows_paste_hud(hits("Pasting from “M5pro”..."))
+    assert verify.shows_paste_hud(hits("Suggestions", "PASTING  FROM M5pro…", "Cancel"))
+    assert verify.shows_paste_hud(["Pasting from x"])  # plain strings work too
+    assert not verify.shows_paste_hud(hits("Cut", "Copy", "Paste", "noracu test 123"))
+    assert not verify.shows_paste_hud(hits("Pasting", "from M5pro"))  # never joined across hits
+    assert not verify.shows_paste_hud([])
+
+
+def test_open_budget_spent_before_typing():
+    """With the budget already spent, open_app neither clears nor types."""
+    from imctl.gestures import open_app
+
+    t = [100.0]
+    calls = []
+    res = open_app("Shopee", spotlight_open=True, read_screen=lambda **kw: [],
+                   luma=lambda: b"\x00" * 10, sleep=lambda s: None,
+                   tap=lambda x, y: calls.append("tap"),
+                   home=lambda: calls.append("home") or True,
+                   clear_text=lambda: calls.append("clear"),
+                   type_text=lambda text: calls.append("type") or True,
+                   clock=lambda: t[0], deadline_s=-1.0)
+    assert res == "deadline" and calls == ["home"]
+    # the caller learns whether the trip back to the Home Screen worked
+    for went_home in (True, False):
+        rep = {}
+        res = open_app("Shopee", spotlight_open=True, read_screen=lambda **kw: [],
+                       luma=lambda: b"\x00" * 10, sleep=lambda s: None,
+                       tap=lambda x, y: None, home=lambda: went_home,
+                       clear_text=lambda: None, type_text=lambda text: True,
+                       clock=lambda: t[0], deadline_s=-1.0, report=rep)
+        assert res == "deadline" and rep == {"home": went_home}
+
+
+def test_open_app_keeps_the_clipboard():
+    """F42: open_app's paste never gives the clipboard back (type_text restore=False)."""
+    from imctl import gestures
+
+    seen = {}
+    real = gestures.inp.type_text
+    try:
+        gestures.inp.type_text = lambda text, **kw: seen.update(kw) or True
+        res = gestures.open_app("Shopee", spotlight_open=True, read_screen=lambda **kw: [],
+                                luma=lambda: b"\x00" * 10, sleep=lambda s: None,
+                                tap=lambda x, y: None, home=lambda: True,
+                                clear_text=lambda: None, deadline_s=None)
+    finally:
+        gestures.inp.type_text = real
+    assert res == "not_typed" and seen.get("restore") is False  # the field never showed it
+
+
+def test_home_via_menu_uses_short_timeouts():
+    """The tidy-up Home bounds every osascript run — bringing the mirror to the front
+    included — to TIDY_OSASCRIPT_TIMEOUT_S, and a frontmost check that times out falls
+    through to the menu click instead of raising."""
+    import subprocess
+
+    from imctl import gestures
+
+    seen = []
+    real = (gestures._run_osascript, gestures.ensure_frontmost, gestures._view_menu_shortcut,
+            gestures.inp._cmd_chord)
+    try:
+        def fake(script, args=None, timeout=10):
+            seen.append(timeout)
+            raise gestures.GestureError("no menu")
+        gestures._run_osascript = fake
+        gestures.ensure_frontmost = lambda timeout=10: seen.append(timeout)
+        assert gestures.home_via_menu() is False
+        assert len(seen) == 3  # shortcut read, frontmost, menu click
+        assert all(x == gestures.TIDY_OSASCRIPT_TIMEOUT_S for x in seen)
+        assert gestures.TIDY_OSASCRIPT_TIMEOUT_S <= 4.0
+
+        front = []
+
+        def flaky_front(timeout=10):
+            front.append(timeout)
+            if len(front) == 1:
+                raise subprocess.TimeoutExpired(cmd="osascript", timeout=timeout)
+
+        def no_chord(keycode):
+            raise AssertionError("no chord after a failed frontmost check")
+        gestures._view_menu_shortcut = lambda item, timeout=10: ("1", 0)
+        gestures.inp._cmd_chord = no_chord
+        gestures.ensure_frontmost = flaky_front
+        gestures._run_osascript = lambda script, args=None, timeout=10: ""
+        assert gestures.home_via_menu() is True
+        assert front == [gestures.TIDY_OSASCRIPT_TIMEOUT_S] * 2
+    finally:
+        (gestures._run_osascript, gestures.ensure_frontmost, gestures._view_menu_shortcut,
+         gestures.inp._cmd_chord) = real
+
+
+def test_no_top_hit_message_with_custom_labels():
+    """With NORACU_TOPHIT_LABELS set, the message names those labels."""
+    import argparse
+    import contextlib
+    import io
+    import os
+    from types import SimpleNamespace
+
+    from imctl import cli
+
+    saved_env = os.environ.get("NORACU_TOPHIT_LABELS")
+    real_live, real_gestures = cli._require_live, cli.gestures
+    try:
+        os.environ["NORACU_TOPHIT_LABELS"] = "最佳搜索结果"
+        cli._require_live = lambda: None
+        cli.gestures = SimpleNamespace(open_spotlight_checked=lambda: True,
+                                       open_app=lambda name, spotlight_open=True, **kw: "no_top_hit",
+                                       TOP_HIT_LABELS=("最佳搜索结果",),
+                                       home_via_menu=lambda: True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert cli._cmd_open(argparse.Namespace(app="拼多多")) == 1
+        assert "'最佳搜索结果'" in out.getvalue() and "not set to English" not in out.getvalue()
+    finally:
+        if saved_env is None:
+            os.environ.pop("NORACU_TOPHIT_LABELS", None)
+        else:
+            os.environ["NORACU_TOPHIT_LABELS"] = saved_env
+        cli._require_live, cli.gestures = real_live, real_gestures
