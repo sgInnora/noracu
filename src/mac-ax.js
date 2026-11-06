@@ -296,11 +296,38 @@ function axWindowId(w) {
   if (!AXGW) return null;
   try { const r = Ref('I'); return Number($._AXUIElementGetWindow(w, r)) === 0 && Number(r[0]) > 0 ? Number(r[0]) : null; } catch (e) { return null; }
 }
+// The CGWindowID of the window an element is in: the element itself when it is a window, else its
+// AXWindow, else the nearest AXWindow up its AXParent chain. null when none has an id.
+function windowIdOf(el) {
+  if (!el) return null;
+  if (attr(el, 'AXRole') === 'AXWindow') return axWindowId(el);
+  const aw = attr(el, 'AXWindow');
+  if (aw && aw.el) { const id = axWindowId(aw.el); if (id) return id; }
+  let c = el;
+  for (let k = 0; k < 64 && c; k++) {
+    const p = attr(c, 'AXParent');
+    c = p && p.el ? p.el : null;
+    if (c && attr(c, 'AXRole') === 'AXWindow') return axWindowId(c);
+  }
+  return null;
+}
 function windowInfo(w, n) {
   const v = readNode(w);
   return { kind: 'window', n, wid: axWindowId(w), title: typeof v.AXTitle === 'string' ? v.AXTitle : '', subrole: v.AXSubrole || '', frame: frameOf(v), focused: v.AXFocused === true, main: attr(w, 'AXMain') === true, minimized: attr(w, 'AXMinimized') === true };
 }
 function rectNear(a, b, tol) { return a && b && Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol && Math.abs(a[3] - b[3]) <= tol; }
+// Finder's desktop: the one window without a CGWindowID seen on the test Mac (wid probe 2026-11-06; its
+// frame is the bounding box of all displays). It is never closed and reopened, so its elements keep the
+// title/frame match; any other window without an id is refused (a closed and reopened window with the
+// same title and frame could not be told apart).
+function isFinderDesktop(app, c) {
+  if (!(app && app.bundle === 'com.apple.finder' && c && c.title === '' && !c.subrole && c.frame)) return false;
+  const ds = displays().map(d => d.frame);
+  if (!ds.length) return false;
+  const x0 = Math.min(...ds.map(f => f[0])), y0 = Math.min(...ds.map(f => f[1]));
+  const x1 = Math.max(...ds.map(f => f[0] + f[2])), y1 = Math.max(...ds.map(f => f[1] + f[3]));
+  return rectNear([x0, y0, x1 - x0, y1 - y0], c.frame, 2) || ds.some(f => rectNear(f, c.frame, 2));
+}
 
 // Pick the window a snapshot is about: an explicit index/title, else the focused or main window,
 // else the only window. Several candidates and no way to choose → AMBIGUOUS_WINDOW with the list.
@@ -448,8 +475,12 @@ function walk(rootEl, rootPath, opt) {
     const kids = v.AXChildren || [];
     const atLimit = ldepth >= maxDepth;
     const show = !(opt.compact && wrapper) && (!opt.interactive || interactive || (skeleton && atLimit && kids.length));
+    // app-level snapshots (no window container): an element under a window records that window's
+    // CGWindowID, so a window closed and reopened with the same content is not taken for the old one
+    const wwid = opt.trackWindow ? (role === 'AXWindow' ? axWindowId(el) : anc.wwid) : null;
     if (opt.find ? matches(v, opt.find) : show) {
       const node = makeNode(v, ldepth, path, actions, interactive);
+      if (wwid) node.fp.wwid = wwid;
       if (anc.chain.length) node.fp.chain = chainKey(anc.chain);
       node._shape = anc.shape.slice();
       node._accs = anc.accs;
@@ -466,7 +497,7 @@ function walk(rootEl, rootPath, opt) {
     const own = { texts: [], seen: 0, full: false, cut: false, closed: false, noItem: (isRoot && Boolean(opt.rootIsContainer)) || ITEM_SKIP_ROLES.has(role) };
     if (nodes.length && nodes[nodes.length - 1]._el === el) nodes[nodes.length - 1]._own = own;
     const cell = CELL_ROLES.has(role);
-    const childAnc = { shape: anc.shape.concat(kids.length), chain: name ? anc.chain.concat(name) : anc.chain, accs: [own].concat(anc.accs).slice(0, ITEM_LEVELS), cells: [cell].concat(anc.cells.map(c => c || cell)).slice(0, ITEM_LEVELS) };
+    const childAnc = { shape: anc.shape.concat(kids.length), chain: name ? anc.chain.concat(name) : anc.chain, accs: [own].concat(anc.accs).slice(0, ITEM_LEVELS), cells: [cell].concat(anc.cells.map(c => c || cell)).slice(0, ITEM_LEVELS), wwid };
     if (atLimit) own.cut = true;
     for (let i = 0; i < kids.length; i++) {
       if (visit(kids[i], path.concat(i), nextDepth, inMenuBar || role === 'AXMenuBar', childAnc) === 'stop') return 'stop';
@@ -475,7 +506,7 @@ function walk(rootEl, rootPath, opt) {
   }
   const pre = opt.evidence || { shape: [], chain: [] };
   const seen = {};
-  visit(rootEl, rootPath.slice(), 0, false, { shape: pre.shape.slice(), chain: pre.chain.slice(), accs: [], cells: [] });
+  visit(rootEl, rootPath.slice(), 0, false, { shape: pre.shape.slice(), chain: pre.chain.slice(), accs: [], cells: [], wwid: opt.trackWindow ? windowIdOf(rootEl) : null });
   // Elements that share their fingerprint with another one in the container (several "Delete" buttons,
   // one per list item) are told apart by their surroundings: the path shape, and the item key. Uniqueness
   // is known only when the whole container was walked: a snapshot that stopped early, or one drilled into
@@ -701,7 +732,7 @@ function openMenus(appEl) {
   if (mb && mb.el) for (const item of children(mb.el)) if (attr(item, 'AXSelected') === true) for (const k of children(item)) if (attr(k, 'AXRole') === 'AXMenu') found.push(k);
   return found;
 }
-function containerEl(appEl, c) {
+function containerEl(appEl, c, app) {
   if (!c || c.kind === 'app') return { el: appEl, shift: [0, 0] };
   if (c.kind === 'menubar') { const mb = attr(appEl, 'AXMenuBar'); return mb && mb.el ? { el: mb.el, shift: [0, 0] } : { error: 'menubar_absent' }; }
   if (c.kind === 'menu') {
@@ -719,8 +750,11 @@ function containerEl(appEl, c) {
       for (const w of ws) if (axWindowId(w) === c.wid) return { el: w, shift: shiftOf(w) };
       return { error: 'window_absent' };
     }
-    // no id was available when the element was seen: same title, subrole and frame; a changed title or a
-    // moved window is a stale reference, not a reason to pick some other window
+    // no id was available when the element was seen: a window closed and reopened with the same title,
+    // subrole and frame could not be told apart from it, so refuse — except Finder's desktop, which is
+    // never reopened. (Reddit r/mcp review 2026-11-06)
+    if (!isFinderDesktop(app, c)) return { error: 'window_unverifiable' };
+    // the desktop: same title, subrole and frame; a changed frame is a stale reference
     const infos = ws.map((w, i) => windowInfo(w, i));
     const hits = infos.filter(x => x.title === c.title && x.subrole === c.subrole && (!c.frame || rectNear(x.frame, c.frame, POS_TOL)));
     if (hits.length === 1) return { el: ws[hits[0].n], shift: [0, 0] };
@@ -729,14 +763,27 @@ function containerEl(appEl, c) {
   return { error: 'container_unknown' };
 }
 const SEARCH_MAX_DEPTH = 150, SEARCH_MAX_VISIT = 20000;
+// An element seen in an app-level snapshot recorded the CGWindowID of the window it was in (fp.wwid):
+// found again, it must still be in that very window — a window closed and reopened with the same content
+// has a new id and is a stale reference (Reddit r/mcp review 2026-11-06).
 function resolveTarget(t, budgetMs) {
+  const r = resolveTargetCore(t, budgetMs);
+  if (r.error || !t || !t.fp || !t.fp.wwid) return r;
+  const live = windowIdOf(r.el);
+  if (live === t.fp.wwid) return r;
+  return { error: { code: 'STALE_REF', message: live ? 'the element\'s window was closed and another one opened in its place since the snapshot' : 'the element is no longer in the window it was seen in', details: { kind: 'window_replaced' } } };
+}
+function resolveTargetCore(t, budgetMs) {
   if (!$.AXIsProcessTrusted()) return { error: permError() };
   const apps = runningApps().filter(a => a.pid === t.pid);
   if (!apps.length) return { error: { code: 'STALE_REF', message: `the app (pid ${t.pid}) is no longer running`, details: { kind: 'app_gone' } } };
   const app = apps[0];
   const appEl = appElement(app);
   const kind = t.container && t.container.kind || 'app';
-  const c = containerEl(appEl, t.container);
+  const c = containerEl(appEl, t.container, app);
+  if (c.error === 'window_unverifiable') {
+    return { error: { code: 'POLICY_DENIED', message: 'the element\'s window had no window ID when it was read, so a window closed and reopened with the same title and frame could not be told apart from it — element_index actions in this window are refused (use the app\'s menu with mac_menu_command, or mac_click x,y, which checks the window on top)', details: { kind: 'window_unverifiable' } } };
+  }
   if (c.error) {
     const amb = /ambiguous/.test(c.error);
     const what = kind === 'menu' ? 'the menu the element was in is closed' : 'the element\'s window is gone';
@@ -877,6 +924,7 @@ function opSnapshot(req) {
   const t0 = now();
   const rv = readNode(root);
   if (rv.__err === -25204) return fail({ code: 'APP_UNRESPONSIVE', message: `"${app.name}" did not answer accessibility in time (it may be busy or hung)` });
+  opt.trackWindow = !container || container.kind === 'app';
   const w = walk(root, basePath, opt);
   const out = {
     ok: true, app: app.name, bundle_id: app.bundle, pid: app.pid, surface, complete: w.complete,
@@ -885,6 +933,7 @@ function opSnapshot(req) {
   if (req.root) out.root_path = basePath;
   if (winInfo) out.window = { title: winInfo.title, frame: winInfo.frame, n: winInfo.n, window_id: winInfo.wid };
   if (webAx) out.web_accessibility = webAxStatus(webAx, root, basePath, surface === 'window');
+  if (container && container.kind === 'window' && !container.wid && !isFinderDesktop(app, container)) out.window_identity = 'unverifiable';
   return out;
 }
 function containerOut(c) {
@@ -921,9 +970,10 @@ function opFind(req) {
   else { const w = pickWindow(appEl, req); if (w.error) return fail(w.error); root = w.el; container = w.info; }
   const f = { role: req.role, title: req.title, value: req.value, id: req.id, text: req.text, exact: Boolean(req.exact), limit: clamp(req.limit, 1, 50, 10) };
   if (!(f.role || f.title || f.value || f.id || f.text)) return fail({ code: 'INVALID_ARGS', message: 'give at least one of role, title, value, id, text' });
-  const w = walk(root, basePath, { depth: 60, maxNodes: 100000, budgetMs: clamp(req.budget_ms, 500, 20000, 8000), maxVisit: 30000, find: f, pruneMenuBar: surface !== 'menubar', rootIsContainer: true });
+  const w = walk(root, basePath, { depth: 60, maxNodes: 100000, budgetMs: clamp(req.budget_ms, 500, 20000, 8000), maxVisit: 30000, find: f, pruneMenuBar: surface !== 'menubar', rootIsContainer: true, trackWindow: surface === 'app' });
   const out = { ok: true, app: app.name, bundle_id: app.bundle, pid: app.pid, surface, container: containerOut(container), nodes: w.nodes, complete: w.complete, visited: w.visited };
   if (webAx) out.web_accessibility = webAxStatus(webAx, root, basePath, surface === 'window');
+  if (container && container.kind === 'window' && !container.wid && !isFinderDesktop(app, container)) out.window_identity = 'unverifiable';
   return out;
 }
 
@@ -1240,6 +1290,10 @@ function opPhysicalPrep(req) {
   const x = Math.round(fr[0] + fr[2] / 2), y = Math.round(fr[1] + fr[3] / 2);
   if (!onSomeDisplay(x, y)) return fail(notDelivered({ code: 'NOT_ACTIONABLE', message: `the element's center (${x},${y}) is off every display — scroll it into view (mac_scroll with element_index) or move the window`, details: { kind: 'offscreen' } }));
   if (attr(r.el, 'AXWindow') && attr(attr(r.el, 'AXWindow').el, 'AXMinimized') === true) return fail(notDelivered({ code: 'NOT_ACTIONABLE', message: 'the element\'s window is minimized', details: { kind: 'minimized' } }));
+  // the element's window id: its AXWindow or the window up its AXParent chain (R20); else, for a window
+  // snapshot, the snapshot's window
+  let ewid = windowIdOf(r.el);
+  if (!ewid && req.target && req.target.container && req.target.container.kind === 'window') ewid = (r.containerEl && axWindowId(r.containerEl)) || req.target.container.wid || null;
   const h = hitTest(r.el, x, y);
   if (h.verdict === 'intercepted') return fail(notDelivered({ code: 'OCCLUDED', message: `something else is on top of the element at ${x},${y} — bring its window to the front or close what covers it`, details: { occluder: h.occluder } }));
   if (h.verdict === 'unknown') {
@@ -1251,22 +1305,14 @@ function opPhysicalPrep(req) {
     // the app's own window, but not the one the element is in (a floating panel, another document)
     // the element's own window id; else its AXWindow's; else (a window snapshot) the snapshot's window —
     // an unknown window id must not skip the check (R19)
-    let ewid = axWindowId(r.el);
-    if (!ewid) { const aw = attr(r.el, 'AXWindow'); ewid = aw && aw.el ? axWindowId(aw.el) : null; }
-    if (!ewid) {
-      // no AXWindow attribute: climb AXParent to the enclosing window (R20)
-      let c = r.el;
-      for (let k = 0; k < 64 && c && !ewid; k++) {
-        const p = attr(c, 'AXParent');
-        c = p && p.el ? p.el : null;
-        if (c && attr(c, 'AXRole') === 'AXWindow') ewid = axWindowId(c);
-      }
-    }
-    if (!ewid && req.target && req.target.container && req.target.container.kind === 'window') ewid = (r.containerEl && axWindowId(r.containerEl)) || req.target.container.wid || null;
+    // without the element's window id the topmost window cannot be confirmed to be that window: refuse
+    // (R20 follow-up) — except Finder's desktop, which sits below every window and has no id
+    const desktop = req.target && req.target.container && isFinderDesktop(r.app, req.target.container);
+    if (!ewid && !desktop) return fail(notDelivered({ code: 'OCCLUDED', message: `the hit test at ${x},${y} was inconclusive and the element's window has no window ID, so the window on top cannot be confirmed to be its own — use the element's semantic action (mechanism auto) or bring its window to the front and take a new snapshot`, details: { occluder: { app: top.owner, layer: top.layer, window_unverifiable: true } } }));
     if (ewid && top.wid && top.wid !== ewid) return fail(notDelivered({ code: 'OCCLUDED', message: `another window of "${top.owner}" is on top at ${x},${y} — bring the element's window to the front or close what covers it`, details: { occluder: { app: top.owner, layer: top.layer, other_window: true } } }));
     h.reason = (h.reason ? h.reason + '; ' : '') + 'the topmost window there is the app\'s own';
   }
-  return { ok: true, point: [x, y], hit: h.verdict, reason: h.reason, pid: r.app.pid, before: observeState(r.el, r.appEl), role: w.v.AXRole, title: nameOf(w.v).slice(0, 60), how: r.how };
+  return { ok: true, point: [x, y], hit: h.verdict, reason: h.reason, pid: r.app.pid, wid: ewid || null, before: observeState(r.el, r.appEl), role: w.v.AXRole, title: nameOf(w.v).slice(0, 60), how: r.how };
 }
 const ABSENT_CODES = new Set(['STALE_REF', 'WINDOW_NOT_FOUND', 'APP_NOT_FOUND']);
 function resolveOrError(target, budgetMs) {
@@ -1287,7 +1333,7 @@ function resolveOrError(target, budgetMs) {
         if (readNode(appEl).__err === -25204 || windowsOf(appEl).some(w => readNode(w).__err === -25204)) {
           return { error: { code: 'APP_UNRESPONSIVE', message: 'the app did not answer accessibility in time' } };
         }
-        const c = containerEl(appEl, target.container);
+        const c = containerEl(appEl, target.container, apps[0]);
         if (!c.error && c.el) {
           if (readNode(c.el).__err === -25204) return { error: { code: 'APP_UNRESPONSIVE', message: 'the app did not answer accessibility in time' } };
           const skipMenuBar = (target.container && target.container.kind || 'app') !== 'menubar';
@@ -1306,6 +1352,11 @@ function opObserveAfter(req) {
     if (!ABSENT_CODES.has(r.error.code)) {
       return { ok: true, delivery: 'delivered_unverified', retry: 'unsafe', changed: [], surfaces: [], note: `could not read the element after the action (${r.error.code})` };
     }
+    // gone after a physical click: the click cannot be tied to it — something else may have closed the
+    // window between the hit test and the click (Reddit r/mcp review 2026-11-06), so it is not proof
+    if (req.physical === true) {
+      return { ok: true, delivery: 'delivered_unverified', retry: 'unsafe', changed: ['gone'], surfaces: [], note: 'the element is gone after the click — that may not have been this click (it could have closed between the hit test and the click)' };
+    }
     // gone after the click: that is itself an observed change
     const apps = runningApps().filter(a => a.pid === req.target.pid);
     if (!apps.length) {
@@ -1318,7 +1369,18 @@ function opObserveAfter(req) {
     try { after = observeState(r.el, r.appEl); }
     catch (e) { return { ok: true, delivery: 'delivered_unverified', retry: 'unsafe', changed: [], surfaces: [], note: 'could not read the element after the action (INTERNAL)' }; }
   }
-  return verdict(req.before || {}, after, {}, req.keys);
+  const v = verdict(req.before || {}, after, {}, req.keys);
+  // a physical click: if another window is now on top at the click point (one that covered the element,
+  // or the element's window moved away, between the hit test and the click — or one this click opened),
+  // the click cannot be tied to the element's change: not proof (Reddit r/mcp review 2026-11-06)
+  if (req.physical === true && Array.isArray(req.point) && req.wid) {
+    const top = cgTopAt(req.point[0], req.point[1]);
+    if (!top || top.wid !== req.wid) {
+      v.delivery = 'delivered_unverified';
+      v.note = top ? `after the click, a window of "${top.owner}" is on top at ${req.point[0]},${req.point[1]}, not the element's — the click may have landed there (or opened it)` : `after the click, no window is on top at ${req.point[0]},${req.point[1]} — the element's window moved or closed`;
+    }
+  }
+  return v;
 }
 
 // Text into an element through accessibility: AXSelectedText inserts at the caret (replacing any

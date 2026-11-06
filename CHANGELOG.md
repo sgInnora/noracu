@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.2.2] — 2026-11-06
+
+### Fixed
+- A physical click (`mac_click` on an element without a semantic action, or
+  with `mechanism: "physical"`) is no longer reported as `delivered_verified`
+  when something else happened between the hit test and the click. Right before
+  sending, the window on top at the point is checked again; anything that came
+  on top since refuses the click (`occluded`, nothing sent). After the click,
+  `delivered_verified` needs the element to still be there, to have changed,
+  and its own window to still be on top at the click point; a vanished element
+  or another window there gives `delivered_unverified` with a note. `mac_drag`
+  re-checks both ends the same way. Found on a device run that covers, moves
+  or closes the target in that gap: 0.2.1 reported all three as
+  `delivered_verified`; this version reports them as `delivered_unverified`,
+  and an undisturbed click is still `delivered_verified`.
+
+### Security
+- An `element_index` read with `surface: "app"` (or `mac_find` with
+  `surface: "app"`) is bound to the CGWindowID of the window it was in: a
+  window closed and reopened with the same name, text and position gives
+  `element_no_longer_valid`.
+- An element in a window that has no CGWindowID is refused with
+  `policy_denied` instead of being matched by title and frame, since a closed
+  and reopened window could not be told apart. Finder's desktop (the only such
+  window seen on the test Mac) is exempt. `mac_ax_state` and `mac_find` mark
+  such a window with `window_identity: "unverifiable"` and a hint. A physical
+  click whose hit test is inconclusive and whose window has no CGWindowID is
+  refused (`occluded`).
+
+### Tests
+- `NORACU_TEST_PHYSICAL_GAP_MS` (test hook, never set in normal use) waits
+  between the last check and the click and reports it on stderr. The local test
+  suite uses it to cover, move and close the target in that gap, and to close
+  and reopen a window under an app-level index.
+
 ## [0.2.1] — 2026-11-06
 
 ### Fixed

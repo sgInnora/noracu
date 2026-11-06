@@ -607,6 +607,7 @@ async function macAxState(args = {}) {
   o.truncated = !res.complete;
   if (res.web_accessibility) o.web_accessibility = res.web_accessibility;
   if (res.web_accessibility === "unsupported") o.web_accessibility_hint = WEB_AX_HINT;
+  if (res.window_identity) { o.window_identity = res.window_identity; o.window_identity_hint = WINDOW_ID_HINT; }
   o.elements = elements;
   if (!res.complete) o.hint = "partial tree: raise depth or max_nodes, use interactive:true, or drill into one element with root";
   return { text: JSON.stringify(o) };
@@ -614,6 +615,9 @@ async function macAxState(args = {}) {
 
 // web_accessibility "unsupported": the app refused AXManualAccessibility and no web content was found in
 // the window (Google Chrome does this); "exposed": it refused, but its pages are in the tree anyway.
+// window_identity "unverifiable": the window has no CGWindowID (seen only on Finder's desktop, which is
+// exempt), so element_index actions in it are refused with policy_denied.
+const WINDOW_ID_HINT = "this window has no window ID, so a closed and reopened window with the same title could not be told apart from it: element_index actions here are refused (policy_denied). Use mac_menu_command, or mac_click x,y (checked against the window on top)";
 const WEB_AX_HINT = "this window's web content is not exposed to accessibility (the app refuses AXManualAccessibility, as Google Chrome does). For web pages use the browser_* tools (a separate Playwright browser), or have the user restart Chrome with --force-renderer-accessibility and read again";
 
 async function macFind(args = {}) {
@@ -628,6 +632,7 @@ async function macFind(args = {}) {
   const o = { app: res.app, pid: res.pid, snapshot_id: snap.id, count: matches.length, complete: res.complete };
   if (res.web_accessibility) o.web_accessibility = res.web_accessibility;
   if (res.web_accessibility === "unsupported") o.web_accessibility_hint = WEB_AX_HINT;
+  if (res.window_identity) { o.window_identity = res.window_identity; o.window_identity_hint = WINDOW_ID_HINT; }
   o.matches = matches;
   return { text: JSON.stringify(o) };
 }
@@ -698,14 +703,41 @@ const CLICK_VERB = { left: "c:", right: "rc:", middle: "mc:" };
 // or above the main one) must be written "=-N"
 const cc = (v) => { const n = Math.round(Number(v)); return n < 0 ? `=${n}` : String(n); };
 const ccPoint = (x, y) => `${cc(x)},${cc(y)}`;
+// The hit test runs in the engine a few hundred milliseconds before cliclick sends the click. Right before
+// sending, the window server is asked again whose window is on top at each point: it must still be the
+// element's window (by CGWindowID; by app when the element's window has none, e.g. Finder's desktop).
+// Something that came on top in between refuses the input, nothing sent (Reddit r/mcp review 2026-11-06).
+async function lateTopCheck(points) {
+  for (const { point: [x, y], pid, wid } of points) {
+    const r = await frontmost({ at: [x, y] });
+    if (!r || r.top === undefined) return { error: `focus_unknown: could not re-check the window on top at ${x},${y} right before the input — nothing was sent (delivery=not_delivered, retry=safe)` };
+    const top = r.top;
+    if (!top) { if (wid) return { error: `occluded: the element's window is no longer on screen at ${x},${y} (it moved or closed after the hit test) — nothing was sent (delivery=not_delivered, retry=safe)` }; continue; }
+    if (top.pid !== pid || (wid && top.wid !== wid)) return { error: `occluded: a window of "${top.owner}" came on top at ${x},${y} between the hit test and the input — nothing was sent (delivery=not_delivered, retry=safe)` };
+  }
+  return {};
+}
+// Test hook (never set in normal use): NORACU_TEST_PHYSICAL_GAP_MS=<1-10000> waits that long after the
+// late re-check and before cliclick, and says so on stderr, so a device test can cover, move or close the
+// target in the worst possible moment and check the result is never reported as verified.
+const TEST_GAP_MS = (() => { const n = Number(process.env.NORACU_TEST_PHYSICAL_GAP_MS); return Number.isInteger(n) && n > 0 && n <= 10000 ? n : 0; })();
+async function testGap(what) {
+  if (!TEST_GAP_MS) return;
+  process.stderr.write(`[noracu] test gap: ${what} in ${TEST_GAP_MS} ms\n`);
+  await sleep(TEST_GAP_MS);
+}
+
 async function physicalClickAt(target, label, button, count, timeoutMs) {
   const prep = await axEngine({ op: "physical_prep", target, timeout_ms: timeoutMs });
   if (!prep.ok) return { error: axErrorText(prep) };
   const [x, y] = prep.point;
+  const late = await lateTopCheck([{ point: prep.point, pid: prep.pid, wid: prep.wid }]);
+  if (late.error) return { error: late.error };
+  await testGap(`physical click at ${x},${y}`);
   const r = await cliclick(Array(count).fill(`${CLICK_VERB[button] || "c:"}${ccPoint(x, y)}`));
   if (!r.ok) return { error: cliFail(r) };
   await sleep(250);
-  const after = await axEngine({ op: "observe_after", target, before: prep.before });
+  const after = await axEngine({ op: "observe_after", target, before: prep.before, physical: true, point: prep.point, wid: prep.wid || null });
   const res = after.ok ? after : { delivery: "delivered_unverified", retry: "unsafe" };
   return { text: actText(`clicked ${button} x${count} on ${label} @ ${x},${y}`, { ...res, mechanism: "physical", hit: prep.hit, reason: prep.reason }) + await frontmostNote() };
 }
@@ -783,6 +815,9 @@ async function macDrag(args) {
     const prepTo = await axEngine({ op: "physical_prep", target: targetOf(t.item) });
     if (!prepTo.ok) return { error: `drop target: ${axErrorText(prepTo)}` };
     from = prep.point; to = prepTo.point; note = `from ${itemLabel(args.from_index, f.item)} to ${itemLabel(args.to_index, t.item)}`;
+    const late = await lateTopCheck([{ point: from, pid: prep.pid, wid: prep.wid }, { point: to, pid: prepTo.pid, wid: prepTo.wid }]);
+    if (late.error) return { error: late.error };
+    await testGap(`drag ${from} → ${to}`);
   }
   const r = await cliclick([`dd:${ccPoint(from[0], from[1])}`, `dm:${ccPoint(to[0], to[1])}`, `du:${ccPoint(to[0], to[1])}`]);
   return r.ok ? { text: `dragged ${from} → ${to} (${note}; physical — check the drop target: delivery=delivered_unverified, retry=unsafe)` } : { error: cliFail(r) };
@@ -1972,8 +2007,8 @@ function inputSchemaFromArgs(args, required) {
 const TOOLS = [
   // Mac computer-use
   { name: "mac_screenshot", desc: "Capture the Mac screen as PNG base64: the main display, display (index from mac_windows), or one window by window_id (CGWindowID from mac_windows; works when covered), optionally cropped to region {x,y,w,h}. Returns {scale, logical_size, screen}; click coordinates are in points (pixels / scale).", args: { region: "object?", window_id: "integer?", display: "integer?" }, fn: macScreenshot },
-  { name: "mac_ax_state", desc: "Read an app's accessibility tree through the macOS Accessibility API (default: the frontmost app's focused window). Returns {app, snapshot_id, window, complete, elements:[{i, d, role, title, value, states, actions, frame}]}; i is the element_index for mac_click, mac_get, mac_set_value, mac_type, mac_scroll and mac_drag — unique across snapshots (an index never names an element of a later snapshot) and valid 30 s; an action first re-identifies the element and returns element_no_longer_valid if it is gone, moved or replaced. Options: interactive (only actionable elements), compact (default true: skip empty layout wrappers), skeleton (shallow map with children_count) then root (an element_index to drill into; adds new indexes to the same snapshot), surface (window|menubar|menu|sheet|alert|dialog|popover|focused|app), window (index or title) or window_id (from mac_windows), depth (logical depth, default 12, 1-40), max_nodes (default 400), web_accessibility (default true, false under NORACU_READ_ONLY=1: sets AXManualAccessibility on Electron/Chromium apps to expose web content, never AXEnhancedUserInterface which alters window behaviour; the result's web_accessibility is enabled / already_on, exposed when the app refused but its pages are in the tree anyway, or unsupported with a web_accessibility_hint — Google Chrome refuses it). ax_empty when the app has no readable window.", args: { app: "string?", interactive: "boolean?", compact: "boolean?", skeleton: "boolean?", root: "integer?", snapshot_id: "string?", surface: "string?", window: "string?", window_id: "integer?", depth: "number?", max_nodes: "integer?", web_accessibility: "boolean?" }, fn: macAxState },
-  { name: "mac_click", desc: "Click a UI element by element_index (from mac_ax_state / mac_find; valid 30 s) or at raw {x,y}. With element_index the element is re-identified first (element_no_longer_valid if gone or changed). mechanism auto (default): its own accessibility action (press / show menu / select — no pointer, no focus change, works in background windows) when it has one, else a physical click that is sent only if a hit test shows the point reaches the element (occluded otherwise); semantic / physical force one path. count 2-3 and button middle are physical. A raw {x,y} click is sent only when the window on top at that point belongs to app (default: the frontmost app; the menu bar counts as the frontmost app's) — otherwise occluded names what covers it and nothing is sent; force:true skips that check. Results state delivery (delivered_verified / delivered_unverified / not_delivered / unknown) and whether a retry is safe, plus newly opened sheets, dialogs or menus.", args: { element_index: "integer?", snapshot_id: "string?", x: "number?", y: "number?", app: "string?", force: "boolean?", button: "string?", count: "number?", mechanism: "string?", timeout_ms: "integer?" }, fn: macClick },
+  { name: "mac_ax_state", desc: "Read an app's accessibility tree through the macOS Accessibility API (default: the frontmost app's focused window). Returns {app, snapshot_id, window, complete, elements:[{i, d, role, title, value, states, actions, frame}]}; i is the element_index for mac_click, mac_get, mac_set_value, mac_type, mac_scroll and mac_drag — unique across snapshots (an index never names an element of a later snapshot) and valid 30 s; an action first re-identifies the element and returns element_no_longer_valid if it is gone, moved or replaced. Options: interactive (only actionable elements), compact (default true: skip empty layout wrappers), skeleton (shallow map with children_count) then root (an element_index to drill into; adds new indexes to the same snapshot), surface (window|menubar|menu|sheet|alert|dialog|popover|focused|app), window (index or title) or window_id (from mac_windows), depth (logical depth, default 12, 1-40), max_nodes (default 400), web_accessibility (default true, false under NORACU_READ_ONLY=1: sets AXManualAccessibility on Electron/Chromium apps to expose web content, never AXEnhancedUserInterface which alters window behaviour; the result's web_accessibility is enabled / already_on, exposed when the app refused but its pages are in the tree anyway, or unsupported with a web_accessibility_hint — Google Chrome refuses it). window_identity unverifiable marks a window without a window ID: element_index actions in it are refused. ax_empty when the app has no readable window.", args: { app: "string?", interactive: "boolean?", compact: "boolean?", skeleton: "boolean?", root: "integer?", snapshot_id: "string?", surface: "string?", window: "string?", window_id: "integer?", depth: "number?", max_nodes: "integer?", web_accessibility: "boolean?" }, fn: macAxState },
+  { name: "mac_click", desc: "Click a UI element by element_index (from mac_ax_state / mac_find; valid 30 s) or at raw {x,y}. With element_index the element is re-identified first (element_no_longer_valid if gone or changed). mechanism auto (default): its own accessibility action (press / show menu / select — no pointer, no focus change, works in background windows) when it has one, else a physical click that is sent only if a hit test shows the point reaches the element (occluded otherwise); semantic / physical force one path. count 2-3 and button middle are physical. A physical click is re-checked right before it is sent, and is delivered_verified only if the element is still there, changed, and its window is still on top at the point. A raw {x,y} click is sent only when the window on top at that point belongs to app (default: the frontmost app; the menu bar counts as the frontmost app's) — otherwise occluded names what covers it and nothing is sent; force:true skips that check. Results state delivery (delivered_verified / delivered_unverified / not_delivered / unknown) and whether a retry is safe, plus newly opened sheets, dialogs or menus.", args: { element_index: "integer?", snapshot_id: "string?", x: "number?", y: "number?", app: "string?", force: "boolean?", button: "string?", count: "number?", mechanism: "string?", timeout_ms: "integer?" }, fn: macClick },
   { name: "mac_drag", desc: "Drag from one UI element to another (sliders, selections, list items) with the physical pointer; from_index/to_index come from mac_ax_state or mac_find (valid 30 s). Both ends are re-identified and hit-tested first (either one gone or covered: nothing sent). Check the drop target afterwards.", args: { from_index: "integer", to_index: "integer", snapshot_id: "string?" }, required: ["from_index", "to_index"], fn: macDrag },
   { name: "mac_scroll", desc: "Scroll up/down/left/right by a number of pages (default 1). Without element_index: the frontmost window (the pointer moves there). With element_index: a scroll area is scrolled at its own center (hit-tested; reports when the position did not change), any other element is scrolled into view (AXScrollToVisible).", args: { direction: "string?", pages: "number?", element_index: "integer?", snapshot_id: "string?" }, fn: macScroll },
   { name: "mac_key", desc: "Press a key or modifier chord, e.g. 'return', 'esc', 'cmd-c', 'cmd-shift-v', 'arrow-up'. Named keys (return, esc, tab, space, delete, arrows, home/end, page keys, F1-F16), with or without modifiers, go out as HID key events with each modifier pressed and released around the key; chords on a character key (cmd-c) go through cliclick. Pass app to refuse input unless that app is frontmost (focus guard). Chords that quit, log out, lock, force-quit, delete immediately or empty the Trash (cmd-q, alt-cmd-q, cmd-shift-q, cmd-alt-esc, ctrl-cmd-q, cmd-alt-delete, cmd-shift-delete…) are refused unless force:true.", args: { key: "string", app: "string?", force: "boolean?" }, fn: macKey },

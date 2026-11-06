@@ -409,9 +409,14 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   installApp(ctx, { pid: 50, name: "T", windows: [w1, w2] });
   const res = snap(ctx, { app: "T", window: 0 });
   const t = targetOf(res, nodeAt(res, (x) => x.role === "AXButton"));
+  const open = ctx.resolveTarget(t, 1000);
   w1.gone = true;
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: id-less window closed → stale, not the other \"Untitled\" (G1-7)", r.error && r.error.code === "STALE_REF", tag(r));
+  // 0.2.2: a window without an id is refused outright (a closed and reopened one could not be told
+  // apart), so the closed window is never taken for the other "Untitled" either
+  check("engine: id-less window → policy_denied window_unverifiable, open or closed, never the other \"Untitled\" (G1-7, 0.2.2)",
+    res.window_identity === "unverifiable" && open.error && open.error.code === "POLICY_DENIED" && open.error.details.kind === "window_unverifiable"
+      && r.error && r.error.code === "POLICY_DENIED" && !r.el, `${tag(open)} | ${tag(r)}`);
 }
 {
   // drill after siblings shifted: children are numbered from the root's live path
@@ -1195,6 +1200,93 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
       && findExposed.web_accessibility === "exposed" && findExposed.nodes.length === 1 && findRefused.web_accessibility === "unsupported"
       && focusedOnly === "unsupported" && enabled === "enabled",
     JSON.stringify({ exposed: exposed.web_accessibility, refused: refused.web_accessibility, findExposed: findExposed.web_accessibility, findRefused: findRefused.web_accessibility, focusedOnly, enabled }));
+}
+
+{
+  // 0.2.2 (Reddit r/mcp review): an element from an app-level snapshot is bound to its window's CGWindowID —
+  // the same window resolves; a window closed and reopened with the same content (new id) is stale
+  const ctx = loadEngine(ENGINE);
+  const mk = (wid) => el("AXWindow", { title: "Doc", frame: [0, 0, 400, 300], wid }, [Object.assign(el("AXButton", { title: "Save", frame: [10, 10, 60, 20], actions: ["AXPress"] }), { label: `Save in ${wid}` })]);
+  const { appEl } = installApp(ctx, { pid: 120, name: "App", windows: [mk(30)] });
+  const res = snap(ctx, { app: "App", surface: "app" });
+  const node = nodeAt(res, (n) => n.role === "AXButton");
+  const t = targetOf(res, node);
+  const same = ctx.resolveTarget(t, 1000);
+  appEl.kids[0] = mk(31); reparent(appEl);
+  const replaced = ctx.resolveTarget(t, 1000);
+  check("0.2.2: app-surface element records its window id; same window resolves, reopened window (new id) → STALE_REF window_replaced",
+    res.container?.kind === "app" && node.fp.wwid === 30 && !same.error && same.el.label === "Save in 30"
+      && replaced.error?.code === "STALE_REF" && replaced.error.details.kind === "window_replaced",
+    `wwid=${node.fp.wwid} same=${tag(same)} replaced=${tag(replaced)}`);
+}
+
+{
+  // 0.2.2: Finder's desktop (no CGWindowID, frame = bounding box of all displays) keeps the title/frame
+  // match; the same id-less window in another app is refused
+  const run = (bundle) => {
+    const ctx = loadEngine(ENGINE);
+    const icon = Object.assign(el("AXImage", { title: "Report.pdf", frame: [1800, 60, 64, 64], actions: ["AXOpen"] }), { label: "icon" });
+    const desk = el("AXWindow", { title: "", frame: [-1728, 0, 4288, 1440] }, [el("AXGroup", { frame: [-1728, 0, 4288, 1440] }, [icon])]);
+    installApp(ctx, { pid: 130, name: "Finder", bundle, windows: [desk] });
+    ctx.runningApps = () => [{ ns: {}, name: "Finder", bundle, pid: 130, policy: 0, active: true, hidden: false }];
+    ctx.displays = () => [{ frame: [0, 0, 2560, 1440] }, { frame: [-1728, 0, 1728, 1117] }];
+    const res = snap(ctx, { app: "Finder", window: 0 });
+    return { res, r: ctx.resolveTarget(targetOf(res, nodeAt(res, (n) => n.role === "AXImage")), 1000) };
+  };
+  const finder = run("com.apple.finder");
+  const other = run("com.example.other");
+  check("0.2.2: Finder desktop (no window id) still resolves; an id-less window of another app → policy_denied",
+    !finder.r.error && finder.r.el.label === "icon" && !("window_identity" in finder.res)
+      && other.r.error?.code === "POLICY_DENIED" && other.res.window_identity === "unverifiable",
+    `finder=${tag(finder.r)} other=${tag(other.r)}`);
+}
+
+{
+  // 0.2.2: after a physical click a vanished element is not proof of delivery (it may have closed in the
+  // gap between the hit test and the click); after a semantic action it still is
+  const ctx = loadEngine(ENGINE);
+  const b = Object.assign(el("AXButton", { title: "Close", frame: [10, 10, 60, 20], actions: ["AXPress"] }), { label: "Close" });
+  const win = el("AXWindow", { title: "Dlg", frame: [0, 0, 300, 200], wid: 140 }, [b, el("AXStaticText", { value: "keep", frame: [10, 40, 60, 20] })]);
+  const { appEl } = installApp(ctx, { pid: 141, name: "T", windows: [win] });
+  const res = snap(ctx, { app: "T" });
+  const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton"));
+  const before = ctx.observeState(b, appEl);
+  b.gone = true;
+  const phys = ctx.opObserveAfter({ target: t, before, physical: true });
+  const sem = ctx.opObserveAfter({ target: t, before });
+  check("0.2.2: observe_after physical + element gone → delivered_unverified with a note; non-physical gone → delivered_verified (unchanged)",
+    phys.delivery === "delivered_unverified" && /may not have been this click/.test(phys.note || "") && sem.delivery === "delivered_verified",
+    JSON.stringify({ phys: [phys.delivery, phys.note], sem: sem.delivery }));
+  // element still there and changed, but another window is on top at the click point now → not proof
+  b.gone = false;
+  b.focusedFlag = false;
+  const before2 = ctx.observeState(b, appEl);
+  b.focusedFlag = true;
+  ctx.cgTopAt = () => ({ pid: 999, owner: "Cover", layer: 0, wid: 777 });
+  const covered = ctx.opObserveAfter({ target: t, before: before2, physical: true, point: [40, 20], wid: 140 });
+  ctx.cgTopAt = () => ({ pid: 141, owner: "T", layer: 0, wid: 140 });
+  const own = ctx.opObserveAfter({ target: t, before: before2, physical: true, point: [40, 20], wid: 140 });
+  check("0.2.2: observe_after physical + another window on top at the click point → unverified (names it); own window on top → verified",
+    covered.delivery === "delivered_unverified" && /"Cover" is on top at 40,20/.test(covered.note || "") && own.delivery === "delivered_verified",
+    JSON.stringify({ covered: [covered.delivery, covered.note], own: own.delivery }));
+}
+
+{
+  // 0.2.2 (R20 follow-up): inconclusive hit test and no window id anywhere → refused, never assumed to be its own window
+  const ctx = loadEngine(ENGINE);
+  const b = Object.assign(el("AXButton", { title: "Go", frame: [10, 10, 40, 20] }), { label: "Go" });
+  const win = el("AXWindow", { title: "W", frame: [0, 0, 300, 200], wid: 150 }, [b]);
+  installApp(ctx, { pid: 151, name: "T", windows: [win] });
+  ctx.onSomeDisplay = () => true;
+  const res = snap(ctx, { app: "T", surface: "app" });
+  const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton"));
+  delete t.fp.wwid; // as if the id had not been readable when the element was seen
+  ctx.hitTest = () => ({ verdict: "unknown", reason: "no element at the point" });
+  ctx.axWindowId = () => null;
+  ctx.cgTopAt = () => ({ pid: 151, owner: "T", layer: 0, wid: 152 });
+  const r = ctx.opPhysicalPrep({ target: t });
+  check("0.2.2: physical_prep inconclusive + no window id → OCCLUDED window_unverifiable (not sent)",
+    r.ok === false && r.code === "OCCLUDED" && r.delivery === "not_delivered" && r.details?.occluder?.window_unverifiable === true, JSON.stringify({ ok: r.ok, code: r.code, d: r.details }));
 }
 
 done("engine unit");

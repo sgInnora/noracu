@@ -421,16 +421,18 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
   const req = JSON.parse(d); const say = (o) => process.stdout.write(JSON.stringify(o));
   const node = (name, i) => ({ d: 1, role: "AXButton", path: [i], fp: { role: "AXButton", subrole: "", id: "", name }, title: name, frame: [10 * i, 0, 10, 10], interactive: true });
   const base = { ok: true, app: "Fake", bundle_id: "test.fake", pid: 4242, surface: "window", complete: true, visited: 2, ms: 1, container: { kind: "window", wid: 1, title: "W", subrole: "", frame: [0, 0, 100, 100], n: 0 } };
-  const webAx = req.app === "ChromeNoWeb" ? { web_accessibility: "unsupported" } : req.app === "ChromeWeb" ? { web_accessibility: "exposed" } : {};
+  const webAx = req.app === "ChromeNoWeb" ? { web_accessibility: "unsupported" } : req.app === "ChromeWeb" ? { web_accessibility: "exposed" } : req.app === "NoIdApp" ? { window_identity: "unverifiable" } : {};
   if (req.op === "snapshot") return say({ ...base, ...webAx, nodes: [node("One", 0), node("Two", 1)] });
   if (req.op === "find") return say({ ...base, ...webAx, nodes: [node("Three", 0), node("Four", 1)] });
   if (req.op === "act") return say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["value"], surfaces: [], mechanism: "semantic", action: "AXPress", how: "path", role: "AXButton", title: req.target.fp.name });
-  if (req.op === "physical_prep") return req.target.fp.name === "Two" ? say({ ok: false, code: "OCCLUDED", message: "a window of Other is on top", delivery: "not_delivered", retry: "safe" }) : say({ ok: true, point: [5, 5], hit: "reaches", before: {} });
-  if (req.op === "observe_after") return say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["focus"], surfaces: [] });
+  if (req.op === "physical_prep") return req.target.fp.name === "Two" ? say({ ok: false, code: "OCCLUDED", message: "a window of Other is on top", delivery: "not_delivered", retry: "safe" })
+    : req.target.fp.name === "Four" ? say({ ok: true, point: [700, 70], hit: "reaches", pid: 4242, wid: 1, before: {} })
+    : say({ ok: true, point: [5, 5], hit: "reaches", pid: 4242, wid: 1, before: {} });
+  if (req.op === "observe_after") return say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["focus"], surfaces: [], ...(req.physical === true ? { note: "physical-flag-seen point=" + JSON.stringify(req.point) + " wid=" + req.wid } : {}) });
   if (req.op === "frontmost") {
     const o = { ok: true, front: { pid: 777, name: "Other", bundle: "x.other" }, target: { pid: 4242, name: "Fake", bundle: "test.fake" }, match: false };
     // at: x >= 500 is under a notification banner, y < 30 is the menu bar, anything else is the frontmost app's window
-    if (req.at) o.top = req.at[0] >= 500 ? { pid: 999, owner: "NotificationCenter", layer: 23, wid: 9 } : req.at[1] < 30 ? { pid: 640, owner: "Window Server", layer: 24, wid: 1 } : { pid: 777, owner: "Other", layer: 0, wid: 5 };
+    if (req.at) o.top = req.at[0] === 5 && req.at[1] === 5 ? { pid: 4242, owner: "Fake", layer: 0, wid: 1 } : req.at[0] >= 500 ? { pid: 999, owner: "NotificationCenter", layer: 23, wid: 9 } : req.at[1] < 30 ? { pid: 640, owner: "Window Server", layer: 24, wid: 1 } : { pid: 777, owner: "Other", layer: 0, wid: 5 };
     return say(o);
   }
   if (req.op === "key") {
@@ -524,6 +526,21 @@ echo "home gesture sent"
         && wa2.web_accessibility === "exposed" && !("web_accessibility_hint" in wa2)
         && wf1.web_accessibility === "unsupported" && /browser_\*/.test(wf1.web_accessibility_hint) && Array.isArray(wf1.matches),
       JSON.stringify({ wa1: wa1.web_accessibility, wa2: wa2.web_accessibility, wf1: wf1.web_accessibility }));
+    // 0.2.2: a physical click tells observe_after it was physical (a vanished target is then not proof);
+    // a window without a window id is flagged in the snapshot with a hint
+    const pc = await s.call("mac_click", { element_index: one, mechanism: "physical" });
+    const ni = jsonOf(await s.call("mac_ax_state", { app: "NoIdApp" }));
+    check("0.2.2：物理点击向 observe_after 传 physical（含点击点与窗口 ID）；无窗口 ID 的窗口在快照里标 window_identity 并附提示",
+      !pc?.isError && /via physical click/.test(say(pc)) && /physical-flag-seen point=\[5,5\] wid=1/.test(say(pc))
+        && ni.window_identity === "unverifiable" && /policy_denied/.test(ni.window_identity_hint || ""),
+      `${say(pc).slice(0, 80)} | ${JSON.stringify({ wi: ni.window_identity })}`);
+    // 0.2.2: right before the click the window stack is asked again; a window that came on top since the hit
+    // test refuses the click (the element "Four" was hit-tested at 700,70, a banner is there by now)
+    const four = f.matches?.find((e) => e.title === "Four")?.i;
+    const lc = await s.call("mac_click", { element_index: four, mechanism: "physical" });
+    check("0.2.2：命中检测之后、点击之前有窗口盖上来 → 点击前复查拒绝（occluded，不发送）",
+      lc?.isError && /came on top at 700,70 between the hit test and the input/.test(say(lc)) && /delivery=not_delivered, retry=safe/.test(say(lc)) && !/c:700,70/.test(sent()),
+      `${say(lc).slice(0, 120)} | cliclick: ${JSON.stringify(sent()).slice(-60)}`);
     // 0.2.1: named keys go through the engine as HID key events (Chrome's address bar ignored cliclick's Return);
     // printable-character chords stay on cliclick
     const k1 = await s.call("mac_key", { key: "return" });
@@ -1161,6 +1178,71 @@ while true; do echo c >> "${log}"; sleep 0.1; done
   check("registry: packages[0].version === pkg.version", reg.packages?.[0]?.version === pkg.version, `${reg.packages?.[0]?.version} vs ${pkg.version}`);
   check("registry: packages[0].identifier === pkg.name", reg.packages?.[0]?.identifier === pkg.name, `${reg.packages?.[0]?.identifier} vs ${pkg.name}`);
 }
+
+// 0.2.2 本机：命中检测到物理点击之间的空档（Reddit r/mcp 评论建议的可重复测试）。单独起一个带
+// NORACU_TEST_PHYSICAL_GAP_MS 的 server：最后一次复查之后、点击之前等待，并在 stderr 报告；测试在这一刻
+// 遮挡 / 移走 / 关闭目标窗口。点击只会落在测试自建的 TextEdit 文档上（目标下面垫着一个同尺寸的文档）。
+// 断言：受干扰的点击结果永远不是 delivered_verified；app 级快照的元素在窗口关掉重开后失效。
+if (LOCAL && TE_READY()) {
+  const GAP_MS = 2500;
+  const te = (lines) => spawnSync("/usr/bin/osascript", lines.flatMap((l) => ["-e", l]), { encoding: "utf8", timeout: 15000 });
+  const BOUNDS = "{160, 140, 660, 540}";
+  const mkDoc = (name) => te(['tell application "TextEdit"', `make new document with properties {name:"${name}", text:"${name} text"}`, `set bounds of front window to ${BOUNDS}`, "activate", "end tell"]);
+  const closeDoc = (name) => te([`tell application "TextEdit" to close (every document whose name contains "${name}") saving no`]);
+  const gs = spawn("node", [new URL("../src/server.mjs", import.meta.url).pathname], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NORACU_TEST_PHYSICAL_GAP_MS: String(GAP_MS) } });
+  let gb = "", gerr = "", gid = 0;
+  const gpend = new Map();
+  gs.stdout.on("data", (d) => { gb += d; let i; while ((i = gb.indexOf("\n")) >= 0) { const l = gb.slice(0, i); gb = gb.slice(i + 1); try { const m = JSON.parse(l); gpend.get(m.id)?.(m); gpend.delete(m.id); } catch {} } });
+  gs.stderr.on("data", (d) => { gerr += d; });
+  const grpc = (method, params = {}) => new Promise((r) => { const n = ++gid; gpend.set(n, r); gs.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: n, method, params }) + "\n"); });
+  const gcall = async (name, args) => (await grpc("tools/call", { name, arguments: args })).result;
+  const gsay = (r) => String(r?.content?.[0]?.text ?? "");
+  const gapSeen = async (since) => { for (let k = 0; k < 150; k++) { if (gerr.slice(since).includes("test gap:")) return true; await sleepMs(100); } return false; };
+  await grpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "gap-test" } });
+  // a fresh target over a backstop of the same size; returns the target text area's element_index
+  const setup = async () => {
+    closeDoc("noracu-gap-");
+    mkDoc("noracu-gap-back"); await sleepMs(600);
+    mkDoc("noracu-gap-target"); await sleepMs(900);
+    const st = jsonOf(await gcall("mac_ax_state", { app: "TextEdit", window: "noracu-gap-target", interactive: true }));
+    return (st.elements || []).find((e) => /textarea/i.test(e.role))?.i;
+  };
+  const clickWithGap = async (idx, interfere) => {
+    const since = gerr.length;
+    const pending = gcall("mac_click", { element_index: idx, mechanism: "physical" });
+    const seen = await gapSeen(since);
+    if (seen) interfere();
+    return { seen, r: await pending };
+  };
+  const notVerified = (x) => x.seen && !x.r?.isError && /via physical click/.test(gsay(x.r)) && !/delivery=delivered_verified/.test(gsay(x.r));
+  try {
+    let idx = await setup();
+    const ctl = await clickWithGap(idx, () => {});
+    check("0.2.2 本机空档：对照（空档里不干扰）→ 点击发出，未报错", Number.isInteger(idx) && ctl.seen && !ctl.r?.isError && /via physical click/.test(gsay(ctl.r)), gsay(ctl.r).slice(0, 140));
+    idx = await setup();
+    const occ = await clickWithGap(idx, () => mkDoc("noracu-gap-cover"));
+    check("0.2.2 本机空档：空档里被另一个窗口遮挡 → 不报 delivered_verified，并说明上面是谁", notVerified(occ) && /on top at/.test(gsay(occ.r)), gsay(occ.r).slice(0, 220));
+    closeDoc("noracu-gap-cover");
+    idx = await setup();
+    const mov = await clickWithGap(idx, () => te(['tell application "TextEdit" to set bounds of (first window whose name contains "noracu-gap-target") to {760, 140, 1260, 540}']));
+    check("0.2.2 本机空档：空档里目标窗口被移走 → 不报 delivered_verified", notVerified(mov), gsay(mov.r).slice(0, 220));
+    idx = await setup();
+    const gone = await clickWithGap(idx, () => closeDoc("noracu-gap-target"));
+    check("0.2.2 本机空档：空档里目标窗口被关闭 → 不报 delivered_verified", notVerified(gone), gsay(gone.r).slice(0, 220));
+    // a window closed and reopened with the same name, text and bounds: an app-level index must not carry over
+    closeDoc("noracu-gap-"); mkDoc("noracu-gap-back"); await sleepMs(600); mkDoc("noracu-gap-target"); await sleepMs(900);
+    const fa = jsonOf(await gcall("mac_find", { app: "TextEdit", surface: "app", role: "textarea", value: "noracu-gap-target text" }));
+    const ai = fa.matches?.[0]?.i;
+    const okBefore = await gcall("mac_get", { element_index: ai });
+    closeDoc("noracu-gap-target"); await sleepMs(500); mkDoc("noracu-gap-target"); await sleepMs(900);
+    const after = await gcall("mac_get", { element_index: ai });
+    check("0.2.2 本机：app 级索引所在窗口关掉重开（同名同内容同位置）→ element_no_longer_valid",
+      Number.isInteger(ai) && !okBefore?.isError && after?.isError && /element_no_longer_valid/.test(gsay(after)), `${gsay(okBefore).slice(0, 60)} | ${gsay(after).slice(0, 140)}`);
+  } finally {
+    closeDoc("noracu-gap-");
+    gs.kill();
+  }
+} else if (LOCAL) check("0.2.2 本机空档：测试文档就绪", false, "TextEdit test document missing");
 
 // B2 本机：元素消失后用旧 index —— element_no_longer_valid，什么都不发（关文档本身就是测试收尾）
 if (LOCAL) {
