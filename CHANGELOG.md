@@ -1,5 +1,77 @@
 # Changelog
 
+## [0.2.4] — 2026-11-07
+
+### Changed
+- A text write counts as `delivered_verified` only when the field changed into
+  exactly what the write should leave: for `mac_set_value`, the value given
+  (line endings unified, leading and trailing white space ignored); for
+  `mac_type`, the text over the selection that was there, the old value plus
+  the text, or — with `replace` — the text itself; for `mac_paste`, the
+  focused field's value becoming the text pasted over the selection that was
+  there. A field that merely contains the text somewhere no longer counts:
+  the text may have been there before. When the insertion point cannot be read, a changed value that shows
+  the text is `delivered_unverified` (`insertion_point_unreadable`), and one
+  that shows it elsewhere is `delivered_unverified` (`not_at_insertion_point`).
+- `mac_set_value` with the value the field already shows, and `mac_type` with
+  `replace` and the text already there, send nothing and report
+  `not_delivered` (`already`, retry safe).
+- A paste over a selection that already held the same text leaves the value
+  unchanged and is `delivered_unverified` (`value_unchanged`): a moved caret
+  is no proof that ⌘V was handled.
+- `mac_type` into a field that takes text only by rewriting its whole value
+  refuses (`not_delivered`) when that value cannot be read, instead of
+  replacing what is there with the text.
+
+### Fixed
+- `phone_open` finds Spotlight's search field where iOS 27 now draws it. The
+  field floats about a fifth of the way up from the bottom on some screens
+  (it was looked for only at the very bottom), and a long name may differ
+  from what OCR reads there by a letter or two. A name the Top Hit card does
+  not show is reported as `app not found` again, instead of
+  `open_not_confirmed: … never showed up on the phone` after a 15 s wait
+  (on the test iPhone, iOS 27: about 9–11 s per call, down from about 26 s).
+- `phone_open` with a one- or two-letter name such as `X` no longer runs into
+  its time limit (about 31 s, reported as "the Mac may be under heavy load").
+  It reports `open_not_confirmed` instead (about 15 s on the test iPhone): OCR
+  could not read the name, nothing was tapped, and the app may still be
+  installed — open it from its Home Screen icon.
+- The pyobjc install command in the `imctl unavailable …` message and in the
+  READMEs named a package that does not exist on PyPI
+  (`pyobjc-framework-AppKit`), so pip stopped without installing anything.
+  It now names `pyobjc-framework-Cocoa`, which provides AppKit; the iPhone
+  driver's own `pyproject.toml` had the same wrong dependency.
+- Home Screen page swipes from the iPhone driver (`imctl page left|right`)
+  start in the empty strip just above the Dock instead of the middle of the
+  screen. iPhone Mirroring delivers a drag as pointer input, so a swipe that
+  starts on an app icon picks the icon up: on the test iPhone two such swipes
+  dropped an icon on another one and made a folder. `phone_swipe`'s
+  description and the READMEs now say where to start a page swipe.
+- `mac_set_value` with an empty or blank value on a numeric field (a stepper
+  or a number field) wrote the number 0, and counted a field already at 0 as
+  set. Only a written-out decimal number is compared and written as a number
+  now; anything else is sent as text.
+
+### Added
+- Every tool reports the four MCP tool annotations — `readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint` — set by what the tool
+  does (`docs/tools.md` lists them). They are hints for the client, not
+  permissions: `NORACU_READ_ONLY=1` is unchanged and still decides what is
+  refused. `browser_launch`, `browser_fill`, `phone_launch` and `phone_home`
+  are marked not idempotent until measured otherwise.
+
+### Tests
+- The iPhone driver's smoke tests run all 48 cases when run as a script
+  (`npm run test:imctl`); a hand-kept list ran 28 of them. CI installs pyobjc
+  and runs them.
+- The local "gap" cases (a window covers, moves away from or closes over the
+  target between the hit test and a physical click) count only an attempt
+  whose click was actually sent: a click refused before sending is repeated
+  (up to 5 attempts), any `delivered_verified` fails at once, and every
+  attempt's full result is printed. A local case that this Mac cannot run —
+  the notification banner case while a Focus mode holds banners back — is
+  reported as not run instead of passed or failed.
+
 ## [0.2.3] — 2026-11-06
 
 ### Tests

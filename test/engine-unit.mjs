@@ -679,10 +679,11 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     ctx.pbClear = () => { log.push("clear"); cc++; pb.items = []; pb.types = []; };
     ctx.runTool = (path, args) => { log.push(`tool:${args.join(" ")}`); if (opts.afterKey && args[0] === "kd:cmd") opts.afterKey(api); return opts.toolResult && args[0] === "kd:cmd" ? opts.toolResult : { started: true, status: 0 }; };
     const FOCUSED = { id: "field" };
-    let ev = opts.evidence === undefined ? null : { el: FOCUSED, key: opts.evidence };
+    // CP: evidence carries the raw value and selection; "after" is the pasted text over an empty field
+    let ev = opts.evidence === undefined ? null : { el: FOCUSED, key: opts.evidence, raw: opts.raw ?? "", sel: opts.sel === undefined ? { location: 0, length: 0 } : opts.sel };
     ctx.focusEvidence = () => ev;
     ctx.same = (a, b) => a === b;
-    const api = { ctx, pb, log, now: () => clock, bump: () => { cc++; }, setEvidence: (x, el) => { ev = { el: el || FOCUSED, key: x }; }, setFront: (pid) => { ctx.frontApp = () => ({ ns: {}, name: "Other", bundle: "x.other", pid }); } };
+    const api = { ctx, pb, log, now: () => clock, bump: () => { cc++; }, setEvidence: (x, el, raw) => { ev = { el: el || FOCUSED, key: x, raw: raw ?? (x === "after" ? "hello" : x), sel: { location: 0, length: 0 } }; }, setFront: (pid) => { ctx.frontApp = () => ({ ns: {}, name: "Other", bundle: "x.other", pid }); } };
     return api;
   };
   {
@@ -769,6 +770,38 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     t.ctx.pbRestore = (saved) => { restoredAt = t.now(); return orig(saved); };
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
     check("paste: evidence at once → restore only after the 300 ms minimum hold (R15 §1-4)", r.ok && r.delivery === "delivered_verified" && restoredAt >= 300, `restoredAt=${restoredAt}`);
+  }
+  {
+    // CP (F4): the text was in the field before; after ⌘V the value changed in another way → not verified
+    const t = setup({ evidence: "before", raw: "hello", sel: { location: 5, length: 0 }, afterKey: (a) => a.setEvidence("after2", undefined, "hello ") });
+    const r = t.ctx.opPaste({ op: "paste", text: "hello" });
+    check("CP (F4): paste — text already there, value changed otherwise → delivered_unverified not_at_insertion_point; clipboard restored after the hold",
+      r.ok && r.delivery === "delivered_unverified" && r.reason === "not_at_insertion_point" && r.restored === "true", JSON.stringify(r));
+  }
+  {
+    const t = setup({ evidence: "before", raw: "abc", sel: null, afterKey: (a) => a.setEvidence("after3", undefined, "abchello") });
+    const r = t.ctx.opPaste({ op: "paste", text: "hello" });
+    check("CP: paste — insertion point unreadable → delivered_unverified insertion_point_unreadable even though the text shows",
+      r.ok && r.delivery === "delivered_unverified" && r.reason === "insertion_point_unreadable", JSON.stringify(r));
+  }
+  {
+    const t = setup({ evidence: "before", raw: "ab", sel: { location: 1, length: 0 }, afterKey: (a) => a.setEvidence("after4", undefined, "ahellob") });
+    const r = t.ctx.opPaste({ op: "paste", text: "hello" });
+    check("CP: paste — value becomes before[0:loc] + text + rest → delivered_verified",
+      r.ok && r.delivery === "delivered_verified" && r.reason === undefined, JSON.stringify(r));
+  }
+  for (const [after, want] of [["abXYcd", "delivered_verified"], ["abcdXY", "delivered_unverified"], ["XYabcd", "delivered_unverified"]]) {
+    const t = setup({ evidence: "before", raw: "abcd", sel: { location: 2, length: 0 }, afterKey: (a) => a.setEvidence(`k-${after}`, undefined, after) });
+    const r = t.ctx.opPaste({ op: "paste", text: "XY" });
+    check(`CP R35: paste XY into "ab|cd" → ${after} gives ${want}; clipboard restored`, r.ok && r.delivery === want && r.restored === "true",
+      JSON.stringify({ delivery: r.delivery, reason: r.reason, restored: r.restored }));
+  }
+  {
+    // R36 (F4): PAYLOAD fully selected, PAYLOAD pasted over it: the value reads the same, only the selection moved
+    const t = setup({ evidence: "before", raw: "PAYLOAD", sel: { location: 0, length: 7 }, afterKey: (a) => a.setEvidence("k-sel-moved", undefined, "PAYLOAD") });
+    const r = t.ctx.opPaste({ op: "paste", text: "PAYLOAD" });
+    check("CP R36 (F4): paste PAYLOAD over a selected PAYLOAD, value unchanged → delivered_unverified value_unchanged, never verified",
+      r.ok && r.delivery === "delivered_unverified" && r.reason === "value_unchanged", JSON.stringify({ delivery: r.delivery, reason: r.reason, restored: r.restored }));
   }
   {
     // R15: focus moving to another element is not evidence of the paste
@@ -1289,4 +1322,122 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     r.ok === false && r.code === "OCCLUDED" && r.delivery === "not_delivered" && r.details?.occluder?.window_unverifiable === true, JSON.stringify({ ok: r.ok, code: r.code, d: r.details }));
 }
 
+// ── CP (Y6): a text verdict needs the change itself — not "the value contains the text somewhere" ──────
+{
+  const mk = (value, attrs) => {
+    const ctx = loadEngine(ENGINE);
+    const tf = Object.assign(el("AXTextField", { placeholder: "F", value, frame: [10, 10, 200, 22], settable: { AXSelectedText: true, AXValue: true } }), { label: "F" });
+    if (attrs) tf.attrs = attrs;
+    const win = el("AXWindow", { title: "W", frame: [0, 0, 300, 200], wid: 41 }, [tf]);
+    const { calls } = installApp(ctx, { pid: 91, name: "T", windows: [win] });
+    const res = snap(ctx, { app: "T" });
+    return { ctx, tf, calls, t: targetOf(res, nodeAt(res, (n) => n.role === "AXTextField")) };
+  };
+  {
+    const m = mk("Hello \r\n");
+    const r = m.ctx.opSetValue({ target: m.t, value: "Hello" });
+    check("CP: set_value to the value already there (line endings and outer white space aside) → not_delivered already, nothing written",
+      r.ok === true && r.delivery === "not_delivered" && r.reason === "already" && r.retry === "safe" && m.calls.length === 0, JSON.stringify(r));
+  }
+  {
+    const m = mk("old");
+    m.tf.onSet = (name, v) => { if (name === "AXValue") m.tf.value = String(v) + "\n"; };
+    const r = m.ctx.opSetValue({ target: m.t, value: "new" });
+    check("CP: set_value changes the value to the target (a trailing newline aside) → delivered_verified",
+      r.ok === true && r.delivery === "delivered_verified", JSON.stringify(r));
+  }
+  {
+    const m = mk("Hello world", { AXSelectedTextRange: { location: 5, length: 0 } });
+    m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "Hello" + v + " world"; };
+    const r = m.ctx.opInsertText({ target: m.t, text: " big" });
+    check("CP: mac_type inserts over the selection → the value is before[0:loc] + text + the rest → delivered_verified",
+      r.ok === true && r.delivery === "delivered_verified", JSON.stringify(r));
+  }
+  {
+    // F4: the text was in the field before the write, and the value then changed in some other way
+    const m = mk("hello", { AXSelectedTextRange: { location: 5, length: 0 } });
+    m.tf.onSet = (name) => { if (name === "AXSelectedText") m.tf.value = "hello "; };
+    const r = m.ctx.opInsertText({ target: m.t, text: "hello" });
+    check("CP (F4): text already in the field, value changed otherwise → delivered_unverified not_at_insertion_point, never verified",
+      r.ok === true && r.delivery === "delivered_unverified" && r.reason === "not_at_insertion_point", JSON.stringify(r));
+  }
+  {
+    const m = mk("abc");
+    m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "abc" + v; };
+    const r = m.ctx.opInsertText({ target: m.t, text: "def" });
+    check("CP: the insertion point cannot be read → delivered_unverified insertion_point_unreadable, even though the text shows",
+      r.ok === true && r.delivery === "delivered_unverified" && r.reason === "insertion_point_unreadable", JSON.stringify(r));
+  }
+  {
+    const m = mk("same text");
+    const r = m.ctx.opInsertText({ target: m.t, text: "same text", replace: true });
+    check("CP: mac_type replace with the text already there → not_delivered already, nothing written",
+      r.ok === true && r.delivery === "not_delivered" && r.reason === "already" && m.calls.length === 0, JSON.stringify(r));
+  }
+}
+
+// ── CP R35 counterexamples (Grok) ───────────────────────────────────────────────────────────────────
+{
+  const mk = (value, attrs) => {
+    const ctx = loadEngine(ENGINE);
+    const tf = Object.assign(el("AXTextField", { placeholder: "F", value, frame: [10, 10, 200, 22], settable: { AXSelectedText: true, AXValue: true } }), { label: "F" });
+    if (attrs) tf.attrs = attrs;
+    const win = el("AXWindow", { title: "W", frame: [0, 0, 300, 200], wid: 42 }, [tf]);
+    const { calls } = installApp(ctx, { pid: 92, name: "T", windows: [win] });
+    const res = snap(ctx, { app: "T" });
+    return { ctx, tf, calls, t: targetOf(res, nodeAt(res, (n) => n.role === "AXTextField")) };
+  };
+  const say = (r) => JSON.stringify({ ok: r.ok, code: r.code, delivery: r.delivery, reason: r.reason });
+  for (const v of ["", " "]) {
+    const m = mk(0);
+    const r = m.ctx.opSetValue({ target: m.t, value: v });
+    check(`CP R35: numeric field at 0, set_value ${JSON.stringify(v)} → neither already nor verified (an empty string is not the number 0)`,
+      r.delivery !== "delivered_verified" && r.reason !== "already" && !m.calls.some((c) => typeof c[3] === "number"), `${say(r)} writes=${JSON.stringify(m.calls)}`);
+  }
+  {
+    const m = mk(" hello ");
+    const r = m.ctx.opSetValue({ target: m.t, value: "hello" });
+    check("CP R35: \" hello \" set to \"hello\" → not_delivered already, no AXValue write", r.delivery === "not_delivered" && r.reason === "already" && m.calls.length === 0, say(r));
+  }
+  {
+    const m = mk("hello world");
+    const r = m.ctx.opSetValue({ target: m.t, value: "hello" });
+    check("CP R35: \"hello world\" set to \"hello\", the app ignores the write → not verified", r.delivery !== "delivered_verified", say(r));
+  }
+  {
+    const m = mk("abcd", { AXSelectedTextRange: { location: 1, length: 0 } });
+    m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "a" + v + "bcd"; };
+    const r = m.ctx.opInsertText({ target: m.t, text: "XY" });
+    check("CP R35: \"abcd\" at {1,0} + XY → \"aXYbcd\" → delivered_verified", r.delivery === "delivered_verified" && r.reason === undefined, say(r));
+  }
+  {
+    const m = mk("abcd", { AXSelectedTextRange: { location: 1, length: 0 } });
+    m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "abcd" + v; };
+    const r = m.ctx.opInsertText({ target: m.t, text: "XY" });
+    check("CP R35: \"abcd\" at {1,0} + XY → \"abcdXY\" → delivered_unverified not_at_insertion_point", r.delivery === "delivered_unverified" && r.reason === "not_at_insertion_point", say(r));
+  }
+  {
+    const m = mk("abcd");
+    m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "abcd" + v; };
+    const r = m.ctx.opInsertText({ target: m.t, text: "XY" });
+    check("CP R35: no readable range, after equals before + text → delivered_unverified insertion_point_unreadable", r.delivery === "delivered_unverified" && r.reason === "insertion_point_unreadable", say(r));
+  }
+  {
+    const m = mk("PAYLOAD", { AXSelectedTextRange: { location: 7, length: 0 } });
+    const r = m.ctx.opInsertText({ target: m.t, text: "PAYLOAD" });
+    check("CP R35 (F4): value already PAYLOAD and still only PAYLOAD after the write → not verified", r.delivery !== "delivered_verified", say(r));
+  }
+}
+
+{
+  // R36: append through AXValue when the value cannot be read would replace it → refused, nothing written
+  const ctx = loadEngine(ENGINE);
+  const tf = Object.assign(el("AXTextArea", { frame: [10, 10, 200, 80], settable: { AXValue: true } }), { label: "Area" });
+  const win = el("AXWindow", { title: "W", frame: [0, 0, 300, 200], wid: 43 }, [tf]);
+  const { calls } = installApp(ctx, { pid: 93, name: "T", windows: [win] });
+  const res = snap(ctx, { app: "T" });
+  const r = ctx.opInsertText({ target: targetOf(res, nodeAt(res, (n) => n.role === "AXTextArea")), text: "XY" });
+  check("CP R36: append path with an unreadable value → ACTION_NOT_SUPPORTED not_delivered, nothing written (no clobbering)",
+    r.ok === false && r.code === "ACTION_NOT_SUPPORTED" && r.delivery === "not_delivered" && calls.length === 0, JSON.stringify({ ok: r.ok, code: r.code, delivery: r.delivery, calls }));
+}
 done("engine unit");

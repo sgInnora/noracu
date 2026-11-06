@@ -63,7 +63,7 @@ the mirroring gesture recognizer:
 
 - macOS 15 (Sequoia) or later with **iPhone Mirroring** configured
   (iPhone signed into the same Apple Account, Bluetooth + Wi-Fi on)
-- Python 3.10+ with pyobjc: `python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`
+- Python 3.10+ with pyobjc: `python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-Cocoa`
   (Apple's `/usr/bin/python3` usually lacks it; Homebrew's `python3` is the common working choice)
 - **Accessibility** and **Screen Recording** permissions granted to
   your terminal app (System Settings → Privacy & Security)

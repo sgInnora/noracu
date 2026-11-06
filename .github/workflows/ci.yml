@@ -21,6 +21,13 @@ jobs:
       - run: npx playwright install chromium # (--with-deps is Linux-only; macOS runners need no system deps)
       - name: "syntax: server, engine, scripts, imctl"
         run: npm run check
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: "iPhone driver smoke tests (no iPhone; pyobjc from PyPI, the same packages the README names)"
+        run: |
+          python -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-Cocoa
+          NORACU_PYTHON=python npm run test:imctl
       - name: "engine unit tests (node:vm, no macOS permissions needed)"
         run: node test/engine-unit.mjs
       - name: "e2e (CI mode: browser layer + security regressions; hardware-dependent tests skipped)"

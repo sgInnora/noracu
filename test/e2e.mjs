@@ -40,6 +40,16 @@ function checkHW(name, cond, detail = "") { if (CI) { results.push({ name, pass:
 // G8-1 (0.2.0): in CI mode nothing may touch the desktop — a block that clicks, types, pastes or writes
 // the clipboard runs only locally (checkHW alone only skipped the assertion, not the action)
 const LOCAL = !CI;
+// R31 (0.2.4): a local case this environment cannot run (e.g. a Focus mode holds banners back) is skipped
+// with the reason and left out of the count — it is neither a pass nor a failure
+function skipEnv(name, why) { console.log(`⏭ ${name} | not run: ${why}`); }
+const focusMode = () => {
+  try {
+    const d = JSON.parse(readFileSync(`${process.env.HOME}/Library/DoNotDisturb/DB/Assertions.json`, "utf8"));
+    const recs = d?.data?.[0]?.storeAssertionRecords || [];
+    return recs.map((r) => r?.assertionDetails?.assertionDetailsModeIdentifier).find(Boolean) || null;
+  } catch { return null; }
+};
 function skipLocal(...names) { for (const n of names) { results.push({ name: n, pass: true }); console.log(`⏭ ${n} | skipped (CI: acts on the desktop)`); } }
 // G12（F10）：phone 硬件用例 —— imctl 不可用（无 pyobjc / 未安装 / Mirroring 离线）时跳过而非失败，兑现"优雅降级"承诺
 function checkPhone(name, result, cond, detail = "") {
@@ -100,6 +110,86 @@ check(`tools/list ${EXPECT_TOTAL} 个`, tools.length === EXPECT_TOTAL, `got ${to
 const byLayer = { mac: 0, browser: 0, phone: 0 };
 for (const t of tools) { if (t.name.startsWith("mac_")) byLayer.mac++; else if (t.name.startsWith("browser_")) byLayer.browser++; else if (t.name.startsWith("phone_")) byLayer.phone++; }
 check("三层分布", byLayer.mac === EXPECT_TOOLS.mac && byLayer.browser === EXPECT_TOOLS.browser && byLayer.phone === EXPECT_TOOLS.phone, JSON.stringify(byLayer));
+// 0.2.5 hints（Y5，P2-annotations.md）：46 × 4 全部锁死 —— readOnly / destructive / idempotent / openWorld，1 = true
+const EXPECT_HINTS = {
+  mac_status: "1010",
+  mac_apps: "1010",
+  mac_windows: "1011",
+  mac_screenshot: "1011",
+  mac_ax_state: "1011",
+  mac_find: "1011",
+  mac_get: "1011",
+  mac_wait: "1011",
+  mac_clipboard_read: "1010",
+  mac_notifications: "0001",
+  mac_click: "0001",
+  mac_drag: "0001",
+  mac_scroll: "0001",
+  mac_type: "0001",
+  mac_paste: "0001",
+  mac_set_value: "0011",
+  mac_key: "0101",
+  mac_menu_command: "0101",
+  mac_app: "0101",
+  mac_window: "0101",
+  browser_snapshot: "1011",
+  browser_screenshot: "1011",
+  browser_read: "1011",
+  browser_launch: "0001",
+  browser_navigate: "0001",
+  browser_click: "0001",
+  browser_press_key: "0001",
+  browser_type: "0001",
+  browser_scroll: "0001",
+  browser_fill: "0001",
+  browser_evaluate: "0101",
+  browser_close: "0010",
+  phone_status: "1010",
+  phone_screenshot: "1011",
+  phone_ocr: "1011",
+  phone_find: "1011",
+  phone_launch: "0000",
+  phone_tap: "0001",
+  phone_longpress: "0001",
+  phone_swipe: "0001",
+  phone_scroll: "0001",
+  phone_key: "0001",
+  phone_type: "0001",
+  phone_home: "0001",
+  phone_app_switcher: "0001",
+  phone_open: "0001",
+};
+const HINT_KEYS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"];
+const hintBad = [];
+for (const t of tools) {
+  const a = t.annotations || {};
+  const got = HINT_KEYS.map((k) => (a[k] === true ? "1" : a[k] === false ? "0" : "?")).join("");
+  const extra = Object.keys(a).filter((k) => !HINT_KEYS.includes(k));
+  if (got !== EXPECT_HINTS[t.name] || extra.length) hintBad.push(`${t.name}:${got}${extra.length ? "+" + extra.join("+") : ""}`);
+}
+check("0.2.5 hints：46 个工具的 4 个 annotation 与规格表逐一相同", tools.length === Object.keys(EXPECT_HINTS).length && hintBad.length === 0, hintBad.join(" ") || "46 × 4 ok");
+console.log(`   hints got: ${tools.map((t) => `${t.name}=${HINT_KEYS.map((k) => (t.annotations?.[k] === true ? 1 : t.annotations?.[k] === false ? 0 : "?")).join("")}`).join(" ")}`);
+// R32 反例抽查：四键齐全（false 也要写出）、按行为标而不是按 READ_ONLY_TOOLS、待测项保持 false
+const ann = (n) => tools.find((t) => t.name === n)?.annotations || {};
+check("0.2.5 hints：反例抽查（R32）",
+  HINT_KEYS.every((k) => typeof ann("mac_status")[k] === "boolean") && ann("mac_status").destructiveHint === false && ann("mac_status").openWorldHint === false
+    && ann("mac_clipboard_read").readOnlyHint === true && ann("mac_click").destructiveHint === false && ann("mac_key").destructiveHint === true
+    && ["browser_launch", "browser_fill", "phone_home", "phone_launch"].every((n) => ann(n).idempotentHint === false)
+    && ann("phone_launch").openWorldHint === false && ann("phone_home").openWorldHint === true,
+  JSON.stringify({ mac_status: ann("mac_status"), mac_key: ann("mac_key"), phone_launch: ann("phone_launch") }));
+// R32：TOOL_HINTS 缺一个工具名 → server 启动即失败（源码复制到临时目录，删掉 mac_status 那一行）
+{
+  const { mkdtempSync, cpSync, writeFileSync: wfs } = await import("node:fs");
+  const dir = mkdtempSync(`${process.env.TMPDIR || "/tmp/"}noracu-hints-`.replace(/\/\/+/g, "/"));
+  cpSync(new URL("../src", import.meta.url), `${dir}/src`, { recursive: true });
+  cpSync(new URL("../package.json", import.meta.url), `${dir}/package.json`);
+  const f = `${dir}/src/server.mjs`;
+  const src = readFileSync(f, "utf8"), cut = src.replace(/^  mac_status: \[1, 0, 1, 0\],\n/m, "");
+  wfs(f, cut);
+  const r = spawnSync("node", [f], { input: "", encoding: "utf8", timeout: 15000 });
+  const line = String(r.stderr || "").split("\n").find((l) => l.startsWith("Error: TOOL_HINTS")) || `status ${r.status}`;
+  check("0.2.5 hints：TOOL_HINTS 少一个工具名 → server 启动即失败", cut !== src && r.status !== 0 && /TOOL_HINTS out of sync with TOOLS: missing mac_status/.test(r.stderr), line.trim().slice(0, 90));
+}
 // schema lint（G4 + t10 §4）：GLM-safe schema — properties 每个值必须含字符串 type；每个非 `?` 参数都在 required 中且一致
 const schemaBad = [];
 const serverSrcForSchema = readFileSync(new URL("../src/server.mjs", import.meta.url), "utf8");
@@ -311,7 +401,9 @@ if (LOCAL && TE_READY()) {
   const nl = jsonOf(await call("mac_notifications", { text: "noracu e2e body" }));
   const nid = nl.notifications?.[0]?.id;
   const ndm = nid ? await call("mac_notifications", { action: "dismiss", id: nid }) : null;
-  checkHW("B3：mac_notifications 列出并按 id 关闭横幅", nid && /delivered_verified/.test(say(ndm)), `${nl.count} listed; ${say(ndm).slice(0, 70)}`);
+  const focusOn = CI ? null : focusMode();
+  if (focusOn && !nid) skipEnv("B3：mac_notifications 列出并按 id 关闭横幅", `a Focus mode is on (${focusOn}), banners are held back; ${nl.count} listed`);
+  else checkHW("B3：mac_notifications 列出并按 id 关闭横幅", nid && /delivered_verified/.test(say(ndm)), `${nl.count} listed; ${say(ndm).slice(0, 70)}`);
 } else skipLocal("B3：本机等待 / 窗口 / 截图 / 剪贴板 / 通知");
 // B3 本机：CDP 全链路 —— 用 Playwright 自带的 Chrome for Testing（不碰用户自己的应用）
 {
@@ -1204,8 +1296,13 @@ if (LOCAL && TE_READY()) {
     closeDoc("noracu-gap-");
     mkDoc("noracu-gap-back"); await sleepMs(600);
     mkDoc("noracu-gap-target"); await sleepMs(900);
-    const st = jsonOf(await gcall("mac_ax_state", { app: "TextEdit", window: "noracu-gap-target", interactive: true }));
-    return (st.elements || []).find((e) => /textarea/i.test(e.role))?.i;
+    for (let k = 0; k < 3; k++) {
+      const st = jsonOf(await gcall("mac_ax_state", { app: "TextEdit", window: "noracu-gap-target", interactive: true }));
+      const i = (st.elements || []).find((e) => /textarea/i.test(e.role))?.i;
+      if (Number.isInteger(i)) return i;
+      await sleepMs(700);
+    }
+    return undefined;
   };
   const clickWithGap = async (idx, interfere) => {
     const since = gerr.length;
@@ -1215,20 +1312,35 @@ if (LOCAL && TE_READY()) {
     return { seen, r: await pending };
   };
   const notVerified = (x) => x.seen && !x.r?.isError && /via physical click/.test(gsay(x.r)) && !/delivery=delivered_verified/.test(gsay(x.r));
+  // R31 (0.2.4): an interfered case counts only when the click was sent in the gap. When the interference
+  // lands before the last pre-send check, the click is refused with nothing sent — that attempt says nothing
+  // about the after-click verdict, so it is repeated (up to 5 attempts). Any delivered_verified fails at once;
+  // a refusal that does not say delivery=not_delivered fails too. Every result is logged in full.
+  const gapCase = async (label, interfere, after = () => {}, extra = () => true) => {
+    let last = "";
+    for (let k = 1; k <= 5; k++) {
+      const idx = await setup();
+      if (!Number.isInteger(idx)) { console.log(`   gap ${label} attempt ${k}: fixture: no text area in noracu-gap-target`); continue; }
+      const x = await clickWithGap(idx, interfere);
+      after();
+      last = gsay(x.r);
+      console.log(`   gap ${label} attempt ${k}: seen=${x.seen} isError=${Boolean(x.r?.isError)} | ${last}`);
+      if (/delivery=delivered_verified/.test(last)) return { ok: false, why: `delivered_verified on attempt ${k}` };
+      if (notVerified(x)) return extra(last) ? { ok: true, why: `sent, not verified (attempt ${k})` } : { ok: false, why: `sent, not verified, but the note is missing (attempt ${k})` };
+      if (!(x.r?.isError && /delivery=not_delivered/.test(last))) return { ok: false, why: `neither sent nor refused with delivery=not_delivered (attempt ${k})` };
+    }
+    return { ok: false, why: `inconclusive: refused before sending on every attempt; last: ${last.slice(0, 60)}` };
+  };
   try {
     let idx = await setup();
     const ctl = await clickWithGap(idx, () => {});
     check("0.2.2 本机空档：对照（空档里不干扰）→ 点击发出，未报错", Number.isInteger(idx) && ctl.seen && !ctl.r?.isError && /via physical click/.test(gsay(ctl.r)), gsay(ctl.r).slice(0, 140));
-    idx = await setup();
-    const occ = await clickWithGap(idx, () => mkDoc("noracu-gap-cover"));
-    check("0.2.2 本机空档：空档里被另一个窗口遮挡 → 不报 delivered_verified，并说明上面是谁", notVerified(occ) && /on top at/.test(gsay(occ.r)), gsay(occ.r).slice(0, 220));
-    closeDoc("noracu-gap-cover");
-    idx = await setup();
-    const mov = await clickWithGap(idx, () => te(['tell application "TextEdit" to set bounds of (first window whose name contains "noracu-gap-target") to {760, 140, 1260, 540}']));
-    check("0.2.2 本机空档：空档里目标窗口被移走 → 不报 delivered_verified", notVerified(mov), gsay(mov.r).slice(0, 220));
-    idx = await setup();
-    const gone = await clickWithGap(idx, () => closeDoc("noracu-gap-target"));
-    check("0.2.2 本机空档：空档里目标窗口被关闭 → 不报 delivered_verified", notVerified(gone), gsay(gone.r).slice(0, 220));
+    const occ = await gapCase("cover", () => mkDoc("noracu-gap-cover"), () => closeDoc("noracu-gap-cover"), (t) => /on top at/.test(t));
+    check("0.2.2 本机空档：空档里被另一个窗口遮挡 → 不报 delivered_verified，并说明上面是谁", occ.ok, occ.why);
+    const mov = await gapCase("move", () => te(['tell application "TextEdit" to set bounds of (first window whose name contains "noracu-gap-target") to {760, 140, 1260, 540}']));
+    check("0.2.2 本机空档：空档里目标窗口被移走 → 不报 delivered_verified", mov.ok, mov.why);
+    const gone = await gapCase("close", () => closeDoc("noracu-gap-target"));
+    check("0.2.2 本机空档：空档里目标窗口被关闭 → 不报 delivered_verified", gone.ok, gone.why);
     // a window closed and reopened with the same name, text and bounds: an app-level index must not carry over
     closeDoc("noracu-gap-"); mkDoc("noracu-gap-back"); await sleepMs(600); mkDoc("noracu-gap-target"); await sleepMs(900);
     const fa = jsonOf(await gcall("mac_find", { app: "TextEdit", surface: "app", role: "textarea", value: "noracu-gap-target text" }));
@@ -1260,14 +1372,22 @@ if (LOCAL && TE_READY()) {
 if (LOCAL) {
   // by window id: TextEdit may also show a "… copy" window whose title contains the test document's name
   const wl = TE_READY() ? jsonOf(await call("mac_windows", { app: "TextEdit" })) : {};
-  const wid = (wl.windows || []).find((w) => w.title === TE_DOC)?.id;
-  const st = wid ? jsonOf(await call("mac_ax_state", { app: "TextEdit", window_id: wid, interactive: true })) : {};
-  const bold = (st.elements || []).find((e) => e.title === "bold")?.i;
+  // R31 (0.2.4): TextEdit can show more than one window with this title; try each one
+  const wids = (wl.windows || []).filter((w) => String(w.title ?? "").startsWith(TE_DOC)).map((w) => w.id);
+  let bold;
+  for (const wid of wids) {
+    const st = jsonOf(await call("mac_ax_state", { app: "TextEdit", window_id: wid, interactive: true }));
+    bold = (st.elements || []).find((e) => e.title === "bold")?.i;
+    if (Number.isInteger(bold)) break;
+  }
   // "contains": TextEdit may have made a "… copy" of the test document after the format changes above
   spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to close (every document whose name contains "${TE_DOC}") saving no`], { timeout: 10000 });
   await sleepMs(500);
+  if (!Number.isInteger(bold)) console.log(`   B2 fixture: TextEdit windows (on and off screen): ${JSON.stringify((jsonOf(await call("mac_windows", { app: "TextEdit", include_offscreen: true })).windows || []).filter((w) => w.title).map((w) => [w.title, w.onscreen]))}`);
   const r = Number.isInteger(bold) ? await call("mac_click", { element_index: bold }) : null;
-  check("B2：元素已消失 → element_no_longer_valid（不误点）", r?.isError && /element_no_longer_valid/.test(String(r?.content?.[0]?.text)) && /delivery=not_delivered/.test(String(r?.content?.[0]?.text)), String(r?.content?.[0]?.text).slice(0, 100));
+  if (r) console.log(`   B2 result: ${String(r?.content?.[0]?.text)}`);
+  check("B2：元素已消失 → element_no_longer_valid（不误点）", r?.isError && /element_no_longer_valid/.test(String(r?.content?.[0]?.text)) && /delivery=not_delivered/.test(String(r?.content?.[0]?.text)),
+    r ? String(r?.content?.[0]?.text).slice(0, 100) : `fixture: bold index missing (TextEdit windows titled ${TE_DOC}…: ${JSON.stringify(wids)})`);
 } else skipLocal("B2：元素已消失 → element_no_longer_valid（不误点）");
 
 const failed = results.filter(r => !r.pass);

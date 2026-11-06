@@ -546,6 +546,12 @@ def _open_and_report(args) -> int:
         print(f"open_not_confirmed: ran out of time opening {args.app!r} (the Mac may be "
               f"under heavy load); {home_note}", file=sys.stderr)
         return 4
+    if result == "short_unreadable":
+        print(f"open_not_confirmed: could not read {args.app!r} in Spotlight — OCR often misses a "
+              "one- or two-letter name, in the Top Hit card and in the search field alike, so "
+              f"nothing was tapped and the app may well be installed; {home_note} — open it from "
+              "its Home Screen icon instead (phone_screenshot, then phone_tap)", file=sys.stderr)
+        return 4
     if result == "not_typed":
         print(f"open_not_confirmed: the name {args.app!r} was pasted into Spotlight but never "
               "showed up on the phone (a paste can take several seconds to reach the iPhone, "

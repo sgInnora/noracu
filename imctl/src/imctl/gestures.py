@@ -137,14 +137,25 @@ def scroll_checked(direction, distance=0.5, *, luma=None, scroller=None,
     return verify.mean_abs_diff(before, after) >= SCROLL_MIN_DIFF
 
 
+# F45 (device run 2026-11-07): iPhone Mirroring turns a mouse drag into pointer input, and a
+# pointer drag that starts on an app icon picks the icon up at once. A page swipe at mid-height
+# starts on an icon row: twice it carried an icon onto another one and made a folder (and left the
+# Home Screen in edit mode, where every icon shows a "−" delete badge). Page swipes start in the
+# empty strip between the last icon row and the Dock, where the page dots are; five swipes there
+# paged without picking anything up.
+PAGE_SWIPE_NY = 0.80
+PAGE_SWIPE_FROM_NX = 0.9
+PAGE_SWIPE_TO_NX = 0.1
+
+
 def page_left() -> None:
-    """Swipe right-to-left: go to the next home-screen page."""
-    inp.swipe(0.8, 0.5, 0.2, 0.5, duration_ms=280)
+    """Swipe right-to-left: go to the next home-screen page (from the strip above the Dock, F45)."""
+    inp.swipe(PAGE_SWIPE_FROM_NX, PAGE_SWIPE_NY, PAGE_SWIPE_TO_NX, PAGE_SWIPE_NY, duration_ms=280)
 
 
 def page_right() -> None:
-    """Swipe left-to-right: go to the previous home-screen page."""
-    inp.swipe(0.2, 0.5, 0.8, 0.5, duration_ms=280)
+    """Swipe left-to-right: go to the previous home-screen page (from the strip above the Dock, F45)."""
+    inp.swipe(PAGE_SWIPE_TO_NX, PAGE_SWIPE_NY, PAGE_SWIPE_FROM_NX, PAGE_SWIPE_NY, duration_ms=280)
 
 
 def pull_down_search() -> None:
@@ -367,10 +378,43 @@ _LABEL_LOOKALIKES = {
 # Spotlight is open (the header measured at ny ≈ 0.14).
 SPOTLIGHT_HEADER_MAX_NY = 0.3
 
-# Spotlight's search field is at the bottom of the window (ny >= SEARCH_FIELD_NY) and echoes the
-# typed query. choose_app_hit never takes a label there; open_app reads that echo as the proof
-# that a late paste has reached the phone (F42).
-SEARCH_FIELD_NY = 0.88
+# Spotlight's search field is in the bottom part of the window (ny >= SEARCH_FIELD_NY) and echoes
+# the typed query. choose_app_hit never takes a label there; open_app reads that echo as the proof
+# that a late paste has reached the phone (F42). 2026-11-06 device run (macOS 27.2 / iOS 27): the
+# field is not always at the very bottom — it sat at ny ≈ 0.93 on one screen and floated at
+# ny ≈ 0.82 on others ("Q Search" read at 0.821 before typing, the query at 0.821–0.823 after),
+# where the old 0.88 bound never saw it: every unmatched name waited out the late-paste reads and
+# was reported as never typed, and "X" ran out of time. The Top Hit card stays above 0.3.
+SEARCH_FIELD_NY = 0.78
+
+# The field echo is only evidence that the paste arrived — it never picks what is tapped — so a
+# long name may differ from it by an OCR slip or two (seen on the device: "Zaxwv" and "Zqxw" for
+# "Zqxwv"). Short names stay exact.
+ECHO_FUZZY_MIN_LEN = 6      # names this long tolerate one edit …
+ECHO_FUZZY_TWO_LEN = 14     # … and this long, two
+
+
+def _edit_distance(a: str, b: str, limit: int) -> int:
+    """Levenshtein distance between a and b, or limit + 1 once it is certain to exceed limit."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > limit:
+            return limit + 1
+        prev = cur
+    return prev[-1]
+
+
+def _echo_matches(got: str, want: str) -> bool:
+    """The field text ``got`` shows the query ``want`` (both _norm_label'ed)."""
+    if got == want:
+        return True
+    edits = (1 if len(want) >= ECHO_FUZZY_MIN_LEN else 0) + (1 if len(want) >= ECHO_FUZZY_TWO_LEN else 0)
+    return edits > 0 and _edit_distance(got, want, edits) <= edits
 
 
 def _norm_label(s: str) -> str:
@@ -511,6 +555,11 @@ OPEN_DEADLINE_S = 38.0
 # is enough — a Top Hit card alone may still be the previous query's.
 OPEN_LATE_PASTE_S = 15.0   # a later device run under load saw ~15 s from Cmd+V to the echo
 OPEN_LATE_PASTE_PASSES = 30   # a cap for injected clocks; the time limit normally ends it first
+# A one- or two-letter name almost never shows as an echo (2026-11-06 device run: "X" in the
+# field in 2 of 24 reads, its Top Hit label in none), so waiting for one only ran phone_open into
+# its time limit. Short names get this much late reading — at least one full pass — and then
+# open_app reports "short_unreadable" instead of not_found / not_typed, which it cannot tell apart.
+OPEN_LATE_SHORT_S = 4.0
 
 
 # The Spotlight "Top Hit" section label phone_open looks for. English by default;
@@ -527,11 +576,13 @@ TOP_HIT_LABELS = _tophit_labels(os.environ.get("NORACU_TOPHIT_LABELS"))
 
 
 def _field_echo(hits, name) -> bool:
-    """True when the search field shows exactly ``name`` (F42).
+    """True when the search field shows ``name`` (F42).
 
     The field is the bottom zone (ny >= SEARCH_FIELD_NY); OCR may read the
-    magnifier glyph in front of the text as a "Q". Exact after _norm_label,
-    like every other label comparison here.
+    magnifier glyph in front of the text as a "Q". Compared after
+    _norm_label; a name of ECHO_FUZZY_MIN_LEN characters or more tolerates
+    one OCR slip (two from ECHO_FUZZY_TWO_LEN) — this only says the paste
+    arrived, it never decides a tap.
     """
     want = _norm_label(name)
     for hit in hits:
@@ -539,7 +590,7 @@ def _field_echo(hits, name) -> bool:
             continue
         got = _norm_label(hit.text)
         # the magnifier glyph may come back as "Q", "Q." or "Q:" in front of the text
-        if got == want or re.sub(r"^q[\s.,:;·•]*", "", got, count=1) == want:
+        if _echo_matches(got, want) or _echo_matches(re.sub(r"^q[\s.,:;·•]*", "", got, count=1), want):
             return True
     return False
 
@@ -656,6 +707,10 @@ def open_app(name: str, *, spotlight_open: bool = False,
     name during the late-paste reads either — the name may never have
     reached the phone, so this is no evidence the app is missing; back on
     the Home Screen);
+    "short_unreadable" (a one- or two-letter name that no read matched
+    within OPEN_LATE_SHORT_S of late reading: OCR misses such text in the
+    Top Hit card and the search field alike, so whether it was typed or
+    the app exists is unknown — nothing was tapped; back on the Home Screen);
     "deadline" (the OPEN_DEADLINE_S budget ran out before a tap; back on
     the Home Screen); or "spotlight_unavailable" (Spotlight could not be
     opened; nothing was typed or tapped).
@@ -744,7 +799,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
         # F33/F42: the name is not in the search field yet — the paste may still be on its
         # way, whether type_text missed it or took another change for it (a clear that
         # landed late redraws the results: seen on the device after a back-to-back open)
-        limit = clock() + OPEN_LATE_PASTE_S
+        limit = clock() + (OPEN_LATE_SHORT_S if short else OPEN_LATE_PASTE_S)
         if deadline is not None:
             limit = min(limit, deadline)
         echo_passes = 0
@@ -772,6 +827,10 @@ def open_app(name: str, *, spotlight_open: bool = False,
         tidy()
         if out_of_time():
             return "deadline"
+        if short:
+            # OCR misses one- and two-letter text in the card and in the field alike: neither
+            # "not typed" nor "not found" is known — say that instead (2026-11-06 device run)
+            return "short_unreadable"
         if not saw_echo[0]:
             return "not_typed"  # F42: the name never showed up in the search field
         return "not_found" if saw_top_hit[0] else "no_top_hit"

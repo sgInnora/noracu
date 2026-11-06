@@ -285,7 +285,7 @@ model — don't let it override the task.
 | `mirror_setup_required: …` | iPhone Mirroring shows a setup or welcome screen — finish it yourself in its window, then call `phone_launch` |
 | `menu_unknown: …` | `phone_home` or `phone_app_switcher` menu command timed out (`delivery=unknown, retry=unsafe`) — inspect `phone_screenshot` before retrying |
 | `imctl_timeout: …` | a phone step ran past its time limit and was stopped — check `phone_status` / `phone_screenshot` before retrying (after `phone_open`, noracu goes back to the Home Screen); raise `NORACU_PHONE_TIMEOUT_MS` on a slow Mac |
-| `imctl unavailable: no python3 with pyobjc found …` | install pyobjc for a python3 (`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`) or set `NORACU_PYTHON` |
+| `imctl unavailable: no python3 with pyobjc found …` | install pyobjc for a python3 (`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-Cocoa`) or set `NORACU_PYTHON` |
 
 ## 9. iPhone layer
 
@@ -336,7 +336,10 @@ when the state cannot be read), and `phone_ocr` / `phone_find` start with a
 `phone_scroll {"direction": "down", "distance": 0.5}` moves the list under the
 mirror by about half a window, with trackpad-style scroll events; a vertical
 `phone_swipe` drag does not scroll lists in iPhone Mirroring, so keep swipes
-for gestures such as Home Screen paging.
+for gestures such as Home Screen paging. Start a page swipe in the empty strip
+just above the Dock (y about 0.80): the mirror delivers a drag as pointer
+input, and one that starts on an app icon picks the icon up and moves it — it
+can rearrange the Home Screen or drop the icon on another one and make a folder.
 
 `phone_type` pastes through the clipboard with a real Command-V chord (never
 echoing the typed text), saving every clipboard item and type, clearing
@@ -353,7 +356,11 @@ is never tapped); otherwise it returns to the Home Screen and reports
 `app not found` (`delivery=delivered_unverified, retry=safe`). A paste can take
 several seconds to reach the iPhone: when the
 name never shows up, `phone_open` waits up to 15 s and then reports
-`open_not_confirmed` (retry) rather than `app not found`. Use the name the phone shows under the icon (`拼多多`, not
+`open_not_confirmed` (retry) rather than `app not found`. OCR rarely reads a
+one- or two-letter name such as `X`, in the Top Hit card or the search field,
+so for those `phone_open` does not wait the 15 s: it reports `open_not_confirmed`
+and taps nothing — open such an app from its Home Screen icon
+(`phone_screenshot`, then `phone_tap`). Use the name the phone shows under the icon (`拼多多`, not
 `Pinduoduo`); it reads Spotlight's English "Top Hit" label, so on an iPhone
 set to another language set `NORACU_TOPHIT_LABELS` to the label the phone shows.
 

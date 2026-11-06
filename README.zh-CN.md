@@ -88,12 +88,12 @@ Claude Code：`claude mcp add noracu -- /绝对路径/TO/node /绝对路径/TO/n
 | `ENOENT` 提到 cliclick | `brew install cliclick`（或设 `NORACU_CLICLICK`） |
 | GUI 宿主报 `spawn node` / `npx` `ENOENT` | 配置里改用绝对 `node` 路径——nvm/volta/homebrew 的 shim 不在 GUI `PATH` 上 |
 | 首次 `browser_launch` 卡住 | 一次性 Chromium 下载；或自动安装被关闭（`NORACU_DISABLE_AUTO_INSTALL=1`）→ 执行 `npx playwright install chromium` |
-| `phone_*` 报 `imctl unavailable: no python3 with pyobjc found` | 给某个 python3 装 pyobjc（`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`，通常选 Homebrew 的 python3）或设 `NORACU_PYTHON`——见[iPhone 层](#iphone-层实验性) |
+| `phone_*` 报 `imctl unavailable: no python3 with pyobjc found` | 给某个 python3 装 pyobjc（`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-Cocoa`，通常选 Homebrew 的 python3）或设 `NORACU_PYTHON`——见[iPhone 层](#iphone-层实验性) |
 | `phone_*` 被拒并报 `mirror_not_live: …`（"Connection Paused"、"iPhone in Use"、"not running"）或 `mirror_state_unknown: …` | 镜像未运行、已暂停或状态无法读取——锁上 iPhone、放在 Mac 旁，检查 `phone_status`，再调用 `phone_launch`（会启动镜像并点击 Resume） |
 | `phone_launch` 报 `mirror_setup_required` | iPhone Mirroring 正显示设置或欢迎页（例如升级 macOS 后首次启动）——请在 iPhone Mirroring 窗口里自己完成；noracu 从不替你点击这类页面 |
 | `imctl_timeout: phone … did not finish within …s` | Mac 负载过高或系统卡住——操作可能已部分执行，重试前先看 `phone_status` / `phone_screenshot`（`phone_open` 超时后 noracu 会回到主屏幕）；在此期间 server 仍会响应其他调用 |
 | `input_busy: …` | 前一个手机或 Mac 操作占用输入队列超过 60 秒（或 `NORACU_PHONE_TIMEOUT_MS` + 15 秒）；本次调用什么都没做——重试即可 |
-| 已安装的 App，`phone_open` 却报 app not found | 它只点 Spotlight「Top Hit」卡片里的标签——名字要和手机图标下显示的一致（例如 `拼多多`，而不是 `Pinduoduo`）。已安装却报 "Spotlight showed no Top Hit"，通常说明 iPhone 系统语言不是英文：`phone_open` 读的是 Spotlight 的 "Top Hit" 标签——把 `NORACU_TOPHIT_LABELS` 设成手机上显示的标签。报 `open_not_confirmed: … never showed up on the phone` 则是粘贴的名字没有到达手机（粘贴到 iPhone 可能要好几秒）——重试即可。`phone_open` 之后剪贴板里是 App 名字 |
+| 已安装的 App，`phone_open` 却报 app not found | 它只点 Spotlight「Top Hit」卡片里的标签——名字要和手机图标下显示的一致（例如 `拼多多`，而不是 `Pinduoduo`）。已安装却报 "Spotlight showed no Top Hit"，通常说明 iPhone 系统语言不是英文：`phone_open` 读的是 Spotlight 的 "Top Hit" 标签——把 `NORACU_TOPHIT_LABELS` 设成手机上显示的标签。报 `open_not_confirmed: … never showed up on the phone` 则是粘贴的名字没有到达手机（粘贴到 iPhone 可能要好几秒）——重试即可。只有一两个字母的名字（如 `X`）OCR 常常读不出来，`phone_open` 会报 `open_not_confirmed` 且不点任何东西——这类 App 请从主屏图标打开（先 `phone_screenshot`，再 `phone_tap`）。`phone_open` 之后剪贴板里是 App 名字 |
 | 输入的文本被重新空格化（如 "no ra cu"） | 文字是以按键方式送出的（`mac_type` 用了 `mechanism: "physical"`，或焦点元素不接受辅助功能写入），同时 CJK 输入法在激活——用 `mac_type` 的默认方式，或用 `mac_paste` |
 | `element_no_longer_valid` | 快照超过 30 秒，或元素已消失、已变化、所在窗口已关闭——重跑 `mac_ax_state` / `browser_snapshot` 并用新索引 |
 | `occluded: … — on top: {…}` | 物理点击会落在别的东西上（另一个窗口、一个 sheet）——把目标窗口置前或关掉遮挡物；本次什么都没发送 |
@@ -112,7 +112,7 @@ noracu 可以经 Apple 的 **iPhone Mirroring** 操作真实 iPhone。agent 在 
 
 **无人值守：** 在 iPhone Mirroring → 设置里选「自动认证（Authenticate automatically）」，会话开始时就不再要求输入密码。代价：任何能使用你这台已解锁 Mac 的人都能打开你的手机。
 
-**Python：** 驱动需要一个能导入 pyobjc（Quartz、Vision、AppKit）的 python3。设置 `NORACU_PYTHON`，或由 noracu 在首次调用 `phone_*` 时依次探测一次 `/opt/homebrew/bin/python3`、`/usr/local/bin/python3`、`python3`、`/usr/bin/python3`。Apple 自带的 `/usr/bin/python3` 通常没有 pyobjc；常见可用配置是 Homebrew 的 python3 加 `python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-AppKit`。
+**Python：** 驱动需要一个能导入 pyobjc（Quartz、Vision、AppKit）的 python3。设置 `NORACU_PYTHON`，或由 noracu 在首次调用 `phone_*` 时依次探测一次 `/opt/homebrew/bin/python3`、`/usr/local/bin/python3`、`python3`、`/usr/bin/python3`。Apple 自带的 `/usr/bin/python3` 通常没有 pyobjc；常见可用配置是 Homebrew 的 python3 加 `python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-Cocoa`。
 
 **镜像状态：** `phone_status` 返回 `live`（手机画面正在推流）、`overlay`（iPhone Mirroring 显示的替代文字，如 "Connection Paused"、"iPhone in Use"）、`paused`（该覆盖层带 Resume 按钮）和 `setup`（需要用户自己完成的设置或欢迎页——noracu 从不点击）。判定依据是窗口结构和形状（镜像窗口是竖长或横长的手机形状，设置页接近正方形），不是文字。镜像不在线时，所有手机输入工具（`phone_tap`、`phone_longpress`、`phone_swipe`、`phone_scroll`、`phone_type`、`phone_key`、`phone_open`、`phone_home` 和 `phone_app_switcher`）都会以 `mirror_not_live` 拒绝——在镜像已暂停或未开启时不会先抢焦点——而不是点到覆盖层上；状态仍无法判定时以 `mirror_state_unknown` 拒绝（`phone_ocr` / `phone_find` 的输出首行会给出警告）。镜像闲置一段时间后会暂停；`phone_launch` 会把它置前并点击 Resume。
 
@@ -120,7 +120,7 @@ noracu 可以经 Apple 的 **iPhone Mirroring** 操作真实 iPhone。agent 在 
 
 **首次成功路径：** `phone_status` → 若 `live` 不是 `true` 先 `phone_launch` → `phone_screenshot` → `phone_ocr` → `phone_find` + `phone_tap`。
 
-**已知限制：** 点击落在 OCR 识别到文字的位置，重复或识别错的标签可能点错（若 Spotlight 的「Top Hit」里是同名的联系人或网站，`phone_open` 分辨不出它不是 App）；`phone_scroll` 用触控板式的滚动事件移动列表（竖向的 `phone_swipe` 拖拽不会滚动列表——它用于主屏翻页这类手势）；在一套实测环境（iPhone 17 Pro Max 运行 iOS 27.0.1，Mac 运行 macOS 26.6.2）上，iPhone Mirroring 在所有 View 尺寸下都把手机画面画得比窗口大约 17%，右列和最底行被裁掉、无法点到；在显示器之间移动窗口、切换主屏、重开 App 都无效，主要怀疑是 iOS 27 与 macOS 26 版本错位——边缘附近点不中时先看 `phone_screenshot`；`phone_open` 把 App 名输入 Spotlight，只有当 Spotlight 的「Top Hit」卡片显示的正是这个名字时才点击（同名的网页建议、网站和设置行一律不点），否则回到主屏——它读的是 Spotlight 的英文 "Top Hit" 标签，iPhone 设为其他语言时找不到任何 App，除非用 `NORACU_TOPHIT_LABELS` 指定那个标签；`phone_home` / `phone_app_switcher` 在镜像在线时走 iPhone Mirroring 菜单（英文 macOS 下无需 python，仅在菜单项不存在时回退 `imctl` 手势，菜单超时返回 `menu_unknown` 而不补发第二次手势），且只报告指令已发送（`screen not verified`）。
+**已知限制：** 点击落在 OCR 识别到文字的位置，重复或识别错的标签可能点错（若 Spotlight 的「Top Hit」里是同名的联系人或网站，`phone_open` 分辨不出它不是 App）；`phone_scroll` 用触控板式的滚动事件移动列表（竖向的 `phone_swipe` 拖拽不会滚动列表——它用于主屏翻页这类手势，起点放在 Dock 上方的空白带：起点落在 App 图标上的拖动会把图标拿起来挪走）；在一套实测环境（iPhone 17 Pro Max 运行 iOS 27.0.1，Mac 运行 macOS 26.6.2）上，iPhone Mirroring 在所有 View 尺寸下都把手机画面画得比窗口大约 17%，右列和最底行被裁掉、无法点到；在显示器之间移动窗口、切换主屏、重开 App 都无效，主要怀疑是 iOS 27 与 macOS 26 版本错位——边缘附近点不中时先看 `phone_screenshot`；`phone_open` 把 App 名输入 Spotlight，只有当 Spotlight 的「Top Hit」卡片显示的正是这个名字时才点击（同名的网页建议、网站和设置行一律不点），否则回到主屏——它读的是 Spotlight 的英文 "Top Hit" 标签，iPhone 设为其他语言时找不到任何 App，除非用 `NORACU_TOPHIT_LABELS` 指定那个标签；`phone_home` / `phone_app_switcher` 在镜像在线时走 iPhone Mirroring 菜单（英文 macOS 下无需 python，仅在菜单项不存在时回退 `imctl` 手势，菜单超时返回 `menu_unknown` 而不补发第二次手势），且只报告指令已发送（`screen not verified`）。
 
 ## 环境变量
 
@@ -147,6 +147,7 @@ noracu 以你 MCP client 的权限运行。它会在本机点击、输入、粘�
 "env": { "NORACU_READ_ONLY": "1", "NORACU_DISABLE_EVAL": "1" }
 ```
 
+- **工具注解只是提示，不是权限。** 每个工具都报告四个 MCP 工具注解（`readOnlyHint`、`destructiveHint`、`idempotentHint`、`openWorldHint`），按工具实际行为标注——见 [docs/tools.md](docs/tools.md)。客户端可以据此决定哪些操作先问你；它们不限制任何事，而且按 noracu 应答的 2024-11-05 协议工作的客户端可能直接忽略。它们也不等同于 `NORACU_READ_ONLY=1`：`mac_clipboard_read` 按行为是只读，但在该模式下被拒；`browser_navigate` 在该模式下允许，却不是只读。
 - **`NORACU_READ_ONLY=1`** 是安全的首次运行模式。它拒绝不在 18 项白名单内的一切工具（观察类 + 独立的 `browser_launch`/`browser_navigate`/`browser_close`；即使设了 `NORACU_ALLOW_CDP`，带 `cdp_port` 的 `browser_launch` 也会被拒）；所有 click/type/paste/eval 被拒，`mac_clipboard_read`、`mac_notifications` 和 `condition: "notification"` 的 `mac_wait` 也被拒，且 `mac_ax_state` 与 `mac_find` 不会在目标应用上开启 `web_accessibility`。`browser_navigate` 在白名单内，仍会加载 URL。
 - **`NORACU_DISABLE_EVAL=1`** 让 `browser_evaluate` 被调用时报错（仍列在 `tools/list` 中）。snapshot、click、type 保留。
 - **`file://` 被拒**，除非 `NORACU_ALLOW_FILE_URL=1`，这样浏览器 agent 无法通过导航到 `~/Documents` 来读本地文件。（仅校验初始导航 URL；重定向不校验——见 SECURITY.md。）

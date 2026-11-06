@@ -666,6 +666,11 @@ def test_open_app_confirm():
              "up on the phone (a paste can take several seconds to reach the iPhone, or be "
              "lost; an iPhone not set to English also needs NORACU_TOPHIT_LABELS) — nothing "
              "was tapped; back on the Home Screen; retry phone_open", True),
+            ("short_unreadable", 4,
+             "open_not_confirmed: could not read 'X' in Spotlight — OCR often misses a one- or "
+             "two-letter name, in the Top Hit card and in the search field alike, so nothing was "
+             "tapped and the app may well be installed; back on the Home Screen — open it from "
+             "its Home Screen icon instead (phone_screenshot, then phone_tap)", True),
         ):
             cli.gestures = SimpleNamespace(
                 open_spotlight_checked=lambda: True,
@@ -679,7 +684,7 @@ def test_open_app_confirm():
 
         # the trip back to the Home Screen failed: the message must not claim it
         for result, code in (("deadline", 4), ("not_confirmed", 4), ("not_typed", 4),
-                             ("not_found", 1), ("no_top_hit", 1)):
+                             ("short_unreadable", 4), ("not_found", 1), ("no_top_hit", 1)):
             cli.gestures = SimpleNamespace(
                 open_spotlight_checked=lambda: True,
                 open_app=lambda name, spotlight_open=True, report=None, **kw:
@@ -2206,9 +2211,11 @@ def test_open_app_short_rows_and_deferred_restore():
                                       [HEADER, hit("Photos", 0.27)], []])
     assert res == "opened" and calls[1] == {}
     # F35: when only the Chrome suggestion row of the same name is read (the
-    # Top Hit label missed in every pass), nothing is tapped: not_found
+    # Top Hit label missed in every pass), nothing is tapped. A short name reports
+    # short_unreadable, not not_found: OCR misses one-letter labels, and on the
+    # 2026-11-06 device run "X" was installed (a long name still gets not_found)
     res, calls, taps = run("X", [[HEADER, SUGG, hit("X", 0.93)]] * 9)  # the field shows "X"
-    assert res == "not_found" and taps == []
+    assert res == "short_unreadable" and taps == []
 
     class Pasteboard:
         def __init__(self):
@@ -2524,6 +2531,56 @@ def test_clipboard_race_and_late_paste():
     res, left, homes, _ = run_late([[]] * 30, deadline_s=5.0)
     assert res == "deadline" and homes == [1]
 
+    # 2026-11-06 device run (iOS 27): the field also floats at ny ≈ 0.82, and OCR slips a letter
+    def at(text, ny):
+        return OCRHit(text=text, nx=0.33, ny=ny, confidence=0.9)
+    assert _field_echo([at("Q Shopee", 0.821)], "Shopee")           # the floating field
+    assert not _field_echo([at("Shopee", 0.70)], "Shopee")            # above the field zone
+    assert _field_echo([at("Q Zaxwv Nonexistent", 0.821)], "Zqxwv Nonexistent")   # q → a
+    assert _field_echo([at("Q Zqxw Nonexistent", 0.821)], "Zqxwv Nonexistent")    # v dropped
+    assert not _field_echo([at("Q Zaxw Nonexistant", 0.821)], "Zqxwv Nonexistent")  # three slips
+    assert _field_echo([at("Q Shopce", 0.93)], "Shopee")               # one slip from 6 letters
+    assert not _field_echo([at("Q Shapey", 0.93)], "Shopee")           # two slips: no
+    assert not _field_echo([at("Notas", 0.93)], "Notes")               # under 6 letters: exact only
+    assert not _field_echo([at("Y", 0.823)], "X") and _field_echo([at("X", 0.823)], "X")
+    assert not _field_echo([at("Q Search", 0.821)], "Shopee")          # the empty field's placeholder
+    #    a long name the Top Hit card lacks, echoed in the floating field: one more pass → not_found,
+    #    long before the late-paste limit (this was "not_typed" after ~15 s on the device)
+    FLOAT = at("Q Shopee", 0.821)
+    res, left, homes, t = run_late([[], OTHER + [FLOAT], OTHER + [FLOAT]] + [OTHER] * 10)
+    assert res == "not_found" and len(left) == 10 and homes == [1] and t < 5
+
+    # short names: no long wait for an echo OCR almost never reads — a short late window with at
+    # least one full pass (F33 above still finds the row there), then "short_unreadable"
+    from imctl.gestures import OPEN_LATE_SHORT_S
+
+    def run_short(typed, screens, deadline_s=None):
+        now, homes, reads = [0.0], [], [0]
+
+        def sleep(s):
+            now[0] += s
+
+        def read(**kw):
+            reads[0] += 1
+            return screens.pop(0) if screens else [HEADER]
+        res = open_app("X", spotlight_open=True, read_screen=read,
+                       luma=lambda: b"\x00" * 100, sleep=sleep,
+                       tap=lambda x, y: None, home=lambda: homes.append(1) or True,
+                       clear_text=lambda: None, type_text=lambda t: typed,
+                       clock=lambda: now[0], deadline_s=deadline_s)
+        return res, homes, now[0], reads[0]
+
+    for typed in (True, False):
+        res, homes, t, reads = run_short(typed, [], deadline_s=30.0)
+        assert res == "short_unreadable" and homes == [1], (typed, res)
+        assert t <= 0.3 + 1.5 + 1.0 + OPEN_LATE_SHORT_S + 1.0, t     # never the 15 s late window
+        assert reads >= 3                                                  # ≥ one full short pass
+    #    the budget still wins: out of time → deadline, not short_unreadable
+    res, homes, _, _ = run_short(True, [], deadline_s=2.0)
+    assert res == "deadline" and homes == [1]
+    #    long names keep the full late window (unchanged)
+    assert OPEN_LATE_SHORT_S < OPEN_LATE_PASTE_S
+
 
 def test_screenshot_default_path_and_sigterm():
     """Review follow-ups: a screenshot taken without a path outlives the
@@ -2645,36 +2702,6 @@ def test_bring_front_waits_for_a_frame():
             setattr(mod, name, value)
 
 
-if __name__ == "__main__":
-    test_denormalize()
-    test_center()
-    test_ease_curve()
-    test_parser_builds()
-    test_parse_overlay()
-    test_choose_app_hit()
-    test_find_app_hit()
-    test_short_app_names()
-    test_mean_abs_diff()
-    test_open_spotlight_checked()
-    test_open_app_confirm()
-    test_type_text_confirm()
-    test_scroll_steps()
-    test_scroll_checked()
-    test_expect_guard()
-    test_capture_integrity()
-    test_focus_guard()
-    test_overlay_hover_controls()
-    test_resume_never_clicks_window_controls()
-    test_is_frontmost_fresh()
-    test_sweep_ocr_helpers()
-    test_short_names_sweep_pass()
-    test_type_single_char_restore()
-    test_frames_private_and_deleted()
-    test_open_app_short_rows_and_deferred_restore()
-    test_clipboard_race_and_late_paste()
-    test_screenshot_default_path_and_sigterm()
-    test_bring_front_waits_for_a_frame()
-    print("all smoke tests passed")
 
 
 def test_watch_late_paste_and_type_messages():
@@ -3800,3 +3827,31 @@ def test_device_run_frame_diff_alone_is_not_typed():
     finally:
         (cli._require_live, cli._require_expect, cli.input.type_text,
          cli._watch_late_paste) = real
+
+
+def test_page_swipes_start_above_the_dock_f45():
+    """F45: a Home Screen page swipe must not start on an icon row.
+
+    iPhone Mirroring delivers a mouse drag as pointer input; one that starts on an app
+    icon picks the icon up (device run 2026-11-07: two folders made by page swipes at
+    mid-height). Page swipes start in the strip above the Dock and stay level in it.
+    """
+    from imctl import gestures
+    seen = []
+    real = gestures.inp.swipe
+    try:
+        gestures.inp.swipe = lambda fx, fy, tx, ty, duration_ms=300: seen.append((fx, fy, tx, ty))
+        gestures.page_left()
+        gestures.page_right()
+    finally:
+        gestures.inp.swipe = real
+    assert seen == [(0.9, 0.8, 0.1, 0.8), (0.1, 0.8, 0.9, 0.8)], seen
+    assert all(0.78 <= fy <= 0.83 and fy == ty for _, fy, _, ty in seen)
+
+
+if __name__ == "__main__":
+    # every test_* function in this file, in file order (before 0.2.4 a hand-kept list ran 28 of 47)
+    _tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
+    for _t in _tests:
+        _t()
+    print(f"all smoke tests passed ({len(_tests)})")

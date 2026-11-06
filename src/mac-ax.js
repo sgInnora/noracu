@@ -1414,7 +1414,16 @@ function opInsertText(req) {
   const secure = v.AXSubrole === 'AXSecureTextField';
   const before = typeof v.AXValue === 'string' ? v.AXValue : null;
   const beforeLen = attr(el, 'AXNumberOfCharacters');
-  const beforeSel = JSON.stringify(attr(el, 'AXSelectedTextRange'));
+  const selBefore = attr(el, 'AXSelectedTextRange');
+  const beforeSel = JSON.stringify(selBefore);
+  if (req.replace && !secure && sameText(before, text)) {
+    return { ok: true, mechanism: 'semantic', via: 'AXValue', how, role: v.AXRole, delivery: 'not_delivered', retry: 'safe', reason: 'already', note: `${label} already shows exactly this text — nothing sent` };
+  }
+  // R36: appending through AXValue rewrites the whole value; when the value cannot be read, that would
+  // replace what is there with the text — refuse instead
+  if (!req.replace && !canSel && typeof before !== 'string' && !secure) {
+    return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `${label} takes text only by rewriting its whole value, and its value cannot be read — appending would replace what is there; nothing was sent`, details: { kind: 'value_unreadable' } }));
+  }
   let err, via;
   if (req.replace) { err = setAttr(el, 'AXValue', $(text)); via = 'AXValue'; }
   else if (canSel) { err = setAttr(el, 'AXSelectedText', $(text)); via = 'AXSelectedText'; }
@@ -1425,7 +1434,10 @@ function opInsertText(req) {
   let after = attr(el, 'AXValue');
   const base = { ok: true, mechanism: 'semantic', via, how, role: v.AXRole };
   if (secure || typeof after !== 'string') return Object.assign(base, { delivery: 'delivered_unverified', retry: 'unsafe', reason: secure ? 'secure_field' : 'value_unreadable' });
-  const isOk = (a) => typeof a === 'string' && (req.replace ? a === text : a !== before && a.indexOf(text) >= 0);
+  // CP: the value must be exactly what the write should give — the replaced text, the text over the
+  // selection that was there (AXSelectedText), or the old value plus the text (append)
+  const expect = req.replace ? text : via === 'AXSelectedText' ? expectedInsert(before, selBefore, text) : (before || '') + text;
+  const isOk = (a) => typeof a === 'string' && a !== before && expect !== null && sameText(a, expect);
   let moved = attr(el, 'AXNumberOfCharacters') !== beforeLen || JSON.stringify(attr(el, 'AXSelectedTextRange')) !== beforeSel;
   if (!isOk(after) && after === before && !moved) {
     for (let i = 0; i < 6 && now() < deadline; i++) {
@@ -1444,12 +1456,30 @@ function opInsertText(req) {
     // the caret or the length moved but the value reads the same: something happened, not shown to be the text
     return Object.assign(base, { delivery: 'delivered_unverified', retry: 'unsafe', reason: 'selection_moved' });
   }
+  // changed and the text is in it, but not as the write should have left it (or the insertion point
+  // could not be read): something was delivered, not shown to be this text
+  if (typeof after === 'string' && unifyNl(after).indexOf(unifyNl(text)) >= 0) {
+    return Object.assign(base, { delivery: 'delivered_unverified', retry: 'unsafe', reason: expect === null ? 'insertion_point_unreadable' : 'not_at_insertion_point' });
+  }
   return fail({ code: 'NOT_CONFIRMED', message: `${label} changed but does not show the text`, delivery: 'unknown', retry: 'unsafe' });
 }
 
 // after an accessibility write the app accepted, how long to look for the value to show it: the answer
 // only decides verified vs unverified (an unchanged value is still reported delivered_unverified)
 const WRITE_POLL_MS = 400;
+// CP (Y6): a text verdict needs the change itself. Texts compare with line endings unified (\r\n and \r
+// become \n); set_value also ignores leading and trailing white space. "The value now contains the text
+// somewhere" is never enough — the text may have been there before the write.
+// a finite decimal written out (Number("") is 0 and Number(" ") is 0: those are not numbers here)
+function decimalOrNull(s) { return /^\s*[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?\s*$/.test(String(s)) ? Number(s) : null; }
+function unifyNl(s) { return String(s).replace(/\r\n?/g, '\n'); }
+function sameText(a, b, trim) { return typeof a === 'string' && (trim ? unifyNl(a).trim() === unifyNl(b).trim() : unifyNl(a) === unifyNl(b)); }
+// what inserting text over the selected range r of before must give; null when before or r is unreadable
+function expectedInsert(before, r, text) {
+  if (typeof before !== 'string' || !r || typeof r.location !== 'number' || typeof r.length !== 'number') return null;
+  if (r.location < 0 || r.length < 0 || r.location + r.length > before.length) return null;
+  return before.slice(0, r.location) + text + before.slice(r.location + r.length);
+}
 function parseBool(s) {
   const t = String(s).trim().toLowerCase();
   if (['true', '1', 'on', 'yes', 'checked', 'selected', 'expanded', 'open'].indexOf(t) >= 0) return true;
@@ -1614,16 +1644,22 @@ function setValueCore(req, r) {
   if (settable(r.el, 'AXValue')) {
     const secure = v.AXSubrole === 'AXSecureTextField';
     const numeric = !secure && typeof v.AXValue === 'number';
+    const valNum = numeric ? decimalOrNull(val) : null;
+    if (!secure && v.AXValue !== null && v.AXValue !== undefined
+      && (valNum !== null ? v.AXValue === valNum : sameText(String(v.AXValue), val, true))) {
+      return done('not_delivered', { note: 'already that value — nothing sent', reason: 'already', value: typeof v.AXValue === 'string' ? v.AXValue.slice(0, 200) : v.AXValue });
+    }
     const beforeLen = attr(r.el, 'AXNumberOfCharacters');
     const beforeSel = JSON.stringify(attr(r.el, 'AXSelectedTextRange'));
-    const e = setAttr(r.el, 'AXValue', numeric && Number.isFinite(Number(val)) ? $.NSNumber.numberWithDouble(Number(val)) : $(val));
+    const e = setAttr(r.el, 'AXValue', valNum !== null ? $.NSNumber.numberWithDouble(valNum) : $(val));
     if (e !== 0) return fail(axCallError(e, 'AXValue'));
     const deadline = now() + WRITE_POLL_MS;
     sleep(150);
     if (secure) return done('delivered_unverified', { secure: true, reason: 'secure_field', via: 'AXValue' });
     let after = attr(r.el, 'AXValue');
     if (after === null || after === undefined) return done('delivered_unverified', { reason: 'value_unreadable', via: 'AXValue' });
-    const matchesVal = (a) => a !== null && a !== undefined && (String(a) === val || (numeric && Number(a) === Number(val)));
+    const matchesVal = (a) => a !== null && a !== undefined && JSON.stringify(a) !== JSON.stringify(v.AXValue)
+      && (valNum !== null ? Number(a) === valNum : sameText(String(a), val, true));
     let moved = attr(r.el, 'AXNumberOfCharacters') !== beforeLen || JSON.stringify(attr(r.el, 'AXSelectedTextRange')) !== beforeSel;
     if (!matchesVal(after) && JSON.stringify(after) === JSON.stringify(v.AXValue) && !moved) {
       for (let i = 0; i < 6 && now() < deadline; i++) {
@@ -2058,9 +2094,11 @@ function focusEvidence(appEl) {
   const v = readNode(f.el);
   if (v.__err) return null;
   const n = attr(f.el, 'AXNumberOfCharacters'), sel = attr(f.el, 'AXSelectedTextRange');
-  const val = typeof v.AXValue === 'string' ? vhash(v.AXValue) : null;
+  const raw = typeof v.AXValue === 'string' ? v.AXValue : null;
+  const val = raw !== null ? vhash(raw) : null;
   if (val === null && typeof n !== 'number' && !sel) return null;
-  return { el: f.el, key: JSON.stringify([val, typeof n === 'number' ? n : null, sel || null]) };
+  // raw and sel stay inside the engine process (CP: the paste is checked against the insertion point)
+  return { el: f.el, key: JSON.stringify([val, typeof n === 'number' ? n : null, sel || null]), raw, sel: sel || null };
 }
 const PASTE_MIN_HOLD_MS = 300;
 function opPaste(req) {
@@ -2144,18 +2182,28 @@ function opPaste(req) {
   // the clipboard stays ours for at least PASTE_MIN_HOLD_MS even then
   const holdMs = clamp(req.hold_ms, PASTE_MIN_HOLD_MS, 5000, 1000);
   const t0 = now();
-  let evidence = false;
+  // CP (Y6): evidence is the focused element's value becoming exactly the text pasted over the selection
+  // that was there; a change that does not match (or no readable insertion point) keeps waiting and
+  // ends delivered_unverified with the reason
+  let evidence = false, changed = false;
+  const expectAfter = ev0 ? expectedInsert(ev0.raw, ev0.sel, text) : null;
   const end = t0 + holdMs;
   while (now() < end) {
     sleep(100);
     const e = focusEvidence(appEl);
-    if (ev0 && e && same(e.el, ev0.el) && e.key !== ev0.key) { evidence = true; break; }
+    if (ev0 && e && same(e.el, ev0.el) && e.key !== ev0.key) {
+      changed = true;
+      // R36: the value itself must have changed — pasting over a selection that already held the same
+      // text leaves an identical value, and a moved caret alone is no proof that ⌘V was handled
+      if (expectAfter !== null && sameText(e.raw, expectAfter) && !sameText(e.raw, ev0.raw)) { evidence = true; break; }
+    }
   }
   if (evidence && now() - t0 < PASTE_MIN_HOLD_MS) sleep(PASTE_MIN_HOLD_MS - (now() - t0));
   // an app that does not answer may not have read the clipboard yet: leave our text there
   const hung = !evidence && readNode(appEl).__err === -25204;
   const restored = hung ? 'false (app_unresponsive)' : putBack(ours);
-  return { ok: true, delivery: evidence ? 'delivered_verified' : 'delivered_unverified', retry: 'unsafe', restored, front: target.name, chars: text.length };
+  const reason = evidence || !changed ? undefined : expectAfter === null ? 'insertion_point_unreadable' : sameText(expectAfter, ev0.raw) ? 'value_unchanged' : 'not_at_insertion_point';
+  return { ok: true, delivery: evidence ? 'delivered_verified' : 'delivered_unverified', retry: 'unsafe', restored, front: target.name, chars: text.length, reason };
 }
 
 // ── clipboard (read) ─────────────────────────────────────────────────────────────────────────────

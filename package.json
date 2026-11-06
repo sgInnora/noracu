@@ -1,6 +1,6 @@
 {
   "name": "noracu",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "mcpName": "io.github.sgInnora/noracu",
   "description": "Local MCP server: macOS apps and a browser by element index, plus iPhone Mirroring (experimental).",
   "type": "module",
@@ -12,6 +12,7 @@
     "start": "node src/server.mjs",
     "test": "node test/engine-unit.mjs && node test/e2e.mjs",
     "test:ci": "node test/engine-unit.mjs && NORACU_CI=1 node test/e2e.mjs",
+    "test:imctl": "cd imctl && ${NORACU_PYTHON:-python3} tests/test_smoke.py",
     "check": "node --check src/server.mjs && node --check src/mac-ax.js && node --check scripts/gen-tools.mjs && python3 -c \"import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]\" imctl/src/imctl/*.py",
     "prepublishOnly": "npm run check && node scripts/check-pack.mjs && node scripts/gen-tools.mjs && git diff --exit-code docs/tools.md"
   },

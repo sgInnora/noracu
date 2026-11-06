@@ -58,13 +58,18 @@ function argsCell(schema) {
   return parts.length ? parts.join(", ") : "—";
 }
 
-let md = `# Tool reference\n\n> Auto-generated from the running server (\`node scripts/gen-tools.mjs\`) — always in sync with the implementation.\n> noracu v${version} · ${tools.length} tools\n\n`;
+// annotations (0.2.5): hints for the client, not permissions
+// all four values: R read-only, D destructive, I idempotent, O open-world; – false, ? missing
+const hintsCell = (a = {}) => [["readOnlyHint", "R"], ["destructiveHint", "D"], ["idempotentHint", "I"], ["openWorldHint", "O"]]
+  .map(([k, c]) => (a[k] === true ? c : a[k] === false ? "–" : "?")).join(" ");
+
+let md = `# Tool reference\n\n> Auto-generated from the running server (\`node scripts/gen-tools.mjs\`) — always in sync with the implementation. Hints are the four MCP tool annotations each tool reports — R read-only, D destructive, I idempotent, O open-world, – false — hints for the client, not permissions.\n> noracu v${version} · ${tools.length} tools\n\n`;
 for (const L of layers) {
   const ts = tools.filter(t => t.name.startsWith(L.prefix));
   if (!ts.length) continue;
-  md += `## ${L.title}\n\n*${L.note}*\n\n| Tool | Arguments | Description |\n|---|---|---|\n`;
+  md += `## ${L.title}\n\n*${L.note}*\n\n| Tool | Arguments | Hints | Description |\n|---|---|---|---|\n`;
   for (const t of ts) {
-    md += `| \`${t.name}\` | ${argsCell(t.inputSchema)} | ${String(t.description || "").replace(/\|/g, "\\|").split("\n")[0]} |\n`;
+    md += `| \`${t.name}\` | ${argsCell(t.inputSchema)} | ${hintsCell(t.annotations)} | ${String(t.description || "").replace(/\|/g, "\\|").split("\n")[0]} |\n`;
   }
   md += "\n";
 }
