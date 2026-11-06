@@ -421,12 +421,22 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
   const req = JSON.parse(d); const say = (o) => process.stdout.write(JSON.stringify(o));
   const node = (name, i) => ({ d: 1, role: "AXButton", path: [i], fp: { role: "AXButton", subrole: "", id: "", name }, title: name, frame: [10 * i, 0, 10, 10], interactive: true });
   const base = { ok: true, app: "Fake", bundle_id: "test.fake", pid: 4242, surface: "window", complete: true, visited: 2, ms: 1, container: { kind: "window", wid: 1, title: "W", subrole: "", frame: [0, 0, 100, 100], n: 0 } };
-  if (req.op === "snapshot") return say({ ...base, nodes: [node("One", 0), node("Two", 1)] });
-  if (req.op === "find") return say({ ...base, nodes: [node("Three", 0), node("Four", 1)] });
+  const webAx = req.app === "ChromeNoWeb" ? { web_accessibility: "unsupported" } : req.app === "ChromeWeb" ? { web_accessibility: "exposed" } : {};
+  if (req.op === "snapshot") return say({ ...base, ...webAx, nodes: [node("One", 0), node("Two", 1)] });
+  if (req.op === "find") return say({ ...base, ...webAx, nodes: [node("Three", 0), node("Four", 1)] });
   if (req.op === "act") return say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["value"], surfaces: [], mechanism: "semantic", action: "AXPress", how: "path", role: "AXButton", title: req.target.fp.name });
   if (req.op === "physical_prep") return req.target.fp.name === "Two" ? say({ ok: false, code: "OCCLUDED", message: "a window of Other is on top", delivery: "not_delivered", retry: "safe" }) : say({ ok: true, point: [5, 5], hit: "reaches", before: {} });
   if (req.op === "observe_after") return say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["focus"], surfaces: [] });
-  if (req.op === "frontmost") return say({ ok: true, front: { pid: 777, name: "Other", bundle: "x.other" }, target: { pid: 4242, name: "Fake", bundle: "test.fake" }, match: false });
+  if (req.op === "frontmost") {
+    const o = { ok: true, front: { pid: 777, name: "Other", bundle: "x.other" }, target: { pid: 4242, name: "Fake", bundle: "test.fake" }, match: false };
+    // at: x >= 500 is under a notification banner, y < 30 is the menu bar, anything else is the frontmost app's window
+    if (req.at) o.top = req.at[0] >= 500 ? { pid: 999, owner: "NotificationCenter", layer: 23, wid: 9 } : req.at[1] < 30 ? { pid: 640, owner: "Window Server", layer: 24, wid: 1 } : { pid: 777, owner: "Other", layer: 0, wid: 5 };
+    return say(o);
+  }
+  if (req.op === "key") {
+    if (process.env.NORACU_TEST_KEY_REQ) fs.appendFileSync(process.env.NORACU_TEST_KEY_REQ, JSON.stringify(req) + "\\n");
+    return say({ ok: true, delivery: "delivered_unverified", retry: "unsafe" });
+  }
   if (req.op === "menu") {
     if (process.env.NORACU_TEST_MENU_REQ) fs.appendFileSync(process.env.NORACU_TEST_MENU_REQ, JSON.stringify(req) + "\\n");
     return say(JSON.parse(fs.readFileSync(process.env.NORACU_TEST_MENU_REPLY, "utf8")));
@@ -463,11 +473,13 @@ echo "home gesture sent"
 `, { mode: 0o700 });
   const menuReply = join(dir, "menu-reply.json");
   const menuReqLog = join(dir, "menu-req.jsonl");
+  const keyReqLog = join(dir, "key-req.jsonl");
   const s = await spawnServer({
     NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_AX_TIMEOUT_MS: "1500",
     NORACU_PYTHON: fakePy, NORACU_IMCTL_DIR: dir,
-    NORACU_TEST_MENU_REPLY: menuReply, NORACU_TEST_MENU_REQ: menuReqLog,
+    NORACU_TEST_MENU_REPLY: menuReply, NORACU_TEST_MENU_REQ: menuReqLog, NORACU_TEST_KEY_REQ: keyReqLog,
   });
+  const keyReqs = () => { try { return readFileSync(keyReqLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   const sent = () => { try { return readFileSync(clickLog, "utf8"); } catch { return ""; } };
   const imctlSent = () => { try { return readFileSync(imctlLog, "utf8"); } catch { return ""; } };
   const menuReqs = () => { try { return readFileSync(menuReqLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
@@ -490,6 +502,40 @@ echo "home gesture sent"
     // mac_drag: a covered drop target refuses the whole drag (invariant 6 for both ends)
     const dg = await s.call("mac_drag", { from_index: one, to_index: two });
     check("B5：mac_drag 落点被遮挡 → 整个拖动不发送", dg?.isError && /drop target/.test(say(dg)) && /occluded/.test(say(dg)) && !/dd:/.test(sent()), `${say(dg).slice(0, 80)} | cliclick: ${JSON.stringify(sent())}`);
+    // 0.2.1: raw x,y clicks ask the window server whose window is on top at the point before sending
+    const rx1 = await s.call("mac_click", { x: 100, y: 100 });
+    check("0.2.1：x,y 点击处最上层是前台应用的窗口 → 发送并写明顶层窗口", !rx1?.isError && /top window: "Other"/.test(say(rx1)) && /c:100,100/.test(sent()), `${say(rx1).slice(0, 90)} | cliclick: ${JSON.stringify(sent())}`);
+    const rx2 = await s.call("mac_click", { x: 600, y: 100 });
+    check("0.2.1：x,y 点击处被别的应用（通知横幅）盖住 → occluded，不发送", rx2?.isError && /^ERROR: occluded: 600,100 is covered by "NotificationCenter" \(window layer 23\), not "Other" \(the frontmost app\)/.test(say(rx2)) && /delivery=not_delivered, retry=safe/.test(say(rx2)) && !/c:600,100/.test(sent()), `${say(rx2).slice(0, 120)} | cliclick: ${JSON.stringify(sent())}`);
+    const rx3 = await s.call("mac_click", { x: 600, y: 120, force: true });
+    check("0.2.1：force:true 跳过顶层窗口检查并如实标注", !rx3?.isError && /unchecked: force/.test(say(rx3)) && /c:600,120/.test(sent()), `${say(rx3).slice(0, 90)} | cliclick: ${JSON.stringify(sent())}`);
+    const rx4 = await s.call("mac_click", { x: 100, y: 10 });
+    check("0.2.1：菜单栏（Window Server layer 24）算前台应用的 → 发送", !rx4?.isError && /top window: the menu bar \(Other\)/.test(say(rx4)) && /c:100,10/.test(sent()), `${say(rx4).slice(0, 90)} | cliclick: ${JSON.stringify(sent())}`);
+    const rx5 = await s.call("mac_click", { x: 110, y: 100, app: "Fake" });
+    check("0.2.1：app 指定的应用不在该点最上层 → occluded，并提示 app:\"Other\"", rx5?.isError && /covered by "Other", not "Fake"/.test(say(rx5)) && /app:"Other"/.test(say(rx5)) && !/c:110,100/.test(sent()), `${say(rx5).slice(0, 120)} | cliclick: ${JSON.stringify(sent())}`);
+    const rx6 = await s.call("mac_click", { element_index: one, force: true });
+    check("0.2.1：element_index 点击不接受 app / force（参数校验，不发送）", rx6?.isError && /apply to x,y clicks only/.test(say(rx6)), say(rx6).slice(0, 90));
+    // 0.2.1: web content refused and absent → a hint the model can act on; exposed anyway → no hint
+    const wa1 = jsonOf(await s.call("mac_ax_state", { app: "ChromeNoWeb" }));
+    const wa2 = jsonOf(await s.call("mac_ax_state", { app: "ChromeWeb" }));
+    const wf1 = jsonOf(await s.call("mac_find", { app: "ChromeNoWeb", role: "button" }));
+    check("0.2.1：web_accessibility unsupported → 附 web_accessibility_hint（browser_* / --force-renderer-accessibility）；exposed → 无 hint",
+      wa1.web_accessibility === "unsupported" && /browser_\*/.test(wa1.web_accessibility_hint) && /--force-renderer-accessibility/.test(wa1.web_accessibility_hint)
+        && wa2.web_accessibility === "exposed" && !("web_accessibility_hint" in wa2)
+        && wf1.web_accessibility === "unsupported" && /browser_\*/.test(wf1.web_accessibility_hint) && Array.isArray(wf1.matches),
+      JSON.stringify({ wa1: wa1.web_accessibility, wa2: wa2.web_accessibility, wf1: wf1.web_accessibility }));
+    // 0.2.1: named keys go through the engine as HID key events (Chrome's address bar ignored cliclick's Return);
+    // printable-character chords stay on cliclick
+    const k1 = await s.call("mac_key", { key: "return" });
+    const k2 = await s.call("mac_key", { key: "cmd-arrow-up" });
+    const k3 = await s.call("mac_key", { key: "cmd-c" });
+    const kr = keyReqs();
+    check("0.2.1：mac_key return / cmd-arrow-up 走引擎 HID 键事件（键码与 Fn/小键盘标志），cmd-c 仍走 cliclick",
+      !k1?.isError && /HID key event/.test(say(k1)) && !k2?.isError && !k3?.isError && !/HID key event/.test(say(k3))
+        && kr.length === 2 && kr[0].code === 36 && kr[0].mods.length === 0 && kr[0].fn_key === false
+        && kr[1].code === 126 && JSON.stringify(kr[1].mods) === '["cmd"]' && kr[1].fn_key === true && kr[1].numpad === true
+        && !/kp:return/.test(sent()) && /kd:cmd t:c ku:cmd/.test(sent()),
+      `${say(k1).slice(0, 60)} | engine: ${JSON.stringify(kr)} | cliclick: ${JSON.stringify(sent()).slice(-80)}`);
     // mutating vs read-only engine timeout labels (NORACU_AX_TIMEOUT_MS=1500)
     const sv = await s.call("mac_set_value", { element_index: one, value: "x" });
     check("B5：mac_set_value 超时 → ax_timeout 带 delivery=unknown, retry=unsafe", sv?.isError && /ax_timeout:/.test(say(sv)) && /\(delivery=unknown, retry=unsafe\)/.test(say(sv)), say(sv).slice(0, 100));

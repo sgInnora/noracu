@@ -274,6 +274,16 @@ function enableWebAccessibility(appEl) {
   if (setAttr(appEl, 'AXManualAccessibility', YES()) === 0) { sleep(600); return 'enabled'; }
   return 'unsupported';
 }
+// Google Chrome refuses AXManualAccessibility (-25205), yet exposes its pages when started with
+// --force-renderer-accessibility (device probe 2026-11-06: AXWebArea and the page's button readable,
+// while the setter still said unsupported). So for a
+// window the status says what the tree holds: 'exposed' when a web area is found under it. Other
+// surfaces cannot be judged and keep the setter's answer.
+function webAxStatus(setter, rootEl, rootPath, isWindow) {
+  if (setter !== 'unsupported' || !isWindow) return setter;
+  const w = walk(rootEl, rootPath, { depth: 60, maxNodes: 100000, budgetMs: 1500, maxVisit: 5000, find: { role: 'AXWebArea', limit: 1 }, pruneMenuBar: true, rootIsContainer: true });
+  return w.nodes.length ? 'exposed' : 'unsupported';
+}
 
 // ── containers (where a path starts) ─────────────────────────────────────────────────────────────
 function windowsOf(appEl) { return elemsOf(appEl, 'AXWindows'); }
@@ -874,7 +884,7 @@ function opSnapshot(req) {
   };
   if (req.root) out.root_path = basePath;
   if (winInfo) out.window = { title: winInfo.title, frame: winInfo.frame, n: winInfo.n, window_id: winInfo.wid };
-  if (webAx) out.web_accessibility = webAx;
+  if (webAx) out.web_accessibility = webAxStatus(webAx, root, basePath, surface === 'window');
   return out;
 }
 function containerOut(c) {
@@ -902,7 +912,8 @@ function opFind(req) {
   const app = appForRequest(req);
   if (!app) return fail(appNotFound(req));
   const appEl = appElement(app);
-  if (req.web_accessibility !== false && rendererOf(app) === 'chromium') enableWebAccessibility(appEl);
+  let webAx = null;
+  if (req.web_accessibility !== false && rendererOf(app) === 'chromium') webAx = enableWebAccessibility(appEl);
   let root, container, basePath = [];
   const surface = req.surface || 'window';
   if (surface === 'menubar') { const s = surfaceRoot(appEl, null, 'menubar'); if (s.error) return fail(s.error); root = s.el; container = { kind: 'menubar' }; }
@@ -911,7 +922,9 @@ function opFind(req) {
   const f = { role: req.role, title: req.title, value: req.value, id: req.id, text: req.text, exact: Boolean(req.exact), limit: clamp(req.limit, 1, 50, 10) };
   if (!(f.role || f.title || f.value || f.id || f.text)) return fail({ code: 'INVALID_ARGS', message: 'give at least one of role, title, value, id, text' });
   const w = walk(root, basePath, { depth: 60, maxNodes: 100000, budgetMs: clamp(req.budget_ms, 500, 20000, 8000), maxVisit: 30000, find: f, pruneMenuBar: surface !== 'menubar', rootIsContainer: true });
-  return { ok: true, app: app.name, bundle_id: app.bundle, pid: app.pid, surface, container: containerOut(container), nodes: w.nodes, complete: w.complete, visited: w.visited };
+  const out = { ok: true, app: app.name, bundle_id: app.bundle, pid: app.pid, surface, container: containerOut(container), nodes: w.nodes, complete: w.complete, visited: w.visited };
+  if (webAx) out.web_accessibility = webAxStatus(webAx, root, basePath, surface === 'window');
+  return out;
 }
 
 function opGet(req) {
@@ -1178,6 +1191,8 @@ function hitTest(target, x, y) {
 function opFrontmost(req) {
   const f = frontApp();
   const out = { ok: true, front: f ? { pid: f.pid, name: f.name, bundle: f.bundle } : null };
+  // at: [x, y] also reports whose window is on top at that point (raw-coordinate clicks check it first)
+  if (Array.isArray(req.at) && req.at.length === 2 && req.at.every(v => typeof v === 'number' && isFinite(v))) out.top = cgTopAt(req.at[0], req.at[1]);
   if (req.pid !== undefined || req.app) {
     const t = req.pid !== undefined ? runningApps().find(a => a.pid === Number(req.pid)) || null : findApp(req.app);
     out.target = t ? { pid: t.pid, name: t.name, bundle: t.bundle } : null;
@@ -2374,7 +2389,89 @@ function opMenu(req) {
   return v;
 }
 
+// A named key (return, esc, tab, arrows, F-keys…) with optional modifiers, posted to the frontmost app at
+// the HID level from a HID-state event source, the way a hardware keyboard sends it: each modifier pressed
+// (a flags-changed event), the key down and up 20 ms apart, the modifiers released last-first. Chrome's
+// address bar ignored cliclick 5.1's Return (0 of 2) and took these events (2 of 2) — iTerm2 Claude Code run
+// 2026-11-06. Flags are always set explicitly: a key event that carries a modifier flag without the
+// modifier's own press and release leaves the system believing it is still held (seen on the device run:
+// Cmd after cmd-arrow-up, Shift after shift-tab). Navigation and F-keys carry the Fn flag, arrows the
+// keypad flag, as hardware sends them. The server's focus guard runs before this op.
+const KEY_FLAGS = { cmd: 0x100000, shift: 0x20000, alt: 0x80000, ctrl: 0x40000, fn: 0x800000 };
+const MOD_KEYCODES = { cmd: 55, shift: 56, alt: 58, ctrl: 59 }; // left-hand keys; fn is a flag only (pressing Fn alone can switch input source)
+const FLAG_NUMPAD = 0x200000;
+const HELD_MASK = KEY_FLAGS.cmd | KEY_FLAGS.shift | KEY_FLAGS.alt | KEY_FLAGS.ctrl;
+const EV_FLAGS_CHANGED = 12;
+function postKey(code, modKeys, extra) {
+  const src = $.CGEventSourceCreate($.kCGEventSourceStateHIDSystemState);
+  const ev = (k, down, flags, flagsChanged) => {
+    const e = $.CGEventCreateKeyboardEvent(src, k, down);
+    if (!e) return null;
+    if (flagsChanged) $.CGEventSetType(e, EV_FLAGS_CHANGED);
+    $.CGEventSetFlags(e, flags);
+    return e;
+  };
+  let flags = 0, ok = true;
+  const held = [];
+  for (const [k, f] of modKeys) {
+    const e = ev(k, true, flags | f, true);
+    if (!e) { ok = false; break; }
+    flags |= f; $.CGEventPost($.kCGHIDEventTap, e); held.push([k, f]); sleep(5);
+  }
+  if (ok) {
+    const down = ev(code, true, flags | extra, false), up = ev(code, false, flags | extra, false);
+    if (down && up) { $.CGEventPost($.kCGHIDEventTap, down); sleep(20); $.CGEventPost($.kCGHIDEventTap, up); }
+    else ok = false;
+  }
+  for (const [k, f] of held.reverse()) {
+    flags &= ~f;
+    const e = ev(k, false, flags, true);
+    if (e) $.CGEventPost($.kCGHIDEventTap, e);
+    sleep(5);
+  }
+  return ok;
+}
+// The modifiers this call pressed that the system still believes held (CGEventSourceFlagsState, HID
+// state) get one more release each; modifiers the user is holding on the keyboard are left alone.
+// Returns the names still held after that (normally none).
+function releaseStuckModifiers(names) {
+  const mask = names.reduce((a, m) => a | KEY_FLAGS[m], 0) & HELD_MASK;
+  const now = () => Number($.CGEventSourceFlagsState($.kCGEventSourceStateHIDSystemState)) & mask;
+  if (!mask || !now()) return [];
+  const src = $.CGEventSourceCreate($.kCGEventSourceStateHIDSystemState);
+  for (const m of names) {
+    if (!MOD_KEYCODES[m]) continue;
+    const e = $.CGEventCreateKeyboardEvent(src, MOD_KEYCODES[m], false);
+    if (!e) continue;
+    $.CGEventSetType(e, EV_FLAGS_CHANGED); $.CGEventSetFlags(e, 0); $.CGEventPost($.kCGHIDEventTap, e);
+  }
+  sleep(30);
+  const left = now();
+  return names.filter(m => MOD_KEYCODES[m] && (left & KEY_FLAGS[m]));
+}
+function opKey(req) {
+  const code = req.code;
+  if (!Number.isInteger(code) || code < 0 || code > 127) return fail(notDelivered({ code: 'INVALID_ARGS', message: 'key: code must be an integer 0-127' }));
+  const mods = Array.isArray(req.mods) ? req.mods : [];
+  const modKeys = [];
+  let extra = 0;
+  for (const m of mods) {
+    if (!Object.prototype.hasOwnProperty.call(KEY_FLAGS, m)) return fail(notDelivered({ code: 'INVALID_ARGS', message: `key: unknown modifier "${String(m).slice(0, 20)}"` }));
+    if (m === 'fn') extra |= KEY_FLAGS.fn;
+    else modKeys.push([MOD_KEYCODES[m], KEY_FLAGS[m]]);
+  }
+  if (req.fn_key === true) extra |= KEY_FLAGS.fn;
+  if (req.numpad === true) extra |= FLAG_NUMPAD;
+  const sent = postKey(code, modKeys, extra);
+  const stuck = releaseStuckModifiers(mods.filter(m => m !== 'fn'));
+  if (!sent) return fail(notDelivered({ code: 'ACTION_FAILED', message: 'key: could not create the keyboard events', details: stuck.length ? { modifiers_still_held: stuck } : undefined }));
+  const out = { ok: true, delivery: 'delivered_unverified', retry: 'unsafe', flags: modKeys.reduce((a, [, f]) => a | f, 0) | extra };
+  if (stuck.length) out.note = `the system still reports ${stuck.join('+')} held — press and release it on the keyboard`;
+  return out;
+}
+
 const OPS = {
+  key: opKey,
   snapshot: opSnapshot, find: opFind, get: opGet, apps: opApps, windows: opWindows, status: opStatus,
   act: opAct, physical_prep: opPhysicalPrep, observe_after: opObserveAfter, insert_text: opInsertText, set_value: opSetValue, scroll_prep: opScrollPrep,
   menu: opMenu, wait: opWait, frontmost: opFrontmost, app_info: opAppInfo, app_ctl: opAppCtl, app_wait: opAppWait, window_op: opWindowOp, clipboard: opClipboard, paste: opPaste, notifications: opNotifications,

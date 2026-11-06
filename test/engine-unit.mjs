@@ -1118,4 +1118,83 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     JSON.stringify(rAmb));
 }
 
+{
+  // 0.2.1: frontmost with at:[x,y] also reports the topmost window there (raw-coordinate click guard); without
+  // at, or with a malformed one, there is no top key — the server then refuses the click (focus_unknown)
+  const ctx = loadEngine(ENGINE);
+  installApp(ctx, { pid: 97, name: "Front", windows: [] });
+  const seen = [];
+  ctx.cgTopAt = (x, y) => { seen.push([x, y]); return { pid: 98, owner: "Banner", layer: 23, wid: 3 }; };
+  const withAt = ctx.opFrontmost({ at: [12, 34] });
+  const without = ctx.opFrontmost({});
+  const bad = ctx.opFrontmost({ at: ["12", 34] });
+  check("0.2.1: opFrontmost at:[x,y] → top from cgTopAt; no at / malformed at → no top",
+    withAt.top?.owner === "Banner" && withAt.front?.pid === 97 && !("top" in without) && !("top" in bad) && JSON.stringify(seen) === "[[12,34]]",
+    JSON.stringify({ withAt, without, bad, seen }));
+}
+
+{
+  // 0.2.1: opKey posts one key with its flags (modifiers, Fn, keypad); bad input is refused before posting
+  const ctx = loadEngine(ENGINE);
+  const posted = [];
+  const realPostKey = ctx.postKey;
+  ctx.postKey = (code, modKeys, extra) => { posted.push([code, modKeys, extra]); return true; };
+  const plain = ctx.opKey({ code: 36 });
+  const arrow = ctx.opKey({ code: 126, mods: ["cmd", "shift"], fn_key: true, numpad: true });
+  const badCode = ctx.opKey({ code: 200 });
+  const badMod = ctx.opKey({ code: 36, mods: ["hyper"] });
+  ctx.postKey = () => false;
+  const noEvent = ctx.opKey({ code: 53 });
+  check("0.2.1: opKey modifier keys (cmd 55, shift 56) + Fn/keypad flags, invalid code / modifier refused unsent, event failure not_delivered",
+    plain.ok && plain.flags === 0 && arrow.ok && arrow.flags === (0x100000 | 0x20000 | 0x800000 | 0x200000)
+      && JSON.stringify(posted) === JSON.stringify([[36, [], 0], [126, [[55, 0x100000], [56, 0x20000]], 0xA00000]])
+      && badCode.ok === false && badCode.code === "INVALID_ARGS" && badCode.delivery === "not_delivered"
+      && badMod.ok === false && badMod.code === "INVALID_ARGS"
+      && noEvent.ok === false && noEvent.code === "ACTION_FAILED" && noEvent.delivery === "not_delivered" && noEvent.retry === "safe",
+    JSON.stringify({ plain, arrow, posted, badCode: badCode.code, badMod: badMod.code, noEvent }));
+
+  // the real postKey: modifiers pressed first (flags-changed, cumulative flags), the key down/up with all
+  // flags, modifiers released last-first ending at flags 0 — so nothing is left "held" (device run 2026-11-06)
+  const evs = [];
+  let nextId = 0;
+  const made = new Map();
+  ctx.$.CGEventCreateKeyboardEvent = (_src, k, down) => { const e = { id: ++nextId, k, down, type: down ? "down" : "up", flags: null }; made.set(e.id, e); return e; };
+  ctx.$.CGEventSetType = (e, t) => { if (t === 12) e.type = "flags"; };
+  ctx.$.CGEventSetFlags = (e, f) => { e.flags = f; };
+  ctx.$.CGEventPost = (_tap, e) => { evs.push(`${e.type}:${e.k}:${e.flags.toString(16)}`); };
+  const okPost = realPostKey(126, [[55, 0x100000], [56, 0x20000]], 0xA00000);
+  check("0.2.1: postKey sequence cmd↓ shift↓ key↓↑ shift↑ cmd↑, flags explicit and back to 0",
+    okPost && JSON.stringify(evs) === JSON.stringify(["flags:55:100000", "flags:56:120000", "down:126:b20000", "up:126:b20000", "flags:56:100000", "flags:55:0"]),
+    JSON.stringify(evs));
+  evs.length = 0;
+  realPostKey(36, [], 0);
+  check("0.2.1: postKey plain key sets flags 0 explicitly (never inherits a stale modifier)",
+    JSON.stringify(evs) === JSON.stringify(["down:36:0", "up:36:0"]), JSON.stringify(evs));
+}
+
+{
+  // 0.2.1: web_accessibility reports what the window holds — Chrome refuses AXManualAccessibility but may
+  // expose its pages anyway (Chrome started with --force-renderer-accessibility)
+  const make = (withWeb) => {
+    const ctx = loadEngine(ENGINE);
+    const page = withWeb ? [el("AXWebArea", { title: "Page", frame: [0, 80, 400, 300] }, [el("AXButton", { title: "Press me", frame: [10, 90, 80, 20] })])] : [];
+    const win = el("AXWindow", { title: "Chrome", frame: [0, 0, 400, 400], wid: 60 }, [el("AXGroup", { frame: [0, 0, 400, 400] }, [el("AXTextField", { title: "Address and search bar", frame: [10, 40, 300, 22] }), ...page])]);
+    installApp(ctx, { pid: 99, name: "Google Chrome", windows: [win], focusedWindow: win });
+    ctx.rendererOf = () => "chromium";
+    ctx.setAttr = (_e, name) => (name === "AXManualAccessibility" ? -25205 : 0);
+    return ctx;
+  };
+  const exposed = make(true).opSnapshot({ app: "Google Chrome" });
+  const refused = make(false).opSnapshot({ app: "Google Chrome" });
+  const findExposed = make(true).opFind({ app: "Google Chrome", role: "button" });
+  const findRefused = make(false).opFind({ app: "Google Chrome", role: "button" });
+  const focusedOnly = make(false).webAxStatus("unsupported", null, [], false);
+  const enabled = make(false).webAxStatus("enabled", null, [], true);
+  check("0.2.1: setter unsupported + web area in the window → 'exposed'; none → 'unsupported' (snapshot and find); non-window or enabled unchanged",
+    exposed.web_accessibility === "exposed" && refused.web_accessibility === "unsupported"
+      && findExposed.web_accessibility === "exposed" && findExposed.nodes.length === 1 && findRefused.web_accessibility === "unsupported"
+      && focusedOnly === "unsupported" && enabled === "enabled",
+    JSON.stringify({ exposed: exposed.web_accessibility, refused: refused.web_accessibility, findExposed: findExposed.web_accessibility, findRefused: findRefused.web_accessibility, focusedOnly, enabled }));
+}
+
 done("engine unit");

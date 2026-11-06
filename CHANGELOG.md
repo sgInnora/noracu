@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.2.1] — 2026-11-06
+
+### Fixed
+- `mac_click` at raw x,y no longer lands on whatever covers the point. Before
+  sending, it checks that the topmost on-screen window there belongs to the new
+  optional `app` (default: the frontmost app; the menu bar counts as the
+  frontmost app's). Otherwise it returns `occluded`, naming the owner and
+  window layer of what covers the point, and sends nothing. `force: true`
+  skips the check. `app` and `force` are refused together with
+  `element_index`, which is already re-identified and hit-tested.
+- `mac_key` Return now works in Chrome's address bar. Named keys (return, esc,
+  tab, space, delete, arrows, home/end, page keys, F1–F16) are sent as HID
+  key events by the accessibility engine instead of by cliclick: Chrome's
+  address bar ignored cliclick 5.1's Return. With modifiers, each modifier is
+  pressed and released around the key, so no modifier is left held
+  afterwards. Chords on a character key (`cmd-c`) still go through cliclick.
+  Tested on macOS 27.2 with a separate Chrome instance: the address bar
+  navigated, and arrow-down, cmd-arrow-up, esc, return and shift-tab arrived
+  with the right key and modifiers; no modifier was held afterwards.
+- `web_accessibility` in `mac_ax_state` and `mac_find` results now says what
+  the window holds. Google Chrome refuses `AXManualAccessibility`, so 0.2.0
+  reported `unsupported` even when Chrome's pages were readable (Chrome
+  started with `--force-renderer-accessibility`). In that case it now reports
+  `exposed`. When the app refuses and no web content is found, it reports
+  `unsupported` with a `web_accessibility_hint`: use the `browser_*` tools, or
+  restart Chrome with `--force-renderer-accessibility` and read again. `mac_find` now reports
+  `web_accessibility` too.
+
 ## [0.2.0] — 2026-11-06
 
 ### Added

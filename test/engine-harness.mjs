@@ -14,6 +14,7 @@ export function loadEngine(path) {
   };
   const dollar = new Proxy(function () {}, {
     get: (t, k) => (k in fns ? fns[k] : () => 0),
+    set: (t, k, v) => { fns[k] = v; return true; }, // a test can stub one bridge function: ctx.$.CGEventPost = …
     apply: (t, s, a) => a[0],
   });
   const ctx = vm.createContext({
