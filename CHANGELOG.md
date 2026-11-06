@@ -1,5 +1,414 @@
 # Changelog
 
+## [0.2.0] — 2026-11-06
+
+### Added
+- The Mac layer reads and acts through a new accessibility engine,
+  `src/mac-ax.js`: a static JXA script that calls the macOS Accessibility API
+  (`AXUIElement*`) directly instead of going through System Events. Reading a
+  Finder window of about 500 elements took about 0.15 s on the test Mac
+  (macOS 27.2), so the default depth is now 12 instead of 3. Requests reach it
+  as JSON on stdin, never in argv.
+- `mac_ax_state` takes `interactive` (only actionable elements), `compact`
+  (default true: skips empty layout wrappers), `skeleton` plus `root` (map a
+  dense app shallowly, then drill into one element; the drill extends the same
+  snapshot), `surface` (`window`, `menubar`, `menu`, `sheet`, `alert`,
+  `dialog`, `popover`, `focused`, `app`), `window` (index or title) and
+  `max_nodes`. Each element carries `d` (depth), `states` and `actions`; the
+  result carries `snapshot_id` and `complete`. Several windows and none focused
+  is `ambiguous_window` with the list, instead of reading an arbitrary one.
+- Electron and Chromium apps get their web accessibility tree switched on
+  (`AXManualAccessibility` only — never `AXEnhancedUserInterface`, which alters
+  window behaviour) when read unless `web_accessibility: false` or
+  `NORACU_READ_ONLY=1`; `mac_ax_state` and `mac_find` take `web_accessibility`
+  and report the outcome.
+- New tools: `mac_find` (search by role, title, value, text or AXIdentifier),
+  `mac_get` (read one element live: full value, states, actions, settable
+  attributes), `mac_status` (Accessibility and Screen Recording permission,
+  cliclick, displays), `mac_apps` (running apps) and `mac_windows` (windows
+  with CGWindowID and bounds, plus displays). All five are observation tools
+  and are allowed under `NORACU_READ_ONLY=1`.
+
+- `mac_click` with an `element_index` uses the element's own accessibility
+  action when it has one (press, show menu, select): no pointer movement, no
+  focus change, and it works on windows in the background. Without one it
+  clicks physically, but only after a hit test shows that the point reaches the
+  element; otherwise it returns `occluded` with what is on top and sends
+  nothing. `mechanism` (`auto`, `semantic`, `physical`) forces one path; a
+  semantic attempt that fails is reported, not retried physically.
+- Every Mac action result says whether it was delivered
+  (`delivered_verified` when a change was observed, `delivered_unverified`,
+  `not_delivered`, `unknown`) and whether a retry is safe, and names sheets,
+  dialogs or menus it opened. The engine reads the element and its app again
+  after acting, because accessibility return codes alone do not prove an
+  effect (Finder reports success for an action that does not exist).
+- `mac_type` inserts text through accessibility (`AXSelectedText` at the
+  caret, or the whole value with `replace: true`) into an `element_index` or
+  the focused element: IME-safe, the clipboard is untouched, it works in a
+  background app, and the value is read back. It falls back to keystrokes only
+  when accessibility reports no focused element or the focus is a text view it
+  cannot write (such as a terminal); a focused button, list or sheet gets no
+  keystrokes.
+- New tool `mac_set_value`: text fields, checkboxes, switches and radio
+  buttons (idempotent: nothing is sent when the state already matches),
+  disclosure triangles and expandable rows, selectable rows, cells and tabs,
+  pop-up and menu buttons and combo boxes (picks exactly one matching option,
+  else closes the menu again and lists the options), sliders and steppers.
+- `mac_scroll` takes an `element_index`: a scroll area is scrolled at its own
+  center (and the result says when the position did not change); any other
+  element is scrolled into view.
+- `mac_key` refuses chords that quit, log out, lock, force-quit, delete
+  immediately or empty the Trash (`cmd-q`, `alt-cmd-q`, `cmd-shift-q`,
+  `cmd-alt-esc`, `ctrl-cmd-q`, `alt-cmd-delete`, `cmd-shift-delete`, …) unless
+  `force: true`.
+
+- New tool `mac_wait`: waits for a window, text, an element state, a menu, a
+  sheet or dialog, an app starting or ending, or a new notification, polling
+  accessibility inside one process instead of sleeping; on timeout it returns
+  what it last saw.
+- New tool `mac_app`: launch (attaches to a running instance; starts in the
+  background unless `activate`; waits for a window), activate, hide, unhide,
+  quit. Quit is verified by the process ending; a save dialog that keeps the app
+  running is reported, and `force: true` force-quits. Finder, the Dock,
+  loginwindow and other session processes, and the MCP host itself, are never
+  quit.
+- `mac_app` launch with `cdp_port` (needs `NORACU_ALLOW_CDP=1`) starts a
+  Chromium or Electron app fresh with a DevTools port on 127.0.0.1, and
+  `browser_launch` with `cdp_port` attaches Playwright to it, so `browser_*`
+  drive its web contents while menus, dialogs and windows stay on `mac_*`.
+  `browser_close` then only disconnects. Chrome-family browsers get a profile
+  of their own under `~/.noracu/cdp-profiles/` (Chrome refuses remote debugging
+  on the default profile); an Electron app keeps its own data. An app that is
+  already running is refused rather than quit.
+- New tool `mac_window`: focus, raise, minimize, restore, move, resize,
+  maximize (the display's visible area), fullscreen, exit fullscreen — by
+  CGWindowID from `mac_windows` or by app + window; verified by reading the
+  window again.
+- `mac_screenshot` captures one window (`window_id`, also when covered) or a
+  given display (`display`).
+- New tool `mac_clipboard_read`: file paths, an image, or text (capped).
+  An item marked concealed by a password manager
+  (`org.nspasteboard.ConcealedType`) is never returned.
+- New tool `mac_notifications`: lists banners, alerts and an open Notification
+  Center (id, app, title, subtitle, body, actions, plus `center_opened` and
+  `center_was_open` when `open_center: true`), and dismisses or acts on one by
+  its non-empty id (`notification_not_found` when gone), or by index plus a
+  non-empty expected app or title that is re-checked.
+- `mac_ax_state` and `mac_find` take `window_id`.
+
+- `mac_menu_command` presses the item through the accessibility engine, by
+  title or by a `Menu > Item` path, without the app being frontmost, and
+  reports delivery; an unknown item is now an error. `phone_home` and
+  `phone_app_switcher` use the same path for the iPhone Mirroring menu.
+- `initialize` returns `instructions`: the observe → act → verify loop and the
+  delivery / retry rules, for clients that show them to the model.
+- `NORACU_TRACE=<file>` writes one JSON line per tool call (`{ts, tool, args,
+  ms, error, code}`): tool, argument names and sizes (never their text),
+  duration, error flag and error code prefix — never result text or error
+  messages — opening the file `0600` with `O_NOFOLLOW` so a symlink is refused.
+
+### Changed
+- An element is re-identified only inside the window it was seen in, by that
+  window's CGWindowID: an index from a window that has since closed is
+  `element_no_longer_valid`, even when another window of the app looks the
+  same.
+- `mac_click` / `mac_drag` with an index no longer require the snapshot's app
+  to be frontmost; the element is re-identified and, for a physical click,
+  hit-tested instead.
+- An `element_index` is backed by identity evidence instead of a stored point:
+  process, container (window by CGWindowID, open menu, menu bar or app), child
+  path, role, subrole, AXIdentifier, label (never the value), frame relative to
+  the container, the labels of its ancestors, the child count along its path,
+  and the texts of its item (static text and link labels under it or its
+  nearest ancestor below the page, toolbar or pane level; a text field's value
+  only when it is table content such as a file name; an item that two
+  look-alikes share is not used). An element found at its path must agree on
+  all of it (the child counts may differ only when its own item vouches for
+  it); a labelled element may be found by search only near where it was and in
+  the same item (a re-sorted list resolves to the same item; a look-alike that
+  arrived since is not taken for it), an unlabelled one never. Digits in a
+  unique element's item are ignored, so a character counter next to Send does
+  not invalidate it. A drilled (`root`) snapshot or a filtered `mac_find` cannot know
+  whether an element is unique, so its elements are checked as look-alikes. So
+  a row inserted above, a closed panel or a closed pop-up menu gives
+  `element_no_longer_valid`, never a look-alike (a search no longer enters the
+  menu bar, whose closed items can still be pressed).
+- Mac `element_index` values are unique for the life of the server: every
+  snapshot continues one counter, so an index from an earlier snapshot keeps
+  naming its own element after a later `mac_find` or `mac_ax_state`.
+  `snapshot_id` is optional and must match the index. A drill (`root`) numbers
+  the children from where the root is now.
+- `mac_ax_state` / `mac_find` with `window_id` alone read that window's app;
+  `mac_find` `text` with `exact:true` matches the label or the value as a whole
+  string, and `id` is a substring match unless
+  `exact:true`, as documented.
+- A window or root that does not answer accessibility is `app_unresponsive`, not
+  an empty tree reported as complete.
+- Physical clicks fail closed: when the accessibility hit test is inconclusive (an
+  error, nothing there, or only a container of the element), the click is sent
+  only if the topmost on-screen window at the point belongs to the element's
+  app; otherwise `occluded` / `not_actionable`, nothing sent.
+- `mac_drag` with indexes re-identifies and hit-tests the drop target as well as
+  the start point.
+- The focus guard (`app` on `mac_key`, `mac_paste`, `mac_type`) compares
+  processes, so a bundle id or `.app` path works; it reads the frontmost app
+  through the accessibility engine instead of System Events (no Automation
+  prompt, no blocking call). `mac_type` with `mechanism: "physical"` and an
+  `element_index` types only if the click left the element's app in front.
+- cliclick runs asynchronously under a timer; a cliclick that fails after it
+  started is reported `action_failed` with `delivery=unknown, retry=unsafe`
+  (only a cliclick that never started is `not_delivered`).
+- The stale-server note also fires when `src/mac-ax.js` changed on disk.
+- `NORACU_READ_ONLY=1` allows 18 tools (the six new Mac observation tools,
+  `mac_wait` included, except `mac_wait` with `condition: "notification"` is
+  refused and `mac_ax_state` / `mac_find` do not enable `web_accessibility` on
+  apps); `mac_clipboard_read` and `mac_notifications` stay outside it.
+- `tools/list` emits a `required` array derived from non-optional arguments on
+  every tool that has any, and every tool checks its arguments (types, ranges,
+  allowed values, string lengths) before anything runs.
+- Accessibility failures read `permission_denied: …` instead of the raw
+  AppleScript error -1719.
+
+### Fixed
+- The server never blocks on a child process any more: screenshots, scroll
+  wheel events, `open`, `ps` and the Chromium download run asynchronously under
+  a timer, so `ping`, `tools/list` and other calls keep being answered while
+  one runs. Two `browser_launch` calls during a first-run Chromium download
+  share one download.
+- Observation tools (`mac_ax_state`, `mac_find`, `mac_get`, `mac_windows`,
+  `mac_apps`, `mac_screenshot`, `mac_status`) and `mac_wait` no longer join
+  the input queue: they wait only for the inputs queued before them, so they
+  see the state after those inputs, and later inputs are not held up behind
+  them; if those inputs keep the queue busy past the queue limit they return
+  `input_busy` instead of reading too early. `mac_wait`'s timeout starts after
+  that wait.
+- The server stops when the client closes its stdin instead of lingering, and
+  on SIGTERM / SIGINT / SIGHUP shuts down in order: queued calls are dropped
+  without acting, no new child process starts (a fallback step cannot act),
+  child processes get SIGTERM then SIGKILL after 1.5 s, browsers — also one
+  still starting — are closed, and it exits within 3 s. Two `browser_launch`
+  calls at once share one launch.
+- A line that is not JSON gets a JSON-RPC parse error (-32700) and a batch
+  gets -32600 ("batch is not supported") instead of no answer.
+- With `NORACU_PHONE_TIMEOUT_MS` above 45 s, a queued call waits as long as
+  the longest phone call ahead of it before giving up with `input_busy`.
+- An accessibility call to an app that does not answer gives up after 3 s for
+  every element, not only for the app element.
+- Accessibility engine timeouts report `delivery=unknown, retry=unsafe` on
+  every mutating operation (`mac_click`, `mac_set_value`, `mac_type`,
+  `mac_menu_command`, `mac_window`, `mac_app`, `mac_scroll` into view, and
+  mutating `mac_notifications` actions), while observation timeouts omit
+  delivery fields because nothing was sent.
+- Outer accessibility engine process timeouts include a 12 s margin above
+  `timeout_ms` so the engine is not killed while waiting for an element to
+  become actionable and settle.
+- Action verification ignores environment-only shifts (`frontmost`,
+  `focusedWindow`, `focus`) unless an element or surface property also changed,
+  reporting `delivered_unverified` instead of `delivered_verified`.
+- Post-action observation after a physical click or wheel scroll counts an
+  element as `gone` only when the element, window or app is actually absent;
+  unresponsive or failed reads report `delivered_unverified` with a note
+  instead.
+- Wheel scrolling on an element verifies delivery solely from `vscroll` /
+  `hscroll` changes, and notes an unchanged scroll position only when that
+  scroll check is unverified.
+- Accessibility writes and steps that already executed never report
+  `not_delivered` / `retry=safe`: `mac_type` and `mac_set_value` look for the
+  value to change for about 0.4 s before returning `not_confirmed`
+  (`delivery=delivered_unverified, retry=unsafe`); a caret that moved while the
+  value reads the same is `delivered_unverified`, never verified; partial slider/stepper loops
+  report `delivered_unverified` with the step count completed, and `mac_window`
+  `maximize` reports `delivered_unverified` if moving succeeded before resizing
+  failed.
+- `mac_window` `focus` reports `delivered_verified` only when the app is
+  frontmost and the target window itself reads focused or main.
+- `mac_set_value` treats mixed-state checkboxes as neither on nor off, pressing
+  up to twice until the requested state is reached instead of answering
+  "already off".
+- Pop-up and menu-button option matching in `mac_set_value` drops substring
+  matching (so `"One"` never picks `"None"`), matching exact, case-insensitive,
+  then normalized titles (collapsed whitespace and trailing ellipsis stripped).
+- `mac_wait` fails immediately with `app_not_found` on `window_gone`,
+  `text_gone`, `menu_closed` and `sheet_gone` when the app is not running at the
+  first check, keeps polling on `text_gone` when window selection is ambiguous,
+  and counts `element` `gone` as met only on absent-target errors rather than a
+  hung app.
+- `mac_key` states `delivery=delivered_unverified, retry=unsafe` in its result
+  text, and `mac_menu_command` documents that items reading disabled in closed
+  menus are still pressed and judged by before/after observation.
+- `phone_home` and `phone_app_switcher` require the iPhone Mirroring menu item
+  to be enabled (`require_enabled`), refuse with `mirror_not_live` when the
+  mirror is paused or not running, return `menu_unknown`
+  (`delivery=unknown, retry=unsafe`) without falling back to a swipe when the
+  menu call times out, and fall back to the `imctl` gesture only when the
+  English menu item is absent. Success output states only that the command or
+  gesture was `sent` (`screen not verified`), never that the phone is on the
+  Home Screen.
+- Non-import Python tracebacks from `imctl` are reported as
+  `imctl_error: <last line>` instead of `imctl unavailable` (kept for missing
+  Python or `pyobjc`), and `phone_longpress` passes `--duration` cleanly while
+  `imctl longpress` accepts both optional positional and `--duration` syntax.
+- Every `imctl` press/release pair (`tap`, `long_press`, `swipe`,
+  `app_switcher`, `scroll_trackpad` phase end, `press_key`, `clear_text`, and
+  Command chords) posts its release event in `finally:` so an exception or
+  `SIGTERM` never leaves a mouse button, key, `⌘` or trackpad scroll phase held
+  down.
+
+- Physical clicks and drags on a display left of or above the main one go to
+  the right place: cliclick reads a bare negative coordinate as relative to
+  the pointer, so negative coordinates are now written absolute (`=-N`).
+- When the accessibility hit test is inconclusive, a physical click is also
+  refused when another window of the same app (a floating panel, another
+  document) is on top at the point; the Dock's own platter counts as covering,
+  only its full-display overlay lets clicks through.
+- `mac_drag` takes `from_index` / `to_index` only (an undocumented coordinate
+  form skipped both hit tests); `mac_type` with `element_index` and `app`
+  refuses when the element belongs to another app.
+- Results state delivery where they did not: refusals before anything is sent
+  (validation, focus guard, unknown or expired index, read-only mode,
+  `input_busy`, stopping) say `delivery=not_delivered, retry=safe`; an engine
+  that crashed or answered garbage during an action says `delivery=unknown`;
+  a failed scroll wheel says `unknown` unless the script never started;
+  `mac_window` is verified only by the state asked for (minimized, position,
+  size, full screen…), and a pop-up option only when the control shows it;
+  `mac_app` launch of a running app with `activate: true` reports the
+  activation; `phone_*` input results state delivery and retry too (a refusal
+  such as `mirror_not_live` or `expect_not_found` sent nothing; a timeout,
+  `type_not_confirmed`, `open_not_confirmed`, `capture_failed` or `focus_lost`
+  may have acted).
+- `phone_home` / `phone_app_switcher` find iPhone Mirroring by bundle id, so a
+  non-English macOS (where the app's name is localized) still gets the menu
+  command or the gesture fallback instead of `mirror_not_live`.
+- Phone input refuses when the mirror stops being live while it is brought
+  forward from another Space, and reports `mirror_state_unknown` instead of a
+  Python traceback when bringing it forward times out. A long swipe and the app
+  switcher's hold stop (and release the button) when the mirror loses focus;
+  an invalid long-press or swipe duration sends nothing.
+- A `phone_open` stopped by SIGTERM no longer runs its own trip to the Home
+  Screen (it brought the mirror forward and sent a Cmd chord while the server
+  may be stopping); after a timeout the server goes Home through the menu.
+- `phone_launch` results state delivery; a call refused because the server is
+  stopping, or `phone_type` refused because the clipboard changed before
+  anything was typed, says `delivery=not_delivered`.
+- `browser_click` by `element_index` no longer falls back to a synthetic
+  JavaScript `click()` when Playwright's actionability checks fail: a covered,
+  disabled or detached element returns `occluded`, `not_actionable` or
+  `element_no_longer_valid` (`delivery=not_delivered, retry=safe`).
+- Each browser session keeps the tab it is driving as the active page instead
+  of taking the last tab: a tab the page opens itself (`window.open`,
+  `target=_blank`) is never switched to (another tab becomes active only after
+  the active one closes), and an `element_index` used on a different tab, even
+  one at the same URL, returns `element_no_longer_valid`. When attaching over
+  CDP the session picks a context with non-`devtools://` pages; a standalone
+  `browser_launch` is refused while a CDP session is open instead of reusing
+  the attached app; a browser or app that closes or disconnects on its own is
+  forgotten.
+- `browser_snapshot` names `<input>`, `<textarea>` and `<select>` fields from
+  ARIA labels, `<label>`, `placeholder`, the value of button-type inputs, the
+  selected option, `name` and `type` (text a user or agent typed is never part
+  of a name), and reports truncation — with how many interactive elements were
+  left out — past 100; `browser_scroll` accepts `up|down|left|right`, wheels at
+  the viewport center and reports the `scrollX`/`scrollY` change (or
+  `"did not move"`); `browser_navigate` includes the HTTP status (or
+  `"no response"` for same-document navigations); `browser_screenshot` over CDP
+  uses CSS pixels; every browser call runs under a time limit; `browser_type`
+  takes at most 2000 characters (use `browser_fill` for longer values), so its
+  time limit always covers the typing; every `browser_*` input tool (`click`,
+  `fill`, `type`, `press_key`, `scroll`, `navigate`, `evaluate`) states
+  `delivery=…, retry=…` in its success and error text.
+- `phone_open` that ends in "app not found" says
+  `delivery=delivered_unverified` (it had already gone Home and searched
+  Spotlight); a screen capture that fails while checking `expect` says nothing
+  was sent; an `expect` value that starts with `-` reaches the iPhone driver as
+  one `--expect=…` argument and is never read as an option; an invalid
+  long-press or swipe duration is refused before iPhone Mirroring is brought
+  forward.
+- `mac_window` `focus` / `raise`: when `AXRaise` fails after the window was
+  already unminimized or made main, the result follows the state asked for
+  instead of reporting `not_delivered`; a physical Mac click whose element does
+  not report its window id is checked against its window's (or the snapshot
+  window's) id, so another window of the same app on top is still `occluded`.
+- A physical Mac click on an element that reports no window of its own is
+  checked against the window found through its parents, also when it came
+  from an app-wide snapshot; `mac_app` launch resolves `~/…` and symlinked
+  `.app` paths for every launch, not only with `cdp_port`; `browser_launch`
+  refusals before anything starts (profile in use, Chromium missing) say
+  `delivery=not_delivered, retry=safe`.
+- `phone_type` no longer reports `typed` when only the picture changed after
+  the paste (a selection highlight or a results list redraw) and OCR never
+  saw the text: it keeps watching for the text and otherwise reports
+  `type_not_confirmed`; a one-character paste that OCR cannot read back says
+  `delivery=delivered_unverified` (device run 2026-11-06, macOS 27.2,
+  iOS 27).
+- `mac_notifications` with `open_center: true` checks positive evidence that
+  Notification Center's panel is already open (the menu-bar clock reads selected
+  or a Notification Center panel element is present; desktop widgets do not
+  count) before clicking the clock, reporting `center_was_open` when
+  already open and `center_opened` when opened by the call; empty `id`,
+  `expected_app` or `expected_title` strings fail validation; a notification
+  that is no longer there returns `notification_not_found`
+  (`delivery=not_delivered, retry=safe`), while other accessibility errors keep
+  their delivery state and note when the notification is no longer on screen.
+
+### Security
+- `mac_set_value` on an `AXSecureTextField` never reads back or echoes the
+  value (`(secure field — value not shown)`), `imctl type` reports character
+  count instead of echoing typed text, and `NORACU_TRACE` omits result previews
+  and error messages (recording only `code`) and opens the trace file `0600`
+  with `O_NOFOLLOW`.
+- `phone_type`, `phone_find` and `phone_open` pass their text to imctl on
+  stdin instead of in the process arguments, where every local user could read
+  it while the call ran.
+- `imctl` `_require_live` (now also guarding `imctl home`, `imctl app-switcher`,
+  and `imctl verify`) probes the mirror overlay before activating iPhone
+  Mirroring so a paused or closed mirror refuses (`mirror_not_live`) without
+  stealing focus, retries once after bringing the window forward when the state
+  is unknown, and fails closed with `mirror_state_unknown` instead of sending
+  blind input; `gestures.app_switcher` also verifies that iPhone Mirroring is
+  frontmost before mouse-down.
+- `phone_*` argument validation and `imctl` argv hygiene: `phone_key` validates
+  allowed key names, `phone_swipe` validates normalized `[0, 1]` coordinates and
+  `ms` (`50–5000`), `phone_longpress` validates `duration`, `phone_find`
+  (`≤ 200`) and `phone_type` (`≤ 2000`) enforce per-tool text limits, and
+  `phone_find`, `phone_open` and `phone_key` pass `--` before positional values
+  so leading `-` strings are never parsed as `imctl` options.
+- `mac_paste` no longer loses non-text clipboard contents or re-publishes a
+  password manager's concealed item: the whole paste runs in one engine call
+  that copies every clipboard item and type aside, writes the text marked
+  transient, sends ⌘V only if the clipboard and the frontmost app (by process)
+  are unchanged, and puts the items back once the paste shows in the same
+  focused element (held at least 0.3 s; else after a 1 s hold) and only if
+  nothing else wrote to the clipboard meanwhile; a concealed item (on any of
+  the clipboard's items) is not copied and the clipboard is cleared instead.
+  When the ⌘V keystroke may not have completed, the clipboard is not put back
+  (a late paste can only repeat the text) and ⌘ is released. Universal Clipboard content or more than 64 MB is refused
+  unless `force: true`. The result reports what happened to the clipboard
+  (`restored: true`, `cleared (previous_concealed)`, `false (changed_externally)`, …).
+- `mac_clipboard_read` withholds the whole clipboard when any of its items is
+  marked concealed (not only the first).
+- `mac_key` treats an uppercase ASCII letter in a chord as adding `shift`
+  (matching how `cliclick` types it, so `alt-cmd-Q` is recognized as
+  `alt-cmd-shift-q` log-out) and ignores an `fn-` prefix when checking refused
+  chords; `alt-cmd-q` (Quit and Close All Windows) and `alt-cmd-delete` (Finder
+  Delete Immediately) are now refused unless `force: true`.
+- `mac_menu_command` applies the same refused-chord list to menu shortcuts and
+  refuses items under the Apple menu (Sleep, Lock Screen, Log Out, Restart,
+  Shut Down, Force Quit) unless `force: true`; quitting the MCP host process or
+  a macOS session process (Finder, Dock, loginwindow, …) is always refused.
+- `mac_app` force-quit re-checks the target PID's start time before its
+  `SIGKILL` fallback so a reused PID is never signalled, and walks up to 32
+  ancestor processes when identifying the MCP host.
+- CDP isolation and directory permissions: `browser_launch` with `cdp_port` is
+  refused under `NORACU_READ_ONLY=1` even when `NORACU_ALLOW_CDP=1` is set
+  (before any network access); `mac_app` launch with `cdp_port` canonicalizes
+  `.app` paths (`realpath`, trailing slash stripped) before checking whether the
+  app is running, creates `~/.noracu` and `~/.noracu/cdp-profiles` (plus
+  `browser-profile`) with mode `0700`, and records `{ pid, wsUrl }` in memory so
+  `browser_launch` with `NORACU_ALLOW_CDP=1` attaches only when the port was
+  opened by this `noracu` process, its PID is still alive and `/json/version`'s
+  `webSocketDebuggerUrl` matches (attaching to any other loopback port requires
+  `NORACU_ALLOW_CDP=any`).
+
 ## [0.1.4] — 2026-11-05
 
 ### Fixed

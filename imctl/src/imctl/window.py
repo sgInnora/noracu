@@ -403,16 +403,23 @@ def parse_overlay(raw: str) -> dict:
 def overlay_snapshot() -> tuple[dict, bool]:
     """(overlay state, hover) from one probe; the state is what get_overlay() returns.
 
-    Fail-open: any osascript failure (app not running, AX hiccup, timeout) returns
-    live=None so callers can decide; this never raises.
+    Fail-open at the probe layer: any osascript failure (app not running, AX hiccup,
+    timeout) returns live=None so callers can decide; this never raises. When the app
+    is not running or has no window on any Space, ``reason`` is set ("not_running" or
+    "no_window") so _require_live() can report that without activating the app.
     """
     try:
         # strip=False: a trailing "<class>\t" line (nameless button) must keep its tab —
         # str.strip() would eat it and make the last line unparseable.
         raw = _run_osascript(_OVERLAY_SCRIPT, strip=False)
     except Exception:
+        if not is_running():
+            return {"live": None, "overlay": None, "buttons": 0, "reason": "not_running"}, False
         return {"live": None, "overlay": None, "buttons": 0}, False
-    return parse_overlay_ex(raw)
+    state, hover = parse_overlay_ex(raw)
+    if raw.strip() == "NO_WINDOW" and get_window_info() is None:
+        state = {**state, "reason": "no_window"}
+    return state, hover
 
 
 def get_overlay() -> dict:

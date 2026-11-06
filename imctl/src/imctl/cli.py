@@ -30,13 +30,25 @@ import time
 
 from . import gestures, input, verify, vision
 from .vision import CaptureError
-from .window import WindowError, ensure_frontmost, get_overlay
+import subprocess
 
-# F31: every phone input command starts in _require_live(), which first brings
-# the mirror to the front — switching Spaces if needed and waiting for a real
-# frame — so the expect OCR and scroll baseline that follow read the phone, not
-# another Space or a transition frame. Module-level so tests can swap it.
+from .window import WindowError, ensure_frontmost, get_overlay, is_frontmost
+
+# F31 / R13 §3: every phone input command starts in _require_live(), which probes
+# get_overlay() first so a paused or stopped mirror refuses without stealing focus,
+# then brings the mirror to the front (switching Spaces if needed and waiting for a
+# real frame) before any capture or input. Module-level callables so tests can swap them.
 _bring_front = ensure_frontmost
+_is_front = is_frontmost
+sleep = time.sleep
+
+_MIRROR_NOT_RUNNING_LINE = (
+    "mirror_not_live: iPhone Mirroring is not running — call phone_launch first"
+)
+_MIRROR_STATE_UNKNOWN_LINE = (
+    "mirror_state_unknown: could not tell whether iPhone Mirroring is live — "
+    "nothing was sent; retry, or call phone_status"
+)
 
 # F25: one line, one exit code for every capture failure. The pixels a check
 # needed are not the phone's — report that, never guess from whatever
@@ -47,29 +59,85 @@ _CAPTURE_FAILED_LINE = (
 )
 
 
+# R19: the same failure while checking --expect, before the first event
+_CAPTURE_FAILED_EXPECT_LINE = (
+    "capture_failed: could not capture the iPhone Mirroring window to check --expect "
+    "(it may be hidden, minimized or on another Space); no image was returned, so nothing was sent"
+)
+
+
 def _capture_failed() -> int:
     """Print the F25 capture-failure line; exit code 7."""
     print(_CAPTURE_FAILED_LINE, file=sys.stderr)
     return 7
 
 
-def _require_live() -> int | None:
-    """Refuse phone input while the mirror shows an overlay instead of the phone stream.
+def _mirror_not_live(overlay: dict) -> int:
+    label = overlay.get("overlay") or "overlay shown"
+    print(
+        f"mirror_not_live: {label} — call phone_launch (or imctl resume) first",
+        file=sys.stderr,
+    )
+    return 3
 
-    Returns exit code 3 after printing a `mirror_not_live:` line when the mirror is
-    verifiably not live; returns None (allow) when live or unknown (fail-open).
-    F31: brings the mirror to the front first (see _bring_front).
+
+def _require_live() -> int | None:
+    """Refuse phone input unless iPhone Mirroring is verifiably live (fail-closed).
+
+    Probes get_overlay() first to avoid stealing focus when the mirror is paused or off:
+      - reason in ("not_running", "no_window") -> mirror_not_live (exit 3), no _bring_front
+      - live is False -> mirror_not_live (exit 3), no _bring_front
+      - live is True  -> _bring_front() (F31), then allow (None)
+      - live is None  -> _bring_front(), sleep(0.4), probe again:
+        True -> allow; False -> mirror_not_live; still None -> mirror_state_unknown (exit 3).
     """
-    _bring_front()
     overlay = get_overlay()
-    if overlay["live"] is False:
-        label = overlay["overlay"] or "overlay shown"
-        print(
-            f"mirror_not_live: {label} — call phone_launch (or imctl resume) first",
-            file=sys.stderr,
-        )
+    if overlay.get("reason") in ("not_running", "no_window"):
+        print(_MIRROR_NOT_RUNNING_LINE, file=sys.stderr)
         return 3
-    return None
+    if overlay["live"] is False:
+        return _mirror_not_live(overlay)
+    if overlay["live"] is True:
+        # R18: bringing it forward can take a Space switch; the mirror may stop being live meanwhile
+        # (the iPhone was picked up) — so when it was not in front, look again afterwards
+        try:
+            was_front = _is_front()
+        except Exception:
+            was_front = False
+        try:
+            _bring_front()
+        except (WindowError, subprocess.TimeoutExpired):
+            print(_MIRROR_STATE_UNKNOWN_LINE, file=sys.stderr)
+            return 3
+        if was_front:
+            return None
+        overlay = get_overlay()
+        if overlay["live"] is True:
+            return None
+        if overlay["live"] is False:
+            return _mirror_not_live(overlay)
+        print(_MIRROR_STATE_UNKNOWN_LINE, file=sys.stderr)
+        return 3
+    try:
+        _bring_front()
+    except (WindowError, subprocess.TimeoutExpired):
+        again = get_overlay()
+        if again.get("reason") in ("not_running", "no_window"):
+            print(_MIRROR_NOT_RUNNING_LINE, file=sys.stderr)
+            return 3
+        print(_MIRROR_STATE_UNKNOWN_LINE, file=sys.stderr)
+        return 3
+    sleep(0.4)
+    overlay = get_overlay()
+    if overlay.get("reason") in ("not_running", "no_window"):
+        print(_MIRROR_NOT_RUNNING_LINE, file=sys.stderr)
+        return 3
+    if overlay["live"] is True:
+        return None
+    if overlay["live"] is False:
+        return _mirror_not_live(overlay)
+    print(_MIRROR_STATE_UNKNOWN_LINE, file=sys.stderr)
+    return 3
 
 
 def _require_expect(args, read_screen=None, read_sweep=None) -> int | None:
@@ -102,8 +170,9 @@ def _require_expect(args, read_screen=None, read_sweep=None) -> int | None:
             hits = read_sweep()
     except (WindowError, CaptureError):
         # F25: an unreadable screen is not a match — refuse exactly like
-        # expect_not_found; nothing is sent.
-        return _capture_failed()
+        # expect_not_found; nothing is sent (R19: and the line says so).
+        print(_CAPTURE_FAILED_EXPECT_LINE, file=sys.stderr)
+        return 7
     if verify.screen_contains(expect, hits):
         return None
     print(
@@ -143,19 +212,40 @@ def _cmd_tap(args) -> int:
     return 0
 
 
+def _invalid_duration(exc: ValueError) -> int:
+    print(f"invalid_args: {exc}; nothing was sent", file=sys.stderr)
+    return 2
+
+
 def _cmd_longpress(args) -> int:
+    # R19: a bad duration is refused before the mirror is brought forward
+    try:
+        input._check_duration(_longpress_duration(args), 0.01, 10, "long-press duration (s)")
+    except ValueError as exc:
+        return _invalid_duration(exc)
     guard = _require_live()
     if guard is not None:
         return guard
     guard = _require_expect(args)
     if guard is not None:
         return guard
-    input.long_press(args.x, args.y, args.duration)
-    print(f"long-pressed ({args.x}, {args.y}) for {args.duration}s")
+    duration = _longpress_duration(args)
+    input.long_press(args.x, args.y, duration)
+    print(f"long-pressed ({args.x}, {args.y}) for {duration}s")
     return 0
 
 
+def _longpress_duration(args) -> float:
+    opt = getattr(args, "duration_opt", None)
+    pos = getattr(args, "duration", None)
+    return opt if opt is not None else pos if pos is not None else 0.8
+
+
 def _cmd_swipe(args) -> int:
+    try:
+        input._check_duration(args.ms, *input.SWIPE_MS_RANGE, "swipe duration (ms)")
+    except ValueError as exc:
+        return _invalid_duration(exc)
     guard = _require_live()
     if guard is not None:
         return guard
@@ -168,14 +258,20 @@ def _cmd_swipe(args) -> int:
 
 
 def _cmd_home(_args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     gestures.home()
     print("home gesture sent")
     return 0
 
 
 def _cmd_app_switcher(_args) -> int:
+    guard = _require_live()
+    if guard is not None:
+        return guard
     gestures.app_switcher()
-    print("app switcher opened")
+    print("app switcher gesture sent")
     return 0
 
 
@@ -229,8 +325,18 @@ def _cmd_type(args) -> int:
         return guard
     report = {}
     if input.type_text(args.text, replace=args.replace, report=report):
-        print(f"typed {args.text!r}")
-        return 0
+        if report.get("seen", True):
+            print(f"typed {len(args.text)} chars")
+            return 0
+        if _late_paste_probe(args.text) is None:
+            # one character: OCR cannot read it back, only the picture changed
+            print(f"typed {len(args.text)} chars (the screen changed after the paste, but "
+                  "OCR cannot read this text back — check the field; the clipboard still "
+                  "holds the typed text)")
+            return 0
+        # device run 2026-11-06: only the picture changed (a selection highlight, a
+        # results list redraw) and OCR never saw the text — watch for it like an
+        # unconfirmed paste instead of reporting it typed
     count_before = report.get("count_before")
     late = _watch_late_paste(args.text, baseline=count_before)
     if late is not None:
@@ -240,7 +346,7 @@ def _cmd_type(args) -> int:
         # minimum hold, an untouched changeCount); after the fact, leaving the
         # typed text on the clipboard is the choice that can never hand the phone
         # the user's original clipboard (possibly a password).
-        print(f"typed {args.text!r} (the paste showed up late, during an extra "
+        print(f"typed {len(args.text)} chars (the paste showed up late, during an extra "
               f"{late:.0f}s check after the 2.5s confirmation window; the clipboard "
               "still holds the typed text)")
         return 0
@@ -388,18 +494,11 @@ def _cmd_open(args) -> int:
         return guard
     # Open Spotlight here (not inside open_app) so a failure can be
     # reported as its own condition instead of a bogus "app not found".
-    try:
-        return _open_and_report(args)
-    except SystemExit:
-        # Stopped from outside (the server's timeout sends SIGTERM, imctl turns it
-        # into SystemExit) — anywhere in open, not only inside open_app: leave the
-        # phone on the Home Screen rather than in Spotlight with text typed in.
-        # Best effort: the server sends SIGKILL 1.5 s after the SIGTERM.
-        try:
-            gestures.home_via_menu()
-        except BaseException:
-            pass
-        raise
+    # Stopped from outside (SIGTERM → SystemExit): no tidy-up trip of its own. Going Home from here
+    # would bring the mirror forward and send a Cmd chord while the server may be stopping (and a
+    # SIGKILL 1.5 s later could leave Cmd held); after a timeout the server returns the phone to the
+    # Home Screen itself through the mirror's menu (no focus change, no chord).
+    return _open_and_report(args)
 
 
 def _open_and_report(args) -> int:
@@ -473,6 +572,9 @@ def _cmd_verify(args) -> int:
     if args.action not in actions:
         print(f"unknown action: {args.action}", file=sys.stderr)
         return 2
+    guard = _require_live()
+    if guard is not None:
+        return guard
     ok = verify.verify_action(actions[args.action])
     print("screen changed: yes" if ok else "screen changed: NO (action may have been dropped)")
     return 0 if ok else 1
@@ -555,7 +657,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("longpress", help="long-press at normalized coords")
     sp.add_argument("x", type=float)
     sp.add_argument("y", type=float)
-    sp.add_argument("--duration", type=float, default=0.8)
+    # positional (older callers) or --duration; argparse would let the positional's default overwrite
+    # the option, so they land in separate fields and _cmd_longpress picks one
+    sp.add_argument("duration", nargs="?", type=float, default=None)
+    sp.add_argument("--duration", dest="duration_opt", type=float, default=None)
     sp.add_argument("--expect", help="refuse to act unless this text is on screen (OCR)")
     sp.set_defaults(func=_cmd_longpress)
 
@@ -618,10 +723,19 @@ def _on_sigterm(signum, _frame):
     raise SystemExit(128 + signum)
 
 
+def _stdin_values(args) -> None:
+    # type / find / open take their text as "-" to read it from stdin: text in argv is visible to every
+    # local user in the process list while imctl runs
+    for field in ("text", "app"):
+        if getattr(args, field, None) == "-" and getattr(args, "command", None) in ("type", "find", "open"):
+            setattr(args, field, sys.stdin.read())
+
+
 def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _on_sigterm)
     parser = build_parser()
     args = parser.parse_args(argv)
+    _stdin_values(args)
     try:
         return args.func(args)
     except input.FocusLost:

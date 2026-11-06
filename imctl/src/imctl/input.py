@@ -23,6 +23,7 @@ methodology):
 
 from __future__ import annotations
 
+import math
 import time
 
 from Quartz import (
@@ -112,12 +113,23 @@ def scroll_trackpad(total_px: float, nx: float = 0.5, ny: float = 0.6,
     deltas = scroll_steps(total_px)
     last = len(deltas) - 1
     sent = 1  # events posted so far (the mouse-moved above)
-    for i, d in enumerate(deltas):
-        if sent % 6 == 0:
-            _require_focus()  # F26: every 6 events; drop the rest on focus loss
-        _scroll_event(src, d, x, y, 1 if i == 0 else (4 if i == last else 2))
-        sent += 1
-        time.sleep(0.016)
+    began = False
+    ended = False
+    try:
+        for i, d in enumerate(deltas):
+            if sent % 6 == 0:
+                _require_focus()  # F26: every 6 events; drop the rest on focus loss
+            phase = 1 if i == 0 else (4 if i == last else 2)
+            _scroll_event(src, d, x, y, phase)
+            if phase == 1:
+                began = True
+            elif phase == 4:
+                ended = True
+            sent += 1
+            time.sleep(0.016)
+    finally:
+        if began and not ended:
+            _scroll_event(src, 0, x, y, 4)
 
 
 def _mouse_event(kind: int, x: float, y: float, source) -> None:
@@ -170,21 +182,37 @@ def tap(nx: float = 0.5, ny: float = 0.5, bounds: WindowBounds | None = None) ->
     src = _source()
     _require_focus()  # F26: before the first event
     _mouse_event(kCGEventLeftMouseDown, x, y, src)
-    time.sleep(TAP_INTERVAL_S)
-    _mouse_event(kCGEventLeftMouseUp, x, y, src)
+    try:
+        time.sleep(TAP_INTERVAL_S)
+    finally:
+        _mouse_event(kCGEventLeftMouseUp, x, y, src)
+
+
+SWIPE_MS_RANGE = (50, 5000)
+
+
+def _check_duration(value: float, lo: float, hi: float, what: str) -> None:
+    # before any event: an invalid duration must not turn into a real press (math.isfinite: no nan/inf;
+    # bool is an int subclass in Python, so it is refused by name)
+    if not (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and lo <= value <= hi):
+        raise ValueError(f"{what} must be between {lo} and {hi}")
 
 
 def long_press(nx: float = 0.5, ny: float = 0.5, duration_s: float = LONG_PRESS_S,
                bounds: WindowBounds | None = None) -> None:
     """Press and hold at normalized coordinates."""
+    _check_duration(duration_s, 0.01, 10, "long-press duration (s)")
     ensure_frontmost()
     b = bounds or get_bounds()
     x, y = b.denormalize(nx, ny)
     src = _source()
     _require_focus()  # F26: before the press-down
     _mouse_event(kCGEventLeftMouseDown, x, y, src)
-    time.sleep(duration_s)
-    _mouse_event(kCGEventLeftMouseUp, x, y, src)
+    try:
+        time.sleep(duration_s)
+    finally:
+        _mouse_event(kCGEventLeftMouseUp, x, y, src)
 
 
 def _ease_in_out(t: float) -> float:
@@ -202,6 +230,7 @@ def swipe(from_x: float, from_y: float, to_x: float, to_y: float,
     The gesture is: mouse-down, 3px nudge, 20 eased drag steps,
     mouse-up. This is the shape iPhone Mirroring's recognizer accepts.
     """
+    _check_duration(duration_ms, *SWIPE_MS_RANGE, "swipe duration (ms)")
     ensure_frontmost()
     b = bounds or get_bounds()
     x0, y0 = b.denormalize(from_x, from_y)
@@ -211,25 +240,31 @@ def swipe(from_x: float, from_y: float, to_x: float, to_y: float,
     step_delay = (duration_ms / 1000.0) / SWIPE_STEPS
 
     _require_focus()  # F26: before the first event
-    _mouse_event(kCGEventLeftMouseDown, x0, y0, src)
-    time.sleep(0.02)
+    cx, cy = x0, y0
+    _mouse_event(kCGEventLeftMouseDown, cx, cy, src)
+    try:
+        time.sleep(0.02)
 
-    # Initial nudge: disambiguates swipe from long-press-drag.
-    dx = 1 if x1 >= x0 else -1
-    dy = 1 if y1 >= y0 else -1
-    _mouse_event(kCGEventLeftMouseDragged, x0 + dx * SWIPE_NUDGE_PX,
-                 y0 + dy * SWIPE_NUDGE_PX, src)
-    time.sleep(0.01)
+        # Initial nudge: disambiguates swipe from long-press-drag.
+        dx = 1 if x1 >= x0 else -1
+        dy = 1 if y1 >= y0 else -1
+        nx, ny = x0 + dx * SWIPE_NUDGE_PX, y0 + dy * SWIPE_NUDGE_PX
+        _mouse_event(kCGEventLeftMouseDragged, nx, ny, src)
+        cx, cy = nx, ny
+        time.sleep(0.01)
 
-    for i in range(1, SWIPE_STEPS + 1):
-        t = i / SWIPE_STEPS
-        e = _ease_in_out(t)
-        cx = x0 + (x1 - x0) * e
-        cy = y0 + (y1 - y0) * e
-        _mouse_event(kCGEventLeftMouseDragged, cx, cy, src)
-        time.sleep(step_delay)
-
-    _mouse_event(kCGEventLeftMouseUp, x1, y1, src)
+        for i in range(1, SWIPE_STEPS + 1):
+            if i % 5 == 0:
+                _require_focus()  # R18: a long swipe stops (and releases) when the mirror loses focus
+            t = i / SWIPE_STEPS
+            e = _ease_in_out(t)
+            nx = x0 + (x1 - x0) * e
+            ny = y0 + (y1 - y0) * e
+            _mouse_event(kCGEventLeftMouseDragged, nx, ny, src)
+            cx, cy = nx, ny
+            time.sleep(step_delay)
+    finally:
+        _mouse_event(kCGEventLeftMouseUp, cx, cy, src)
 
 
 def scroll(dy_pixels: int, nx: float = 0.5, ny: float = 0.5,
@@ -303,12 +338,16 @@ def _cmd_chord(keycode: int, before_key=None) -> None:
         CGEventPost(kCGHIDEventTap, event)
 
     post(_VK_COMMAND, True, kCGEventFlagMaskCommand)
-    time.sleep(0.03)
-    post(keycode, True, kCGEventFlagMaskCommand)
-    time.sleep(0.03)
-    post(keycode, False, kCGEventFlagMaskCommand)
-    time.sleep(0.03)
-    post(_VK_COMMAND, False, 0)
+    try:
+        time.sleep(0.03)
+        post(keycode, True, kCGEventFlagMaskCommand)
+        try:
+            time.sleep(0.03)
+        finally:
+            post(keycode, False, kCGEventFlagMaskCommand)
+        time.sleep(0.03)
+    finally:
+        post(_VK_COMMAND, False, 0)
 
 
 def press_key(key: str) -> None:
@@ -320,8 +359,10 @@ def press_key(key: str) -> None:
     src = _source()
     _require_focus()  # F26: before the key-down
     _key_event(keymap[key], True, src)
-    time.sleep(0.02)
-    _key_event(keymap[key], False, src)
+    try:
+        time.sleep(0.02)
+    finally:
+        _key_event(keymap[key], False, src)
 
 
 class ClipboardChanged(InputError):
@@ -330,6 +371,95 @@ class ClipboardChanged(InputError):
     a copy over from another device. Cmd+V would paste THEIR content into
     the phone, so nothing is sent and their newer content is left alone.
     """
+
+
+# The user's clipboard is copied aside whole (every item, every type) and put back the same way. Items a
+# password manager marks concealed (nspasteboard.org) or an app marks transient are never copied: putting
+# the clipboard "back" means clearing it. Universal Clipboard content (reading it would fetch it from
+# the other device), promised files and clipboards over the size limit are not copied either: the
+# clipboard keeps the typed text. Our own write is not marked transient — iPhone Mirroring reads the
+# Mac pasteboard, and the marker's effect on that path is unproven.
+_CONCEALED = "org.nspasteboard.ConcealedType"
+_TRANSIENT = "org.nspasteboard.TransientType"
+_REMOTE = "com.apple.is-remote-clipboard"
+_SAVE_LIMIT = 64 * 1024 * 1024
+
+
+def _new_item():
+    from AppKit import NSPasteboardItem
+    return NSPasteboardItem.alloc().init()
+
+
+def save_pasteboard(pasteboard, limit: int = _SAVE_LIMIT):
+    """Snapshot ``pasteboard`` for restore_pasteboard(): ``(kind, items)``.
+
+    kind "items": items is [[(type, data), ...], ...]; "concealed" /
+    "transient": not copied (restore clears); "empty"; "remote" /
+    "too_large": not copied (restore leaves the clipboard as it is).
+    A pasteboard object without ``types()`` (a text-only stand-in) is
+    saved as ("text", data of public.utf8-plain-text).
+    """
+    if getattr(pasteboard, "types", None) is None:
+        return ("text", pasteboard.dataForType_("public.utf8-plain-text"))
+    # types() lists only the first item's types: it tells a remote clipboard before any item is
+    # touched; every item's own types are then read (without data) for concealed / transient marks
+    types = [str(t) for t in (pasteboard.types() or [])]
+    if _REMOTE in types:
+        return ("remote", None)
+    items_ = list(pasteboard.pasteboardItems() or [])
+    for it in items_:
+        types += [str(t) for t in (it.types() or [])]
+    if _CONCEALED in types:
+        return ("concealed", None)
+    if _TRANSIENT in types:
+        return ("transient", None)
+    promised = any(t.startswith("com.apple.pasteboard.promised-file") for t in types)
+    if _REMOTE in types or (promised and "public.file-url" not in types):
+        return ("remote", None)
+    if not types:
+        return ("empty", None)
+    items, total = [], 0
+    for it in items_:
+        rec = []
+        for t in (it.types() or []):
+            d = it.dataForType_(t)
+            if d is None:
+                continue
+            total += int(d.length()) if hasattr(d, "length") else len(d)
+            if total > limit:
+                return ("too_large", None)
+            rec.append((str(t), d))
+        if rec:
+            items.append(rec)
+    if not items:
+        # a provider that answers only at the pasteboard level
+        return ("text", pasteboard.dataForType_("public.utf8-plain-text"))
+    return ("items", items)
+
+
+def restore_pasteboard(pasteboard, saved) -> bool:
+    """Put a save_pasteboard() snapshot back (the caller checked the
+    changeCount). Returns False when it cannot be put back ("remote",
+    "too_large"): then the clipboard is left holding the typed text.
+    Raw text data (bytes or None, the older snapshot) is accepted too."""
+    if not isinstance(saved, tuple):
+        saved = ("text", saved)
+    kind, data = saved
+    if kind in ("remote", "too_large"):
+        return False
+    pasteboard.clearContents()
+    if kind == "text":
+        if data is not None:
+            pasteboard.setData_forType_(data, "public.utf8-plain-text")
+    elif kind == "items" and data:
+        objs = []
+        for rec in data:
+            it = _new_item()
+            for t, d in rec:
+                it.setData_forType_(d, t)
+            objs.append(it)
+        pasteboard.writeObjects_(objs)
+    return True
 
 
 class PendingRestore:
@@ -368,10 +498,7 @@ class PendingRestore:
         self.done = True
         if self._pasteboard.changeCount() != self._saved_change + 1:
             return False  # something else wrote the pasteboard: never restore
-        self._pasteboard.clearContents()
-        if self._saved is not None:
-            self._pasteboard.setData_forType_(self._saved, "public.utf8-plain-text")
-        return True
+        return restore_pasteboard(self._pasteboard, self._saved)
 
 
 def type_text(text: str, *, replace: bool = False, pasteboard=None,
@@ -630,8 +757,15 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
         if report is not None:
             report["count_before"] = count_before[0]
 
-        saved = pasteboard.dataForType_("public.utf8-plain-text")
+        # the change count first: a copy that lands while the clipboard is being saved must not be
+        # overwritten by our write
         saved_change = pasteboard.changeCount()
+        saved = save_pasteboard(pasteboard)
+        if pasteboard.changeCount() != saved_change:
+            saved_change = None  # nothing of ours to undo
+            raise ClipboardChanged(
+                "another app or device changed the clipboard while it was being saved; "
+                "nothing was typed and the clipboard was left as it is")
 
         pasteboard.clearContents()
         pasteboard.setString_forType_(text, "public.utf8-plain-text")
@@ -698,6 +832,11 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                     raise
         if not landed:
             landed = restore_ok
+        if report is not None:
+            # device run 2026-11-06: the frame diff alone (no OCR sighting) once
+            # confirmed a paste that never reached the field — the caller must
+            # not report such a paste as verified
+            report["seen"] = bool(restore_ok)
 
         if not landed:
             # F18 invariant: never restore unconfirmed — a late paste
@@ -713,9 +852,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 sleep(min_hold_s - elapsed)
             # Restore the user's clipboard only if nothing else changed it.
             if pasteboard.changeCount() == saved_change + 1:
-                pasteboard.clearContents()
-                if saved is not None:
-                    pasteboard.setData_forType_(saved, "public.utf8-plain-text")
+                restore_pasteboard(pasteboard, saved)
         else:
             # landed but OCR is blind to it (short/cropped text), or the
             # caller keeps the clipboard (restore=False): success, but the
@@ -729,9 +866,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
         # restore then. Either way the original exception propagates.
         if not sent[0] and saved_change is not None:
             if pasteboard.changeCount() == saved_change + 1:
-                pasteboard.clearContents()
-                if saved is not None:
-                    pasteboard.setData_forType_(saved, "public.utf8-plain-text")
+                restore_pasteboard(pasteboard, saved)
         raise
 
 
@@ -743,5 +878,7 @@ def clear_text() -> None:
     src = _source()
     _require_focus()  # F26: re-check between Cmd+A and Delete
     _key_event(_VK_DELETE, True, src)
-    time.sleep(0.02)
-    _key_event(_VK_DELETE, False, src)
+    try:
+        time.sleep(0.02)
+    finally:
+        _key_event(_VK_DELETE, False, src)

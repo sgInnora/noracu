@@ -8,15 +8,21 @@ on:
 jobs:
   test:
     runs-on: macos-latest
+    strategy:
+      matrix:
+        node: [20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npx playwright install chromium # (--with-deps is Linux-only; macOS runners need no system deps)
-      - run: node --check src/server.mjs
+      - name: "syntax: server, engine, scripts, imctl"
+        run: npm run check
+      - name: "engine unit tests (node:vm, no macOS permissions needed)"
+        run: node test/engine-unit.mjs
       - name: "e2e (CI mode: browser layer + security regressions; hardware-dependent tests skipped)"
         run: NORACU_CI=1 node test/e2e.mjs
         env:
@@ -25,3 +31,5 @@ jobs:
         run: |
           node scripts/gen-tools.mjs
           git diff --exit-code docs/tools.md || (echo "::error::docs/tools.md is stale — run: node scripts/gen-tools.mjs" && exit 1)
+      - name: "package contents: runtime files present, internal material absent"
+        run: node scripts/check-pack.mjs

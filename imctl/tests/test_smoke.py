@@ -1516,6 +1516,7 @@ def test_focus_guard():
             lambda: tap(0.5, 0.5),
             lambda: long_press(0.5, 0.5),
             lambda: swipe(0.5, 0.8, 0.5, 0.2),
+            lambda: scroll_trackpad(-500),
             lambda: press_key("return"),
             clear_text,
             lambda: _cmd_chord(_VK_V),
@@ -1534,9 +1535,9 @@ def test_focus_guard():
         tap(0.5, 0.5)
         assert len(events) == 2  # mouse-down + mouse-up
 
-        # ── scroll_trackpad: re-check every 6 events ──
-        # The user switches away once 6 events have gone out; the next
-        # scheduled check stops the stream — exactly 6 events, no more.
+        # ── scroll_trackpad: re-check every 6 events, close phase 1 with phase 4 ──
+        # The user switches away once 6 events have gone out; the next scheduled
+        # check drops the remaining deltas and finally: posts only the 0-px phase-4 end.
         events.clear()
         focus[0] = True
         flip_at[0] = 6
@@ -1545,9 +1546,10 @@ def test_focus_guard():
             raise AssertionError("expected FocusLost")
         except FocusLost:
             pass
-        assert len(events) == 6, events
+        assert len(events) == 7, events
         assert events[0][0] == "mouse"  # the positioning move
-        assert all(e[0] == "scroll" for e in events[1:])
+        assert all(e[0] == "scroll" and e[1] != 0 for e in events[1:6])
+        assert events[6] == ("scroll", 0, 4)
         flip_at[0] = None
 
         # ── clear_text: focus lost between Cmd+A and Delete ──
@@ -2631,12 +2633,13 @@ def test_bring_front_waits_for_a_frame():
             raise AssertionError("expected WindowError")
         except window.WindowError:
             pass
-        # _require_live brings the mirror to the front before reading the overlay
+        # _require_live probes get_overlay first, then brings a live mirror to the front
         order = []
+        patch(cli, "_is_front", lambda: True)  # already in front: no second probe (R18)
         patch(cli, "_bring_front", lambda: order.append("front"))
         patch(cli, "get_overlay",
               lambda: order.append("overlay") or {"live": True, "overlay": None, "buttons": 0})
-        assert cli._require_live() is None and order == ["front", "overlay"]
+        assert cli._require_live() is None and order == ["overlay", "front"]
     finally:
         for (mod, name), value in saved.items():
             setattr(mod, name, value)
@@ -2913,7 +2916,9 @@ def test_open_deadline_from_env():
 
 
 def test_open_stopped_goes_home():
-    """A SIGTERM (SystemExit) during open leaves the phone on the Home Screen."""
+    """A SIGTERM (SystemExit) during open propagates without a Home trip of its own (R18: that trip
+    brought the mirror forward and sent a Cmd chord while the server may be stopping; after a timeout
+    the server returns the phone to the Home Screen through the mirror's menu)."""
     import argparse
     from types import SimpleNamespace
 
@@ -2934,7 +2939,7 @@ def test_open_stopped_goes_home():
             assert False, "SystemExit must propagate"
         except SystemExit:
             pass
-        assert homes == [1]
+        assert homes == []
     finally:
         cli._require_live, cli.gestures = real_live, real_gestures
 
@@ -3052,7 +3057,7 @@ def test_type_text_restore_needs_a_rise():
     #    change: not confirmed, and the user's clipboard is NOT restored (it keeps the text)
     screens = [hits(chip), hits(chip), hits(chip)]
     ok, pb, report, reads = run(screens)
-    assert ok is False and pb.data == chip.encode() and report == {"count_before": 1}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 1}
     assert screens == []  # two pre-reads; the first post-read already shows no rise
     #    …same, but the frame changed: landed, yet still no restore (no rise)
     ok, pb, report, _ = run([hits(chip), hits(chip), hits(chip)], frame_changes=True)
@@ -3060,25 +3065,25 @@ def test_type_text_restore_needs_a_rise():
     # ② 0 before → 1 after, in two post-reads: the paste is seen → confirmed and restored
     screens = [hits("Search"), hits("Search"), hits(chip), hits(chip)]
     ok, pb, report, _ = run(screens)
-    assert ok is True and pb.data == b"orig" and report == {"count_before": 0}
+    assert ok is True and pb.data == b"orig" and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 0}
     assert screens == []
     #    1 before → 2 after: a rise over the chip → restored
     ok, pb, _, _ = run([hits(chip), hits(chip), hits(chip, chip), hits(chip, chip)])
     assert ok is True and pb.data == b"orig"
     # ③ a pre-paste read fails: count unknown → OCR never licenses a restore
     ok, pb, report, _ = run([CaptureError("blank"), hits(chip)])
-    assert ok is False and pb.data == chip.encode() and report == {"count_before": None}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": None}
     ok, pb, report, _ = run([hits(chip), CaptureError("blank"), hits(chip)])
-    assert ok is False and pb.data == chip.encode() and report == {"count_before": None}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": None}
     ok, pb, report, _ = run([CaptureError("blank"), hits(chip)], frame_changes=True)
     assert ok is True and pb.data == chip.encode()
     # ④ one pre-read misses the chip (a redraw): the count is the higher one, so the
     #    chip alone after the paste is no rise → no restore
     ok, pb, report, _ = run([hits("Search"), hits(chip), hits(chip)])
-    assert ok is False and pb.data == chip.encode() and report == {"count_before": 1}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 1}
     # ⑤ a rise in only one post-read (an OCR blip) licenses nothing
     ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(chip), hits("Search")])
-    assert ok is False and pb.data == chip.encode() and report == {"count_before": 0}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 0}
     # ⑥ restore=False (open_app): a confirmed paste still never gives the clipboard back
     ok, pb, _, _ = run([hits("Search"), hits("Search"), hits(chip), hits(chip)], restore=False)
     assert ok is True and pb.data == chip.encode()
@@ -3087,7 +3092,7 @@ def test_type_text_restore_needs_a_rise():
     #    on its way and could fetch the restored clipboard
     box = "Pasting from “M5pro”…"
     ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(box), hits(box)], text="pro")
-    assert ok is False and pb.data == b"pro" and report == {"count_before": 0}
+    assert ok is False and pb.data == b"pro" and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 0}
     #    the text itself rises while a box still shows (an earlier paste in flight): no restore
     ok, pb, _, _ = run([hits("Search"), hits("Search"), hits(chip, box), hits(chip, box)],
                        frame_changes=True)
@@ -3230,3 +3235,568 @@ def test_no_top_hit_message_with_custom_labels():
         else:
             os.environ["NORACU_TOPHIT_LABELS"] = saved_env
         cli._require_live, cli.gestures = real_live, real_gestures
+
+
+def test_type_text_restores_every_clipboard_item():
+    """R13 §2: the user's clipboard goes back whole (every item and type);
+    a concealed or transient item is never copied — the clipboard is
+    cleared instead; Universal Clipboard content is not read and the
+    clipboard keeps the typed text. Restores still need the on-screen
+    evidence (injected here as ocr_check → True)."""
+    import imctl.input as input_module
+    from imctl.input import type_text
+
+    class Item:
+        def __init__(self, rec):
+            self.rec = dict(rec)
+
+        def types(self):
+            return list(self.rec)
+
+        def dataForType_(self, t):
+            return self.rec.get(t)
+
+        def setData_forType_(self, d, t):
+            self.rec[t] = d
+
+    class RichPasteboard:
+        """Item-level fake of NSPasteboard: types() is the first item's."""
+
+        def __init__(self, items, extra_types=()):
+            self.items = [Item(r) for r in items]
+            self.extra = list(extra_types)
+            self.count = 7
+            self.reads = 0
+
+        def types(self):
+            first = self.items[0].types() if self.items else []
+            return first + self.extra
+
+        def pasteboardItems(self):
+            self.reads += 1
+            return list(self.items)
+
+        def dataForType_(self, t):
+            return self.items[0].rec.get(t) if self.items else None
+
+        def changeCount(self):
+            return self.count
+
+        def clearContents(self):
+            self.count += 1
+            self.items, self.extra = [], []
+
+        def setString_forType_(self, s, t):
+            self.items = [Item({t: s.encode()})]
+
+        def setData_forType_(self, d, t):
+            self.items = [Item({t: d})]
+
+        def writeObjects_(self, objs):
+            self.items = list(objs)
+            return True
+
+    def drive(pb):
+        now = [1000.0]
+
+        def chord(keycode, before_key=None):
+            if before_key is not None:
+                before_key()
+
+        def sleep(s):
+            now[0] += s
+
+        def before_check():
+            return lambda: True
+
+        return type_text("hi there", pasteboard=pb, chord=chord, before_check=before_check,
+                         ocr_check=lambda: True, hud_check=lambda: False,
+                         sleep=sleep, clock=lambda: now[0])
+
+    real_frontmost, real_new_item = input_module.ensure_frontmost, input_module._new_item
+    input_module.ensure_frontmost = lambda: None
+    input_module._new_item = lambda: Item({})
+    try:
+        # two items with several types each: all of it comes back
+        orig = [{"public.utf8-plain-text": b"a", "public.html": b"<b>a</b>"}, {"public.file-url": b"file:///x"}]
+        pb = RichPasteboard(orig)
+        assert drive(pb) is True
+        assert [i.rec for i in pb.items] == orig
+
+        # a password manager's concealed item: never copied, cleared afterwards
+        pb = RichPasteboard([{"public.utf8-plain-text": b"s3cret", "org.nspasteboard.ConcealedType": b""}])
+        assert drive(pb) is True
+        assert pb.items == []  # its items' types were read (to find the mark), never their data
+
+        # R15: a concealed mark on the SECOND item (types() shows only the first item's)
+        pb = RichPasteboard([{"public.utf8-plain-text": b"x"}, {"public.utf8-plain-text": b"s3cret", "org.nspasteboard.ConcealedType": b""}])
+        assert drive(pb) is True
+        assert pb.items == []
+
+        # Universal Clipboard: not read, and the clipboard keeps the typed text
+        pb = RichPasteboard([{"public.utf8-plain-text": b"from phone"}], extra_types=["com.apple.is-remote-clipboard"])
+        assert drive(pb) is True
+        assert pb.reads == 0
+        assert [i.rec for i in pb.items] == [{"public.utf8-plain-text": b"hi there"}]
+
+        # R15: a copy that lands while the clipboard is being saved is not overwritten
+        class RacingPasteboard(RichPasteboard):
+            def pasteboardItems(self):
+                self.count += 1  # another app writes during the save
+                return super().pasteboardItems()
+
+        from imctl.input import ClipboardChanged
+        pb = RacingPasteboard([{"public.utf8-plain-text": b"theirs"}])
+        try:
+            drive(pb)
+            raise AssertionError("expected ClipboardChanged")
+        except ClipboardChanged:
+            pass
+        assert [i.rec for i in pb.items] == [{"public.utf8-plain-text": b"theirs"}]
+    finally:
+        input_module.ensure_frontmost, input_module._new_item = real_frontmost, real_new_item
+
+
+def test_iphone_gates_t06():
+    """R13 §3 (t06): fail-closed _require_live without needless focus theft,
+    _cmd_home / _cmd_app_switcher gated by _require_live, app_switcher + input
+    down/up release in finally:, and `--` before free-text CLI positionals."""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+
+    import imctl.input as input_module
+    from imctl import cli, gestures, window
+    from imctl.input import (
+        FocusLost, _VK_COMMAND, _VK_DELETE, _VK_RETURN, _VK_V,
+        _cmd_chord, clear_text, kCGEventLeftMouseDown, kCGEventLeftMouseDragged,
+        kCGEventLeftMouseUp, long_press, press_key, swipe, tap,
+    )
+    from imctl.window import WindowBounds, WindowError
+
+    saved = {}
+
+    def patch(mod, name, value):
+        if (mod, name) not in saved:
+            saved[(mod, name)] = getattr(mod, name)
+        setattr(mod, name, value)
+
+    try:
+        # ── 1. _require_live ──
+        fronts, sleeps, overlays = [], [], []
+        patch(cli, "_is_front", lambda: True)  # the R18 re-probe after a Space switch is tested separately
+        patch(cli, "_bring_front", lambda: fronts.append(1))
+        patch(cli, "sleep", lambda s: sleeps.append(s))
+        patch(cli, "get_overlay", lambda: overlays.pop(0))
+
+        # live False → 3 and _bring_front never called
+        overlays[:] = [{"live": False, "overlay": "Connection Paused", "buttons": 1}]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._require_live() == 3
+        assert fronts == [] and sleeps == []
+        assert "mirror_not_live: Connection Paused" in err.getvalue()
+
+        # live True → None and _bring_front called
+        overlays[:] = [{"live": True, "overlay": None, "buttons": 0}]
+        assert cli._require_live() is None
+        assert fronts == [1] and sleeps == []
+
+        # None then True → _bring_front, sleep 0.4 s, probe again → None
+        fronts.clear(); sleeps.clear()
+        overlays[:] = [
+            {"live": None, "overlay": None, "buttons": 0},
+            {"live": True, "overlay": None, "buttons": 0},
+        ]
+        assert cli._require_live() is None
+        assert fronts == [1] and sleeps == [0.4] and overlays == []
+
+        # None then False → 3 with mirror_not_live
+        fronts.clear(); sleeps.clear()
+        overlays[:] = [
+            {"live": None, "overlay": None, "buttons": 0},
+            {"live": False, "overlay": "iPhone in Use", "buttons": 0},
+        ]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._require_live() == 3
+        assert fronts == [1] and sleeps == [0.4]
+        assert "mirror_not_live: iPhone in Use" in err.getvalue()
+
+        # None then None → 3 with mirror_state_unknown on stderr
+        fronts.clear(); sleeps.clear()
+        overlays[:] = [
+            {"live": None, "overlay": None, "buttons": 0},
+            {"live": None, "overlay": None, "buttons": 0},
+        ]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._require_live() == 3
+        assert fronts == [1] and sleeps == [0.4]
+        assert err.getvalue().strip().startswith("mirror_state_unknown:")
+        assert "nothing was sent; retry, or call phone_status" in err.getvalue()
+
+        # not running / no window at all → mirror_not_live without _bring_front
+        for reason in ("not_running", "no_window"):
+            fronts.clear(); sleeps.clear()
+            overlays[:] = [{"live": None, "overlay": None, "buttons": 0, "reason": reason}]
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                assert cli._require_live() == 3
+            assert fronts == [] and sleeps == []
+            assert (err.getvalue().strip()
+                    == "mirror_not_live: iPhone Mirroring is not running — call phone_launch first")
+
+        # overlay_snapshot marks not_running / no_window only when no window exists anywhere
+        patch(window, "_run_osascript", lambda *a, **k: (_ for _ in ()).throw(WindowError("no proc")))
+        patch(window, "is_running", lambda: False)
+        assert window.overlay_snapshot()[0].get("reason") == "not_running"
+        patch(window, "is_running", lambda: True)
+        assert "reason" not in window.overlay_snapshot()[0]
+        patch(window, "_run_osascript", lambda *a, **k: "NO_WINDOW")
+        patch(window, "get_window_info", lambda: None)
+        assert window.overlay_snapshot()[0].get("reason") == "no_window"
+        patch(window, "get_window_info", lambda: {"id": 9, "onscreen": False})
+        assert "reason" not in window.overlay_snapshot()[0]
+
+        # ── 2. _cmd_home & _cmd_app_switcher call _require_live() first ──
+        gest_calls = []
+        patch(cli, "gestures", SimpleNamespace(
+            home=lambda: gest_calls.append("home"),
+            app_switcher=lambda: gest_calls.append("app-switcher"),
+        ))
+        overlays[:] = [{"live": False, "overlay": "Connection Paused", "buttons": 1}]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._cmd_home(None) == 3
+        assert gest_calls == []
+
+        overlays[:] = [{"live": False, "overlay": "Connection Paused", "buttons": 1}]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._cmd_app_switcher(None) == 3
+        assert gest_calls == []
+
+        overlays[:] = [{"live": True, "overlay": None, "buttons": 0}]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert cli._cmd_app_switcher(None) == 0
+        assert gest_calls == ["app-switcher"]
+        assert "sent" in out.getvalue() and "opened" not in out.getvalue()
+    finally:
+        for (mod, name), value in saved.items():
+            setattr(mod, name, value)
+        saved.clear()
+
+    # ── 3. gestures.app_switcher + input down/up finally: release audit ──
+    bounds = WindowBounds(0, 0, 100, 100)
+    kinds = []
+    focus = [True]
+    drag_count = [0]
+    fail_on_drag = [None]
+
+    def fake_post(_tap, event):
+        kind = event[0]
+        kinds.append(kind)
+        if kind == kCGEventLeftMouseDragged:
+            drag_count[0] += 1
+            if fail_on_drag[0] is not None and drag_count[0] == fail_on_drag[0]:
+                raise RuntimeError("boom on 3rd drag")
+
+    try:
+        patch(gestures, "ensure_frontmost", lambda: None)
+        patch(gestures, "get_bounds", lambda: bounds)
+        patch(gestures, "time", SimpleNamespace(sleep=lambda _s: None))
+        patch(input_module, "ensure_frontmost", lambda: None)
+        patch(input_module, "get_bounds", lambda: bounds)
+        patch(input_module, "_focus_check", lambda: focus[0])
+        patch(input_module, "_source", lambda: "src")
+        patch(input_module, "CGEventCreateMouseEvent", lambda src, kind, pos, btn: (kind, pos))
+        patch(input_module, "CGEventPost", fake_post)
+        patch(input_module, "time", SimpleNamespace(sleep=lambda _s: None))
+
+        # CGEventPost raises on the 3rd drag event → mouse-up still posted
+        fail_on_drag[0] = 3
+        try:
+            gestures.app_switcher()
+            raise AssertionError("expected RuntimeError")
+        except RuntimeError as exc:
+            assert "3rd drag" in str(exc)
+        assert kinds == [
+            kCGEventLeftMouseDown,
+            kCGEventLeftMouseDragged,
+            kCGEventLeftMouseDragged,
+            kCGEventLeftMouseDragged,
+            kCGEventLeftMouseUp,
+        ], kinds
+
+        # _require_focus raising → nothing posted at all
+        kinds.clear(); drag_count[0] = 0; fail_on_drag[0] = None
+        focus[0] = False
+        try:
+            gestures.app_switcher()
+            raise AssertionError("expected FocusLost")
+        except FocusLost:
+            pass
+        assert kinds == []
+
+        # SIGTERM (SystemExit) during sleep still posts the matching release event
+        focus[0] = True
+        recorded = []
+        patch(input_module, "CGEventCreateKeyboardEvent", lambda src, code, down: ("kb", code, down))
+        patch(input_module, "CGEventSetFlags", lambda event, flags: None)
+        patch(input_module, "CGEventPost", lambda _tap, ev: recorded.append(ev))
+
+        def sigterm_sleep(_s):
+            raise SystemExit(143)
+
+        patch(input_module, "time", SimpleNamespace(sleep=sigterm_sleep))
+
+        for fn, expected in (
+            (lambda: tap(0.5, 0.5), [kCGEventLeftMouseDown, kCGEventLeftMouseUp]),
+            (lambda: long_press(0.5, 0.5), [kCGEventLeftMouseDown, kCGEventLeftMouseUp]),
+            (lambda: swipe(0.5, 0.8, 0.5, 0.2), [kCGEventLeftMouseDown, kCGEventLeftMouseUp]),
+        ):
+            recorded.clear()
+            try:
+                fn()
+                raise AssertionError("expected SystemExit")
+            except SystemExit:
+                pass
+            assert [e[0] for e in recorded] == expected, recorded
+
+        recorded.clear()
+        try:
+            press_key("return")
+            raise AssertionError("expected SystemExit")
+        except SystemExit:
+            pass
+        assert recorded == [("kb", _VK_RETURN, True), ("kb", _VK_RETURN, False)]
+
+        # _cmd_chord interrupted after key-down releases both the key and Command
+        sleeps_left = [1]
+
+        def stop_on_second_sleep(_s):
+            if sleeps_left[0] == 0:
+                raise SystemExit(143)
+            sleeps_left[0] -= 1
+
+        patch(input_module, "time", SimpleNamespace(sleep=stop_on_second_sleep))
+        recorded.clear()
+        try:
+            _cmd_chord(_VK_V)
+            raise AssertionError("expected SystemExit")
+        except SystemExit:
+            pass
+        assert recorded == [
+            ("kb", _VK_COMMAND, True),
+            ("kb", _VK_V, True),
+            ("kb", _VK_V, False),
+            ("kb", _VK_COMMAND, False),
+        ], recorded
+
+        # clear_text interrupted during Delete hold still releases Delete
+        sleeps_left[0] = 4  # 3 sleeps in Cmd+A + 1 sleep between Cmd+A and Delete
+        recorded.clear()
+        try:
+            clear_text()
+            raise AssertionError("expected SystemExit")
+        except SystemExit:
+            pass
+        assert recorded[-2:] == [("kb", _VK_DELETE, True), ("kb", _VK_DELETE, False)], recorded
+    finally:
+        for (mod, name), value in saved.items():
+            setattr(mod, name, value)
+        saved.clear()
+
+    # ── 4. argparse accepts `--` before free-text positionals ──
+    p = build_parser()
+    a = p.parse_args(["find", "--", "--exact"])
+    assert a.text == "--exact" and a.exact is False
+    a = p.parse_args(["open", "--", "-DashApp"])
+    assert a.app == "-DashApp"
+    a = p.parse_args(["key", "--expect", "Home", "--", "return"])
+    assert a.expect == "Home" and a.key == "return"
+    assert p.parse_args(["longpress", "0.5", "0.5", "1.2"]).duration == 1.2
+    assert cli._longpress_duration(p.parse_args(["longpress", "0.5", "0.5", "--duration", "1.5"])) == 1.5
+
+
+
+def test_r18_live_recheck_stdin_and_durations():
+    """R18: _require_live looks again after a Space switch; "-" reads type/find/open text from stdin;
+    an invalid long-press / swipe duration sends no event at all."""
+    import io
+    import sys as _sys
+
+    from imctl import cli
+    import imctl.input as inp
+
+    saved = (cli.get_overlay, cli._bring_front, cli._is_front, cli.sleep)
+    try:
+        seq = iter([{"live": True, "overlay": None}, {"live": False, "overlay": "Connection Paused"}])
+        cli.get_overlay = lambda: next(seq)
+        cli._is_front = lambda: False
+        cli._bring_front = lambda: None
+        cli.sleep = lambda s: None
+        assert cli._require_live() == 3  # live before the switch, paused after it → refused
+
+        cli.get_overlay = lambda: {"live": True, "overlay": None}
+        cli._is_front = lambda: True
+        brought = []
+        cli._bring_front = lambda: brought.append(1)
+        assert cli._require_live() is None and brought == [1]  # already in front: no second probe needed
+    finally:
+        cli.get_overlay, cli._bring_front, cli._is_front, cli.sleep = saved
+
+    p = cli.build_parser()
+    args = p.parse_args(["type", "--", "-"])
+    real_stdin = _sys.stdin
+    try:
+        _sys.stdin = io.StringIO("s3cret text")
+        cli._stdin_values(args)
+    finally:
+        _sys.stdin = real_stdin
+    assert args.text == "s3cret text"
+
+    posted = []
+    real = (inp._mouse_event, inp.ensure_frontmost, inp.get_bounds)
+    try:
+        inp._mouse_event = lambda *a: posted.append(a[0])
+        inp.ensure_frontmost = lambda *a, **k: None
+        for bad in (-1, float("nan"), float("inf"), 0):
+            try:
+                inp.long_press(0.5, 0.5, bad)
+                raise AssertionError("expected ValueError")
+            except ValueError:
+                pass
+            try:
+                inp.swipe(0.5, 0.8, 0.5, 0.2, duration_ms=bad)
+                raise AssertionError("expected ValueError")
+            except ValueError:
+                pass
+        assert posted == []
+    finally:
+        inp._mouse_event, inp.ensure_frontmost, inp.get_bounds = real
+
+
+def test_r19_duration_before_focus_expect_tokens_and_capture_line():
+    """R19: a bad long-press / swipe duration is refused before the mirror is brought forward (exit 2,
+    "nothing was sent"); bool is not a duration; an --expect value that starts with "-" survives as one
+    --expect=… token; a capture failure while checking --expect says nothing was sent."""
+    import io
+    import sys as _sys
+
+    from imctl import cli
+    import imctl.input as inp
+
+    called = []
+    saved = (cli._require_live, cli._require_expect)
+    real_err = _sys.stderr
+    try:
+        cli._require_live = lambda: called.append("live")
+        cli._require_expect = lambda a: called.append("expect")
+        _sys.stderr = io.StringIO()
+        p = cli.build_parser()
+        assert cli._cmd_longpress(p.parse_args(["longpress", "0.5", "0.5", "0"])) == 2
+        assert cli._cmd_swipe(p.parse_args(["swipe", "0.5", "0.8", "0.5", "0.2", "--ms", "10"])) == 2
+        err = _sys.stderr.getvalue()
+    finally:
+        cli._require_live, cli._require_expect = saved
+        _sys.stderr = real_err
+    assert called == [] and err.count("invalid_args:") == 2 and "nothing was sent" in err
+
+    try:
+        inp._check_duration(True, 0.01, 10, "x")
+        raise AssertionError("bool accepted as a duration")
+    except ValueError:
+        pass
+
+    args = cli.build_parser().parse_args(["key", "--expect=--replace", "--", "return"])
+    assert args.expect == "--replace"
+    args = cli.build_parser().parse_args(["tap", "0.5", "0.5", "--expect=-h"])
+    assert args.expect == "-h"
+
+    def boom():
+        raise cli.CaptureError("no pixels")
+    real_err = _sys.stderr
+    try:
+        _sys.stderr = io.StringIO()
+        ns = cli.build_parser().parse_args(["tap", "0.5", "0.5", "--expect=Settings"])
+        assert cli._require_expect(ns, read_screen=boom, read_sweep=boom) == 7
+        line = _sys.stderr.getvalue()
+    finally:
+        _sys.stderr = real_err
+    assert line.startswith("capture_failed:") and "nothing was sent" in line
+
+
+def test_device_run_frame_diff_alone_is_not_typed():
+    """Device run 2026-11-06 (macOS 27.2, iOS 27): type_text confirmed a paste by the frame
+    diff alone while the field never got the text. type_text now reports whether OCR saw
+    the text; _cmd_type watches for it (multi-character text) or says it cannot read it
+    back (one character), and never prints a bare "typed" without a sighting."""
+    import argparse
+    import contextlib
+    import io
+
+    from imctl import cli
+    import imctl.input as inp
+
+    # type_text: frame diff fired, OCR did not see the text, no paste box → True, seen False
+    class PB:
+        def __init__(self):
+            self.n = 0
+        def changeCount(self):
+            return self.n
+        def pasteboardItems(self):
+            return []
+        def types(self):
+            return []
+        def clearContents(self):
+            self.n += 1
+        def setString_forType_(self, s, t):
+            pass
+    real = (inp.ensure_frontmost, inp.save_pasteboard)
+    try:
+        inp.ensure_frontmost = lambda *a, **k: None
+        inp.save_pasteboard = lambda pb: ("remote", None)
+        report = {}
+        ok = inp.type_text("hello world", pasteboard=PB(), chord=lambda vk, before_key=None: before_key and before_key(),
+                           before_check=lambda: (lambda: True), ocr_check=lambda: False, hud_check=lambda: False,
+                           sleep=lambda s: None, report=report)
+        assert ok is True and report.get("seen") is False
+        report = {}
+        ok = inp.type_text("hello world", pasteboard=PB(), chord=lambda vk, before_key=None: before_key and before_key(),
+                           before_check=lambda: (lambda: True), ocr_check=lambda: True, hud_check=lambda: False,
+                           sleep=lambda s: None, report=report)
+        assert ok is True and report.get("seen") is True
+    finally:
+        inp.ensure_frontmost, inp.save_pasteboard = real
+
+    real = (cli._require_live, cli._require_expect, cli.input.type_text, cli._watch_late_paste)
+    try:
+        cli._require_live = lambda: None
+        cli._require_expect = lambda args: None
+
+        def frame_only(text, replace=False, report=None):
+            report["count_before"] = 0
+            report["seen"] = False
+            return True
+        cli.input.type_text = frame_only
+        watched = []
+        cli._watch_late_paste = lambda text, baseline=None: watched.append(baseline) or None
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._cmd_type(argparse.Namespace(text="测试文本", replace=True, expect=None)) == 4
+        assert watched == [0] and err.getvalue().startswith("type_not_confirmed:")
+        cli._watch_late_paste = lambda text, baseline=None: 3.0
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert cli._cmd_type(argparse.Namespace(text="测试文本", replace=True, expect=None)) == 0
+        assert "showed up late" in out.getvalue()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert cli._cmd_type(argparse.Namespace(text="X", replace=False, expect=None)) == 0
+        assert "OCR cannot read this text back" in out.getvalue()
+    finally:
+        (cli._require_live, cli._require_expect, cli.input.type_text,
+         cli._watch_late_paste) = real

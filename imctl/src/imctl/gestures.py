@@ -40,34 +40,30 @@ def home() -> None:
 
 
 def app_switcher() -> None:
-    """Swipe up and hold: open the app switcher."""
+    """Swipe up and hold: send the app-switcher gesture."""
+    ensure_frontmost()
     b = get_bounds()
-    from Quartz import (
-        CGEventCreateMouseEvent, CGEventPost, CGEventSourceCreate,
-        kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGEventLeftMouseDragged,
-        kCGEventSourceStateHIDSystemState, kCGHIDEventTap, kCGMouseButtonLeft,
-    )
-    import time
-
     x0, y0 = b.denormalize(0.5, 0.90)
     x1, y1 = b.denormalize(0.5, 0.45)
-    src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState)
-
-    def ev(kind, x, y):
-        CGEventPost(kCGHIDEventTap,
-                    CGEventCreateMouseEvent(src, kind, (x, y), kCGMouseButtonLeft))
-
-    ev(kCGEventLeftMouseDown, x0, y0)
-    time.sleep(0.02)
-    # Eased drag to mid-screen.
-    steps = 15
-    for i in range(1, steps + 1):
-        t = i / steps
-        e = t * t * (3 - 2 * t)  # smoothstep
-        ev(kCGEventLeftMouseDragged, x0 + (x1 - x0) * e, y0 + (y1 - y0) * e)
-        time.sleep(0.016)
-    time.sleep(0.55)  # hold to trigger the switcher
-    ev(kCGEventLeftMouseUp, x1, y1)
+    src = inp._source()
+    inp._require_focus()  # F26 / R13 §3: before mouse-down
+    cx, cy = x0, y0
+    inp._mouse_event(inp.kCGEventLeftMouseDown, cx, cy, src)
+    try:
+        time.sleep(0.02)
+        # Eased drag to mid-screen.
+        steps = 15
+        for i in range(1, steps + 1):
+            t = i / steps
+            e = t * t * (3 - 2 * t)  # smoothstep
+            nx, ny = x0 + (x1 - x0) * e, y0 + (y1 - y0) * e
+            inp._mouse_event(inp.kCGEventLeftMouseDragged, nx, ny, src)
+            cx, cy = nx, ny
+            time.sleep(0.016)
+        inp._require_focus()  # R18: before the hold, the mirror must still be in front
+        time.sleep(0.55)  # hold to trigger the switcher
+    finally:
+        inp._mouse_event(inp.kCGEventLeftMouseUp, cx, cy, src)
 
 
 # Wheel pixels per window point of list movement, measured on iPhone Mirroring

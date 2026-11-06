@@ -43,7 +43,7 @@ const tools = tl.result?.tools || [];
 proc.kill();
 
 const layers = [
-  { prefix: "mac_", title: "Mac layer (computer-use)", note: "cliclick · screencapture · JXA System Events" },
+  { prefix: "mac_", title: "Mac layer (computer-use)", note: "macOS Accessibility API (src/mac-ax.js) · cliclick · screencapture" },
   { prefix: "browser_", title: "Browser layer (browser-use)", note: "Playwright" },
   { prefix: "phone_", title: "iPhone layer (device-use)", note: "imctl / iPhone Mirroring" },
 ];

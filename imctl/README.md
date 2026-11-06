@@ -39,8 +39,11 @@ $ imctl open Photos
 - **Vision** — the macOS Vision framework runs OCR locally on a
   window screenshot (captured by CGWindow id, so it is the window's own
   pixels even when covered) and returns text with normalized coordinates.
-- **Verification** — every gesture can be followed by a downsampled
-  pixel-hash comparison to confirm the screen actually changed.
+- **Verification** — `imctl verify` compares downsampled pixel hashes
+  (`capture_hash`) before and after a gesture; `scroll`, `type` and `open`
+  verify using luma frame diffs (`mean_abs_diff`) and/or Vision OCR; `tap`,
+  `longpress`, `swipe`, `home` and `app-switcher` do not verify post-action
+  screen changes (optional `--expect` checks on-screen OCR text before acting).
 
 ## Why these specific parameters
 
@@ -53,7 +56,7 @@ the mirroring gesture recognizer:
 | swipe steps | 20 | single-shot drags are **not** recognized as swipes |
 | initial nudge | 3 px | disambiguates swipe from icon long-press-drag |
 | swipe curve | quadratic ease-in-out | stays inside the recognizer's velocity window |
-| home gesture start | 0.95 height | higher start points are treated as in-app scrolls |
+| home gesture start | 0.90 height | higher start points are treated as in-app scrolls; the bottom ~7% (0.95) is macOS window chrome where events do not reach the phone |
 | text input | clipboard + Cmd+V | direct keystroke synthesis breaks under CJK IMEs |
 
 ## Requirements
@@ -81,18 +84,18 @@ imctl status
 | `screenshot [PATH]` | capture the mirroring window to PNG by window id (works when covered) |
 | `resume` | click Resume when the window shows Connection Paused (never on a setup or welcome screen) |
 | `launch` | ensure mirroring is running and frontmost; resumes a paused session, never clicks a setup screen (`mirror_setup_required`) |
-| `tap X Y` | tap at normalized coords (0-1) |
-| `longpress X Y [D]` | long-press (default 0.8s) |
-| `swipe FX FY TX TY [--ms]` | eased swipe between two points |
-| `home` | home gesture (bottom-edge swipe up) |
-| `app-switcher` | swipe up and hold |
-| `scroll up/down [D]` | scroll by normalized distance |
+| `tap X Y [--expect TEXT]` | tap at normalized coords (0-1) |
+| `longpress X Y [D] [--duration D] [--expect TEXT]` | long-press (default 0.8s) |
+| `swipe FX FY TX TY [--ms MS] [--expect TEXT]` | eased swipe between two points |
+| `home` | send home gesture (bottom-edge swipe up; requires live mirror; screen not verified) |
+| `app-switcher` | send app-switcher gesture (swipe up and hold; requires live mirror; screen not verified) |
+| `scroll up/down [D] [--expect TEXT]` | scroll by normalized distance |
 | `page left/right` | home-screen paging |
-| `type TEXT` | type text (clipboard-based, IME-safe) |
-| `key K` | return / delete / up / down / left / right |
+| `type [--replace] [--expect TEXT] TEXT\|-` | type text via clipboard (IME-safe; `-` reads stdin; never echoes typed text) |
+| `key [--expect TEXT] K` | return / delete / up / down / left / right |
 | `ocr` | OCR the screen with coordinates |
-| `find TEXT` | locate text on screen |
-| `open APP` | open an app via Spotlight + OCR + tap (only an exact label inside the Top Hit card) |
+| `find [--exact] TEXT\|-` | locate text on screen (`-` reads stdin) |
+| `open APP\|-` | open an app via Spotlight + OCR + tap (`-` reads stdin; only an exact label inside the Top Hit card) |
 | `verify ACTION` | run a gesture and verify the screen changed |
 
 ## Python API
