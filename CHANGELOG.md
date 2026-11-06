@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3] — 2026-11-06
+
+### Tests
+- The local test suite also closes and reopens a window under a window-level
+  `element_index` (the default surface) and checks that `mac_get` and a
+  physical `mac_click` both return `element_no_longer_valid`, with no click
+  sent.
+
 ## [0.2.2] — 2026-11-06
 
 ### Fixed

@@ -1182,7 +1182,7 @@ while true; do echo c >> "${log}"; sleep 0.1; done
 // 0.2.2 本机：命中检测到物理点击之间的空档（Reddit r/mcp 评论建议的可重复测试）。单独起一个带
 // NORACU_TEST_PHYSICAL_GAP_MS 的 server：最后一次复查之后、点击之前等待，并在 stderr 报告；测试在这一刻
 // 遮挡 / 移走 / 关闭目标窗口。点击只会落在测试自建的 TextEdit 文档上（目标下面垫着一个同尺寸的文档）。
-// 断言：受干扰的点击结果永远不是 delivered_verified；app 级快照的元素在窗口关掉重开后失效。
+// 断言：受干扰的点击结果永远不是 delivered_verified；app 级与 window 级快照的元素在窗口关掉重开后失效。
 if (LOCAL && TE_READY()) {
   const GAP_MS = 2500;
   const te = (lines) => spawnSync("/usr/bin/osascript", lines.flatMap((l) => ["-e", l]), { encoding: "utf8", timeout: 15000 });
@@ -1238,6 +1238,18 @@ if (LOCAL && TE_READY()) {
     const after = await gcall("mac_get", { element_index: ai });
     check("0.2.2 本机：app 级索引所在窗口关掉重开（同名同内容同位置）→ element_no_longer_valid",
       Number.isInteger(ai) && !okBefore?.isError && after?.isError && /element_no_longer_valid/.test(gsay(after)), `${gsay(okBefore).slice(0, 60)} | ${gsay(after).slice(0, 140)}`);
+    // the same for an index from a window-level snapshot (the default surface): the window is found again only
+    // by its CGWindowID, so a reopened look-alike is stale for a read and for an action alike (nothing is sent)
+    const wi = await setup();
+    const wBefore = await gcall("mac_get", { element_index: wi });
+    closeDoc("noracu-gap-target"); await sleepMs(500); mkDoc("noracu-gap-target"); await sleepMs(900);
+    const wGet = await gcall("mac_get", { element_index: wi });
+    const sinceClick = gerr.length;
+    const wClick = await gcall("mac_click", { element_index: wi, mechanism: "physical" });
+    const wSent = gerr.slice(sinceClick).includes("test gap:");
+    check("0.2.2 本机：window 级索引所在窗口关掉重开（同名同内容同位置）→ mac_get 与 mac_click 都报 element_no_longer_valid，点击未发出",
+      Number.isInteger(wi) && !wBefore?.isError && wGet?.isError && /element_no_longer_valid/.test(gsay(wGet)) && wClick?.isError && /element_no_longer_valid/.test(gsay(wClick)) && !/delivery=delivered_/.test(gsay(wClick)) && !wSent,
+      `${gsay(wBefore).slice(0, 60)} | ${gsay(wGet).slice(0, 120)} | ${gsay(wClick).slice(0, 160)} | gap hook fired: ${wSent}`);
   } finally {
     closeDoc("noracu-gap-");
     gs.kill();

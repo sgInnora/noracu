@@ -1,7 +1,7 @@
 # Tool reference
 
 > Auto-generated from the running server (`node scripts/gen-tools.mjs`) — always in sync with the implementation.
-> noracu v0.2.2 · 46 tools
+> noracu v0.2.3 · 46 tools
 
 ## Mac layer (computer-use)
 
