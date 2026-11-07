@@ -22,6 +22,10 @@ export function loadEngine(path) {
     console, Date, JSON, Math, Number, String, Boolean, Object, Array, Set, Map, RegExp, Error,
   });
   vm.runInContext(src, ctx, { filename: "mac-ax.js" });
+  // the layout resolver asks AppKit what each key types; without macOS a test gets the US (ANSI) answers
+  // for the keys it uses, and replaces ctx.keyCodeForChar to model another layout
+  const ANSI = { a: 0, c: 8, v: 9, x: 7, z: 6, q: 12, "=": 24 };
+  ctx.keyCodeForChar = (ch) => (Object.prototype.hasOwnProperty.call(ANSI, ch) ? ANSI[ch] : null);
   return ctx;
 }
 

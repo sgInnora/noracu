@@ -533,10 +533,22 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
     : say({ ok: true, point: [5, 5], hit: "reaches", pid: 4242, wid: 1, before: {} });
   if (req.op === "observe_after") return say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["focus"], surfaces: [], ...(req.physical === true ? { note: "physical-flag-seen point=" + JSON.stringify(req.point) + " wid=" + req.wid } : {}) });
   if (req.op === "frontmost") {
-    const o = { ok: true, front: { pid: 777, name: "Other", bundle: "x.other" }, target: { pid: 4242, name: "Fake", bundle: "test.fake" }, match: false };
+    const o = req.app === "Other"
+      ? { ok: true, front: { pid: 777, name: "Other", bundle: "x.other" }, target: { pid: 777, name: "Other", bundle: "x.other" }, match: true }
+      : { ok: true, front: { pid: 777, name: "Other", bundle: "x.other" }, target: { pid: 4242, name: "Fake", bundle: "test.fake" }, match: false };
     // at: x >= 500 is under a notification banner, y < 30 is the menu bar, anything else is the frontmost app's window
     if (req.at) o.top = req.at[0] === 5 && req.at[1] === 5 ? { pid: 4242, owner: "Fake", layer: 0, wid: 1 } : req.at[0] >= 500 ? { pid: 999, owner: "NotificationCenter", layer: 23, wid: 9 } : req.at[1] < 30 ? { pid: 640, owner: "Window Server", layer: 24, wid: 1 } : { pid: 777, owner: "Other", layer: 0, wid: 5 };
     return say(o);
+  }
+  // the frontmost app ("Other") has one window whose center (600,200) lies under the banner (x >= 500)
+  if (req.op === "windows") return say({ ok: true, windows: [{ id: 5, app: "Other", pid: 777, title: "O", bounds: [400, 100, 400, 200], onscreen: true, layer: 0 }], displays: [] });
+  // insert_text into the focused element of the frontmost app ("Other"): the text picks the answer
+  if (req.op === "insert_text") {
+    const nf = { ok: false, code: "ACTION_NOT_SUPPORTED", delivery: "not_delivered", retry: "safe" };
+    if (req.text === "NOFOCUS") return say({ ...nf, message: '"Other" reports no focused element', details: { kind: "no_focus", app: "Other" } });
+    if (req.text === "TERM") return say({ ...nf, message: 'the focused element of "Other" (AXTextArea) takes no text through accessibility', details: { kind: "not_text", role: "AXTextArea", textlike: true, app: "Other" } });
+    if (req.text === "BUTTON") return say({ ...nf, message: 'the focused element of "Other" (AXButton) takes no text through accessibility and is not a text input — focus a text field first', details: { kind: "not_text", role: "AXButton", textlike: false, app: "Other" } });
+    return say({ ok: true, mechanism: "semantic", via: "AXSelectedText", how: "focused", role: "AXTextField", app: req.app || "Other", delivery: "delivered_verified", retry: "unsafe" });
   }
   if (req.op === "key") {
     if (process.env.NORACU_TEST_KEY_REQ) fs.appendFileSync(process.env.NORACU_TEST_KEY_REQ, JSON.stringify(req) + "\\n");
@@ -571,6 +583,9 @@ if [ "$3" = "type" ] && [ "$IN" = "X" ]; then echo "typed 1 chars (the screen ch
 if [ "$3" = "type" ] && [ "$IN" = "Y" ]; then echo "typed 1 chars (one character: OCR saw it appear, which is no proof of where it landed — check the field; the clipboard still holds the typed text)"; exit 0; fi
 if [ "$3" = "type" ] && [ "$IN" = "LATEtext" ]; then echo "typed 8 chars (the text showed up late, during an extra 3s check after the 2.5s confirmation window — OCR cannot tell whether that is the paste or a line repeating it, such as a search result: check the field before typing again; the clipboard still holds the typed text)"; exit 0; fi
 if [ "$3" = "type" ] && [ "$IN" = "Seen here" ]; then echo "typed 9 chars"; exit 0; fi
+if [ "$3" = "type" ] && [ "$IN" = "ok" ]; then echo "typed 2 chars (the screen changed after the paste, but a text of fewer than four characters, spaces and case aside, is never confirmed by OCR — check the field; the clipboard still holds the typed text)"; exit 0; fi
+if [ "$3" = "type" ] && [ "$IN" = "STRIPtext" ]; then echo "typed 9 chars (OCR saw the text appear only in the strip at the top of the screen, where a field cannot be told from a notification banner — check the field; the clipboard still holds the typed text)"; exit 0; fi
+if [ "$3" = "type" ] && [ "$IN" = "AZERTY" ]; then echo "keyboard_layout: the Mac keyboard layout types \\"q\\" on the key that ⌘A is sent from (key code 0), so iPhone Mirroring would get ⌘Q — nothing was sent; switch the Mac to a QWERTY-style input source (U.S., ABC, Pinyin) and retry" >&2; exit 2; fi
 if [ "$3" = "scroll" ]; then echo "scrolled down 0.5"; exit 0; fi
 if [ "$3" = "open" ] && [ "$IN" = "NoSuchApp" ]; then echo "app not found: 'NoSuchApp' (Spotlight showed no Top Hit)"; exit 1; fi
 if [[ "$*" == *"--expect=CapFail"* ]]; then echo "capture_failed: could not capture the iPhone Mirroring window to check --expect; no image was returned, so nothing was sent" >&2; exit 7; fi
@@ -580,6 +595,14 @@ if [ "$3" = "status" ]; then
 fi
 echo "home gesture sent"
 `, { mode: 0o700 });
+  // the first run of a newly written executable can wait on macOS's code scan for over a second — longer than
+  // NORACU_AX_TIMEOUT_MS below — so each fake runs once here, before any timed call (CI flake: ax_timeout on the
+  // first mac_ax_state)
+  {
+    const { execFileSync } = await import("node:child_process");
+    try { execFileSync(fake, [], { input: '{"op":"warm"}', timeout: 30000 }); } catch {}
+    try { execFileSync(fakeClick, ["warm"], { timeout: 30000 }); writeFileSync(clickLog, ""); } catch {}
+  }
   const menuReply = join(dir, "menu-reply.json");
   const menuReqLog = join(dir, "menu-req.jsonl");
   const keyReqLog = join(dir, "key-req.jsonl");
@@ -594,11 +617,12 @@ echo "home gesture sent"
   const menuReqs = () => { try { return readFileSync(menuReqLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   try {
     const say = (r) => String(r?.content?.[0]?.text);
-    const a = jsonOf(await s.call("mac_ax_state", { app: "Fake" }));
+    const a0 = await s.call("mac_ax_state", { app: "Fake" });
+    const a = jsonOf(a0);
     const one = a.elements?.find((e) => e.title === "One")?.i;
     const f = jsonOf(await s.call("mac_find", { app: "Fake", role: "button" }));
     const three = f.matches?.find((e) => e.title === "Three")?.i;
-    check("B5：索引跨快照唯一（mac_find 不复用旧编号）", Number.isInteger(one) && Number.isInteger(three) && one !== three && a.snapshot_id !== f.snapshot_id, `One=${one} (${a.snapshot_id}) Three=${three} (${f.snapshot_id})`);
+    check("B5：索引跨快照唯一（mac_find 不复用旧编号）", Number.isInteger(one) && Number.isInteger(three) && one !== three && a.snapshot_id !== f.snapshot_id, `One=${one} (${a.snapshot_id}) Three=${three} (${f.snapshot_id})${Number.isInteger(one) ? "" : ` | mac_ax_state: ${say(a0).slice(0, 160)}`}`);
     if (!Number.isInteger(one) || !Number.isInteger(three)) throw new Error("fake engine snapshot failed — later B5 calls would run without an element_index");
     const c1 = await s.call("mac_click", { element_index: one });
     check("B5：旧快照的索引在新快照之后仍指向原元素（C1-3）", !c1?.isError && /"One"/.test(say(c1)), say(c1).slice(0, 90));
@@ -616,6 +640,27 @@ echo "home gesture sent"
     check("0.2.1：x,y 点击处最上层是前台应用的窗口 → 发送并写明顶层窗口", !rx1?.isError && /top window: "Other"/.test(say(rx1)) && /c:100,100/.test(sent()), `${say(rx1).slice(0, 90)} | cliclick: ${JSON.stringify(sent())}`);
     const rx2 = await s.call("mac_click", { x: 600, y: 100 });
     check("0.2.1：x,y 点击处被别的应用（通知横幅）盖住 → occluded，不发送", rx2?.isError && /^ERROR: occluded: 600,100 is covered by "NotificationCenter" \(window layer 23\), not "Other" \(the frontmost app\)/.test(say(rx2)) && /delivery=not_delivered, retry=safe/.test(say(rx2)) && !/c:600,100/.test(sent()), `${say(rx2).slice(0, 120)} | cliclick: ${JSON.stringify(sent())}`);
+    // review R39: mac_scroll's refusal uses scroll wording — it takes no force and no app
+    const sc0 = await s.call("mac_scroll", { direction: "down" });
+    check("0.2.6（R39）：mac_scroll 中心被盖住 → occluded，提示只指向 element_index，不出现 force:true / pass app",
+      sc0?.isError && /^ERROR: occluded: 600,200 is covered by "NotificationCenter" \(window layer 23\), not "Other" \(the frontmost app\)/.test(say(sc0))
+        && /pass element_index to scroll a specific element$/.test(say(sc0)) && !/force:true|pass app:/.test(say(sc0)) && /delivery=not_delivered, retry=safe/.test(say(sc0)),
+      say(sc0).slice(0, 200));
+    // review 0.2.6 #2: mac_type into the focused element names the app; an app with no focused element
+    // gets keystrokes only when app names it; a text view accessibility cannot write still gets them
+    const ty1 = await s.call("mac_type", { text: "hello" });
+    const ty2 = await s.call("mac_type", { text: "NOFOCUS" });
+    const ty3 = await s.call("mac_type", { text: "NOFOCUS", app: "Other" });
+    const ty4 = await s.call("mac_type", { text: "TERM" });
+    const ty5 = await s.call("mac_type", { text: "BUTTON" });
+    check("0.2.6（#2）：mac_type 写焦点元素时写明应用；无焦点元素且未给 app → no_focus 不发键；给 app → 发键并写明；终端类照旧发键；按钮不发键",
+      /typed 5 chars into the focused element of "Other" via semantic AXSelectedText — delivery=delivered_verified/.test(say(ty1))
+        && ty2?.isError && /^ERROR: no_focus: "Other" \(the frontmost app\) reports no focused element/.test(say(ty2)) && /app:"Other"/.test(say(ty2)) && /delivery=not_delivered, retry=safe/.test(say(ty2))
+        && !ty3?.isError && /typed 7 chars into "Other" \(it reports no focused element\) via physical keystrokes/.test(say(ty3))
+        && !ty4?.isError && /typed 4 chars into the focused element of "Other" via physical keystrokes/.test(say(ty4))
+        && ty5?.isError && /action_not_supported/.test(say(ty5))
+        && (sent().match(/t:NOFOCUS/g) || []).length === 1 && /t:TERM/.test(sent()) && !/t:BUTTON/.test(sent()),
+      [ty1, ty2, ty3, ty4, ty5].map((r) => say(r).slice(0, 110)).join(" | ") + ` | cliclick: ${JSON.stringify(sent())}`);
     const rx3 = await s.call("mac_click", { x: 600, y: 120, force: true });
     check("0.2.1：force:true 跳过顶层窗口检查并如实标注", !rx3?.isError && /unchecked: force/.test(say(rx3)) && /c:600,120/.test(sent()), `${say(rx3).slice(0, 90)} | cliclick: ${JSON.stringify(sent())}`);
     const rx4 = await s.call("mac_click", { x: 100, y: 10 });
@@ -649,16 +694,21 @@ echo "home gesture sent"
       lc?.isError && /came on top at 700,70 between the hit test and the input/.test(say(lc)) && /delivery=not_delivered, retry=safe/.test(say(lc)) && !/c:700,70/.test(sent()),
       `${say(lc).slice(0, 120)} | cliclick: ${JSON.stringify(sent()).slice(-60)}`);
     // 0.2.1: named keys go through the engine as HID key events (Chrome's address bar ignored cliclick's Return);
-    // printable-character chords stay on cliclick
+    // 0.2.6: a cmd/ctrl chord on a character goes to the engine as { char } (it finds the key in the current layout);
+    // a plain character or a shift-only chord is still typed through cliclick
     const k1 = await s.call("mac_key", { key: "return" });
     const k2 = await s.call("mac_key", { key: "cmd-arrow-up" });
     const k3 = await s.call("mac_key", { key: "cmd-c" });
+    const k4 = await s.call("mac_key", { key: "cmd-V" });
+    const k5 = await s.call("mac_key", { key: "shift-z" });
     const kr = keyReqs();
-    check("0.2.1：mac_key return / cmd-arrow-up 走引擎 HID 键事件（键码与 Fn/小键盘标志），cmd-c 仍走 cliclick",
-      !k1?.isError && /HID key event/.test(say(k1)) && !k2?.isError && !k3?.isError && !/HID key event/.test(say(k3))
-        && kr.length === 2 && kr[0].code === 36 && kr[0].mods.length === 0 && kr[0].fn_key === false
+    check("0.2.1/0.2.6：mac_key return / cmd-arrow-up 走引擎键码；cmd-c / cmd-V 走引擎 char（按当前布局找键）；shift-z 仍走 cliclick",
+      !k1?.isError && /HID key event/.test(say(k1)) && !k2?.isError && !k3?.isError && /HID key event/.test(say(k3)) && !k4?.isError && !k5?.isError
+        && kr.length === 4 && kr[0].code === 36 && kr[0].mods.length === 0 && kr[0].fn_key === false
         && kr[1].code === 126 && JSON.stringify(kr[1].mods) === '["cmd"]' && kr[1].fn_key === true && kr[1].numpad === true
-        && !/kp:return/.test(sent()) && /kd:cmd t:c ku:cmd/.test(sent()),
+        && kr[2].char === "c" && JSON.stringify(kr[2].mods) === '["cmd"]' && kr[2].code === undefined
+        && kr[3].char === "V" && JSON.stringify(kr[3].mods) === '["cmd"]'
+        && !/kp:return/.test(sent()) && !/t:c|t:V/.test(sent()) && /kd:shift t:z ku:shift/.test(sent()),
       `${say(k1).slice(0, 60)} | engine: ${JSON.stringify(kr)} | cliclick: ${JSON.stringify(sent()).slice(-80)}`);
     // mutating vs read-only engine timeout labels (NORACU_AX_TIMEOUT_MS=1500)
     const sv = await s.call("mac_set_value", { element_index: one, value: "x" });
@@ -716,6 +766,16 @@ echo "home gesture sent"
     check("0.2.5：phone_type 单字符、迟到（R38：不论看到在哪）→ delivered_unverified；在输入处看到 → delivered_verified；phone_scroll → delivered_unverified",
       /delivery=delivered_unverified/.test(say(tY)) && /showed up late/.test(say(tL)) && /delivery=delivered_unverified/.test(say(tL)) && /delivery=delivered_verified/.test(say(tS)) && /delivery=delivered_unverified/.test(say(sc)),
       [say(tY), say(tL), say(tS), say(sc)].map((t) => t.slice(-40)).join(" | "));
+    const tO = await s.call("phone_type", { text: "ok" });
+    const tT = await s.call("phone_type", { text: "STRIPtext" });
+    check("0.2.6（#7）：phone_type 太短 / 只在顶部横幅带看到 → 写明原因，delivered_unverified",
+      !tO?.isError && /never confirmed by OCR/.test(say(tO)) && /delivery=delivered_unverified, retry=unsafe/.test(say(tO))
+        && !tT?.isError && /cannot be told from a notification banner/.test(say(tT)) && /delivery=delivered_unverified, retry=unsafe/.test(say(tT)),
+      [say(tO), say(tT)].map((t) => t.slice(-60)).join(" | "));
+    const tK = await s.call("phone_type", { text: "AZERTY" });
+    check("0.2.6（#5）：phone_type 遇到 Mac 键盘布局不符 → keyboard_layout 原样透传，not_delivered / retry=safe",
+      tK?.isError && /^ERROR: keyboard_layout: the Mac keyboard layout types "q"/.test(say(tK)) && /delivery=not_delivered, retry=safe/.test(say(tK)),
+      say(tK).slice(0, 200));
     check("B5/R19：phone_open app not found → delivered_unverified；--expect 截图失败 → not_delivered",
       nf?.isError && /app not found/.test(say(nf)) && /delivery=delivered_unverified, retry=safe/.test(say(nf))
         && cf?.isError && /capture_failed/.test(say(cf)) && /delivery=not_delivered, retry=safe/.test(say(cf)),
@@ -881,6 +941,10 @@ if (LOCAL) {
   const fixtureUrl = pathToFileURL(fixturePath).href;
   const popupUrl = pathToFileURL(popupPath).href;
   const manyUrl = pathToFileURL(manyPath).href;
+  // review 0.2.6 #8: a page longer than every cap
+  const longPath = join(dir, "long.html");
+  writeFileSync(longPath, `<!doctype html><html><head><meta charset='utf-8'><title>Long Page</title></head><body>${Array.from({ length: 600 }, (_, i) => `<p>Paragraph number ${i} of the long fixture page.</p>`).join("")}<p>LAST-LINE-MARKER</p></body></html>`);
+  const longUrl = pathToFileURL(longPath).href;
   const s = await spawnServer({ NORACU_ALLOW_FILE_URL: "1" });
   const say = (r) => String(r?.content?.[0]?.text || "");
   try {
@@ -924,6 +988,15 @@ if (LOCAL) {
     const snapMany = say(await s.call("browser_snapshot"));
     check("t07：超过 100 个可交互元素时提示 truncated 与遗漏数", snapMany.includes("truncated") && snapMany.includes("25 left out"), snapMany.slice(-90));
 
+    await s.call("browser_navigate", { url: longUrl });
+    const snapLong = say(await s.call("browser_snapshot"));
+    const readLong = say(await s.call("browser_read"));
+    const readSel = say(await s.call("browser_read", { selector: "body" }));
+    check("0.2.6（#8）：长页面的 ARIA 快照 / browser_read 被截断时写明截断与原长度",
+      /\[aria snapshot truncated: showing \d+ of \d+ chars/.test(snapLong) && !snapLong.includes("LAST-LINE-MARKER") && snapLong.includes("[clickable elements")
+        && /\n\[truncated: showing 12000 of \d+ chars\]$/.test(readLong) && /\n\[truncated: showing 8000 of \d+ chars\]$/.test(readSel),
+      `${snapLong.match(/\[aria snapshot truncated[^\]]*\]/)?.[0]} | ${readLong.slice(-50)} | ${readSel.slice(-45)}`);
+    await s.call("browser_navigate", { url: manyUrl });
     const scDown = await s.call("browser_scroll", { direction: "down", pages: 1 });
     await s.call("browser_scroll", { direction: "up", pages: 2 });
     const scTop = await s.call("browser_scroll", { direction: "up", pages: 1 });
@@ -947,6 +1020,7 @@ if (LOCAL) {
     "t07：disabled 按钮点击报 not_actionable",
     "t07：window.open 打开新页后活动页不变",
     "t07：超过 100 个可交互元素时提示 truncated 与遗漏数",
+    "0.2.6（#8）：长页面的 ARIA 快照 / browser_read 被截断时写明截断与原长度",
     "t07：browser_scroll 回报 scrollY 变化与 did not move"
   );
 }

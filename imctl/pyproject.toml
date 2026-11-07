@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "imctl"
-version = "0.2.5"
+version = "0.2.6"
 description = "Control iPhone Mirroring on macOS from the CLI — CGEvent input, Vision OCR, pixel verification"
 readme = "README.md"
 license = { text = "MIT" }

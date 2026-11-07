@@ -176,9 +176,11 @@ mac_menu_command { "app": "TextEdit", "command": "Edit > Select All" }
   element through accessibility (`AXSelectedText`): IME-safe, the clipboard is
   untouched, and the value is read back. With `element_index` it targets that
   element (also in a background window); `replace: true` sets the whole value.
-- Keystrokes are the fallback only where accessibility reports no focus or a text
-  view it cannot write (a terminal). They are not IME-safe; `mechanism:
-  "physical"` forces them.
+- Keystrokes are the fallback only into a text view accessibility cannot write
+  (a terminal). When the frontmost app reports no focused element at all,
+  `mac_type` sends keystrokes only if `app` names that app; without `app` it
+  returns `no_focus` and sends nothing. Keystrokes are not IME-safe;
+  `mechanism: "physical"` forces them. The result names the app it typed into.
 - `mac_paste { "text": "你好" }` copies the clipboard aside, writes the text, sends
   ⌘V, and puts every previous item back once the paste shows (else after 1 s) —
   unless something else wrote to the clipboard meanwhile. A concealed
@@ -271,6 +273,7 @@ model — don't let it override the task.
 | `not_actionable: …` | the element is disabled, off screen, or its window is minimized |
 | `not_confirmed: …` | the action ran but the read-back does not show the expected result — check `delivery` / `retry` before repeating |
 | `focus_lost: …` / `focus_unknown: …` | the focus guard (`app`) could not confirm that app is frontmost — bring it forward before sending keystrokes or paste |
+| `no_focus: …` | `mac_type` without `element_index` or `app`, and the frontmost app reports no focused element — keystrokes would go wherever macOS routes them, so nothing was sent; pass `element_index`, or `app` to type into that app anyway |
 | `policy_denied: …` | a guarded key chord or menu item without `force`, a protected process, or a DevTools port without `NORACU_ALLOW_CDP=1` |
 | `clipboard_remote: …` / `clipboard_too_large: …` | `mac_paste` refused Universal Clipboard content or a clipboard over 64 MB unless `force: true` |
 | `notification_not_found: …` | `mac_notifications` dismiss/act target id or index is no longer on screen or no longer matches `expected_app` / `expected_title` |

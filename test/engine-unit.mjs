@@ -658,6 +658,24 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   }
 }
 
+// review 0.2.6 #4: mac_clipboard_read marks Universal Clipboard content as remote (and still reads it)
+{
+  const ctx = loadEngine(ENGINE);
+  const arr = (xs) => ({ isNil: () => false, count: xs.length, objectAtIndex: (i) => ({ js: xs[i] }) });
+  const mk = (types) => ({ types: arr(types), changeCount: 7, pasteboardItems: arr([]), stringForType: () => ({ isNil: () => false, js: "copied text" }), dataForType: () => null });
+  const remoteTypes = ["com.apple.is-remote-clipboard", "public.utf8-plain-text"];
+  ctx.$.NSPasteboard = { generalPasteboard: mk(remoteTypes) };
+  ctx.pbItemTypes = () => remoteTypes.slice();
+  const rRemote = ctx.opClipboard({ format: "auto" });
+  ctx.$.NSPasteboard = { generalPasteboard: mk(["public.utf8-plain-text"]) };
+  ctx.pbItemTypes = () => ["public.utf8-plain-text"];
+  const rLocal = ctx.opClipboard({ format: "auto" });
+  check("0.2.6 (#4): clipboard read — Universal Clipboard content → remote:true with a note; local content → no remote mark",
+    rRemote.ok === true && rRemote.remote === true && /another device/.test(rRemote.note || "") && rRemote.type === "text" && rRemote.text === "copied text"
+      && rLocal.ok === true && rLocal.remote === undefined && rLocal.type === "text",
+    JSON.stringify({ rRemote, rLocal }));
+}
+
 // ── mac_paste: one engine call, clipboard copied aside and put back (R13 §2) ───────────────────────
 {
   // a fake pasteboard and clock; frontApp/findApp come from installApp
@@ -677,7 +695,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     ctx.pbWriteText = (t) => { log.push(`write:${t}`); const mine = ++cc; pb.types = ["public.utf8-plain-text", "org.nspasteboard.TransientType"]; pb.items = [[["public.utf8-plain-text", t]]]; if (opts.afterWrite) opts.afterWrite(api); return mine; };
     ctx.pbRestore = (saved) => { log.push("restore"); cc++; pb.items = saved.items; pb.types = ["public.utf8-plain-text"]; return true; };
     ctx.pbClear = () => { log.push("clear"); cc++; pb.items = []; pb.types = []; };
-    // E2 T7: ⌘V is posted by the engine as key code 9 with the ⌘ modifier (no cliclick)
+    // E2 T7: ⌘V is posted by the engine on the layout's V key with the ⌘ modifier (no cliclick)
     ctx.postKey = (code, mods) => { log.push(`key:${code}:${mods.map((m) => m[0]).join("+")}`); if (opts.afterKey) opts.afterKey(api); return opts.keyResult ?? true; };
     ctx.releaseStuckModifiers = () => [];
     ctx.keyboardLayoutId = () => opts.layout ?? "com.apple.keylayout.US";
@@ -759,13 +777,17 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
       !r.ok && r.delivery === "not_delivered" && r.code === "ACTION_FAILED" && t.log[t.log.length - 1] === "restore", JSON.stringify({ r, log: t.log }));
   }
   {
-    // E2 T7: a Dvorak layout has K on key code 9 → refused before anything is read or written; Dvorak - QWERTY ⌘ is fine
-    const t = setup({ layout: "com.apple.keylayout.Dvorak" });
+    // 0.2.6: ⌘V goes to the key that types V in this layout (Dvorak: key code 47); a layout without a V key → refused,
+    // nothing read or written
+    const t = setup({ evidence: "before", afterKey: (a) => a.setEvidence("after") });
+    t.ctx.keyCodeForChar = (ch, flags) => (ch === "v" && flags === 0x100000 ? 47 : null);
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
-    const t2 = setup({ layout: "com.apple.keylayout.DVORAK-QWERTYCMD", evidence: "before", afterKey: (a) => a.setEvidence("after") });
+    const t2 = setup({});
+    t2.ctx.keyCodeForChar = () => null;
     const r2 = t2.ctx.opPaste({ op: "paste", text: "hello" });
-    check("paste: Dvorak → refused, nothing read or written; Dvorak - QWERTY ⌘ → pasted",
-      !r.ok && r.delivery === "not_delivered" && t.log.length === 0 && r2.ok && r2.delivery === "delivered_verified", JSON.stringify({ r, log: t.log, r2: r2.delivery }));
+    check("paste: ⌘V on the layout's own V key (Dvorak → 47, asked with ⌘ held); no V key → refused, nothing read or written",
+      r.ok && r.delivery === "delivered_verified" && t.log.includes("key:47:55") && !r2.ok && r2.delivery === "not_delivered" && r2.details?.kind === "keyboard_layout" && t2.log.length === 0,
+      JSON.stringify({ r: r.delivery, log: t.log, r2: r2.code, log2: t2.log }));
   }
   {
     // R15: a copy that lands while the clipboard is being copied aside is not overwritten
@@ -911,6 +933,23 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("insert_text: value unchanged but the caret moved → delivered_unverified (selection_moved), never verified",
     rMoved.ok === true && rMoved.delivery === "delivered_unverified" && rMoved.reason === "selection_moved", JSON.stringify(rMoved));
   delete tf.attrs; delete tf.onSet;
+  {
+    // review 0.2.6 #2: the focused-element path names the app it looked in, found or not
+    const c2 = loadEngine(ENGINE);
+    const f2 = el("AXTextField", { value: "ab", frame: [10, 10, 200, 22], settable: { AXSelectedText: true } });
+    f2.attrs = { AXSelectedTextRange: { location: 2, length: 0 } };
+    f2.onSet = (name, v) => { if (name === "AXSelectedText") f2.value = "ab" + String(v); };
+    const w2 = el("AXWindow", { title: "W", frame: [0, 0, 300, 200], wid: 33 }, [f2]);
+    const spec = { pid: 82, name: "Notes", windows: [w2] };
+    installApp(c2, spec);
+    const rNone = c2.opInsertText({ text: "x" });
+    spec.focused = f2;
+    const rOk = c2.opInsertText({ text: "cd" });
+    check("0.2.6 (#2): insert_text without a target names the app — no focused element → no_focus with app; written → app in the result",
+      rNone.ok === false && rNone.details?.kind === "no_focus" && rNone.details?.app === "Notes" && rNone.delivery === "not_delivered"
+        && rOk.ok === true && rOk.app === "Notes" && rOk.delivery === "delivered_verified",
+      JSON.stringify({ rNone, rOk }));
+  }
   const rSet = ctx.opSetValue({ target: tField, value: "world" });
   check("set_value: generic AXValue write=0 with unchanged value → NOT_CONFIRMED, delivered_unverified, retry unsafe",
     rSet.ok === false && rSet.code === "NOT_CONFIRMED" && rSet.delivery === "delivered_unverified" && rSet.retry === "unsafe",
@@ -1202,6 +1241,28 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
       && badMod.ok === false && badMod.code === "INVALID_ARGS"
       && noEvent.ok === false && noEvent.code === "ACTION_FAILED" && noEvent.delivery === "not_delivered" && noEvent.retry === "safe",
     JSON.stringify({ plain, arrow, posted, badCode: badCode.code, badMod: badMod.code, noEvent }));
+
+  // 0.2.6 (review #1): a chord on a character asks the layout for its key (with ⌘ held when ⌘ is in the chord);
+  // an uppercase letter adds Shift; a character only on the shifted layer adds Shift; no key → refused, unsent
+  {
+    const asked = [], sent2 = [];
+    ctx.postKey = (code, modKeys) => { sent2.push([code, modKeys.map((m) => m[0])]); return true; };
+    ctx.releaseStuckModifiers = () => [];
+    ctx.keyboardLayoutId = () => "test.layout";
+    // the layout model: unshifted c → 8, v → 9; "+" only with Shift (on key 24)
+    ctx.keyCodeForChar = (ch, flags) => { asked.push([ch, flags]); return ({ "c|1048576": 8, "v|1048576": 9, "+|1179648": 24 })[`${ch}|${flags}`] ?? null; };
+    const c = ctx.opKey({ char: "c", mods: ["cmd"] });
+    const V = ctx.opKey({ char: "V", mods: ["cmd"] });
+    const plus = ctx.opKey({ char: "+", mods: ["cmd"] });
+    const sv = ctx.opKey({ char: "v", mods: ["cmd", "shift"] });
+    const none = ctx.opKey({ char: "é", mods: ["cmd"] });
+    const missing = ctx.opKey({ char: "k", mods: ["cmd"] });
+    check("0.2.6: opKey char — cmd-c on the layout's C key; cmd-V and cmd-shift-v: the V key with Shift (looked up unshifted); a shifted-only character adds Shift; non-ASCII → invalid; no key → keyboard_layout, nothing sent",
+      c.ok && c.code === 8 && V.ok && V.code === 9 && plus.ok && plus.code === 24 && sv.ok && sv.code === 9
+        && JSON.stringify(sent2) === JSON.stringify([[8, [55]], [9, [55, 56]], [24, [55, 56]], [9, [55, 56]]])
+        && none.ok === false && none.code === "INVALID_ARGS" && missing.ok === false && missing.details?.kind === "keyboard_layout" && missing.delivery === "not_delivered",
+      JSON.stringify({ c, V, plus, none: none.code, missing, sent2, asked }));
+  }
 
   // the real postKey: modifiers pressed first (flags-changed, cumulative flags), the key down/up with all
   // flags, modifiers released last-first ending at flags 0 — so nothing is left "held" (device run 2026-11-06)

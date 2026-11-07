@@ -2899,6 +2899,23 @@ def test_watch_late_paste_and_type_messages():
                                                     expect=None)) == 4
         assert "already on screen before this paste" in err.getvalue()
         assert "retype with replace=true" not in err.getvalue()
+        #    review 0.2.6 #7: landed but not seen for a known reason → that reason, exit 0, no late watch
+        watched = []
+        cli._watch_late_paste = lambda text, baseline=None, **k: watched.append(text) or 3.0
+        for cause, phrase in (("too_short", "never confirmed by OCR"),
+                              ("strip_only", "cannot be told from a notification banner")):
+            def landed_unseen(text, replace=False, report=None, cause=cause):
+                report.update(count_before=0, seen=False, unverifiable=cause)
+                return True
+            cli.input.type_text = landed_unseen
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                assert cli._cmd_type(argparse.Namespace(text="ok ok", replace=False, expect=None)) == 0
+            assert out.getvalue().startswith("typed 5 chars (") and phrase in out.getvalue(), out.getvalue()
+            assert "the clipboard still holds the typed text" in out.getvalue()
+        assert watched == []
+        cli.input.type_text = unconfirmed
+        cli._watch_late_paste = lambda text, baseline=None, **k: None
         #    one character: the message does not claim a watch that never ran
         args1 = argparse.Namespace(text="X", replace=False, expect=None)
         err = io.StringIO()
@@ -3107,7 +3124,7 @@ def test_type_text_restore_needs_a_rise():
     #    change: not confirmed, and the user's clipboard is NOT restored (it keeps the text)
     screens = [hits(chip), hits(chip), hits(chip)]
     ok, pb, report, reads = run(screens)
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 1}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before", "unverifiable")} == {"count_before": 1}
     assert screens == []  # two pre-reads; the first post-read already shows no rise
     #    …same, but the frame changed: landed, yet still no restore (no rise)
     ok, pb, report, _ = run([hits(chip), hits(chip), hits(chip)], frame_changes=True)
@@ -3115,7 +3132,7 @@ def test_type_text_restore_needs_a_rise():
     # ② 0 before → 1 after, in two post-reads: the paste is seen → confirmed and restored
     screens = [hits("Search"), hits("Search"), hits(chip), hits(chip)]
     ok, pb, report, _ = run(screens)
-    assert ok is True and pb.data == b"orig" and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 0}
+    assert ok is True and pb.data == b"orig" and {k: v for k, v in report.items() if k not in ("seen", "spots_before", "unverifiable")} == {"count_before": 0}
     assert screens == []
     #    1 before → 2 after: a rise over the chip → restored
     ok, pb, _, _ = run([hits(chip), hits(chip), hits(chip, chip), hits(chip, chip)])
@@ -3123,21 +3140,36 @@ def test_type_text_restore_needs_a_rise():
     # 0.2.5 (Andy's call): the count rises only because a notification banner at the top carries
     #    the text → no sighting where a field can be → not confirmed, and the clipboard is NOT restored
     ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(chip, top=0.08), hits(chip, top=0.08)])
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 0}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before", "unverifiable")} == {"count_before": 0}
+    # review 0.2.6 #7: the frame diff saw the paste and OCR saw the text only in that strip → landed,
+    #    not seen, and the report says why (cli words it instead of watching for a late paste)
+    ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(chip, top=0.08), hits(chip, top=0.08)], frame_changes=True)
+    assert ok is True and pb.data == chip.encode() and report["seen"] is False and report["unverifiable"] == "strip_only", report
+    #    the text was already in the strip before (a banner) and nothing new showed: no cause given
+    ok, pb, report, _ = run([hits(chip, top=0.08), hits(chip, top=0.08), hits(chip, top=0.08)], frame_changes=True)
+    assert ok is True and report["seen"] is False and "unverifiable" not in report, report
+    #    two or three characters are never confirmed: the frame diff's paste is reported too_short
+    ok, pb, report, _ = run([hits("Search"), hits("Search"), hits("ok"), hits("ok")], text="ok", frame_changes=True)
+    assert ok is True and pb.data == b"ok" and report["seen"] is False and report["unverifiable"] == "too_short", report
+    #    a paste OCR confirmed carries no cause
+    ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(chip), hits(chip)], frame_changes=True)
+    assert ok is True and report["seen"] is True and "unverifiable" not in report, report
+    assert verify.strip_spots(chip, hits(chip, top=0.08)) == [(0.5, 0.08)] and verify.strip_spots(chip, hits(chip)) == []
+    assert verify.strip_spots("ok", hits("ok", top=0.08)) == []
     # ③ a pre-paste read fails: count unknown → OCR never licenses a restore
     ok, pb, report, _ = run([CaptureError("blank"), hits(chip)])
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": None}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before", "unverifiable")} == {"count_before": None}
     ok, pb, report, _ = run([hits(chip), CaptureError("blank"), hits(chip)])
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": None}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before", "unverifiable")} == {"count_before": None}
     ok, pb, report, _ = run([CaptureError("blank"), hits(chip)], frame_changes=True)
     assert ok is True and pb.data == chip.encode()
     # ④ one pre-read misses the chip (a redraw): the count is the higher one, so the
     #    chip alone after the paste is no rise → no restore
     ok, pb, report, _ = run([hits("Search"), hits(chip), hits(chip)])
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 1}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before", "unverifiable")} == {"count_before": 1}
     # ⑤ a rise in only one post-read (an OCR blip) licenses nothing
     ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(chip), hits("Search")])
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 0}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before", "unverifiable")} == {"count_before": 0}
     # ⑥ restore=False (open_app): a confirmed paste still never gives the clipboard back
     ok, pb, _, _ = run([hits("Search"), hits("Search"), hits(chip), hits(chip)], restore=False)
     assert ok is True and pb.data == chip.encode()
@@ -3146,7 +3178,7 @@ def test_type_text_restore_needs_a_rise():
     #    on its way and could fetch the restored clipboard
     box = "Pasting from “M5pro”…"
     ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(box), hits(box)], text="pro")
-    assert ok is False and pb.data == b"pro" and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 0}
+    assert ok is False and pb.data == b"pro" and {k: v for k, v in report.items() if k not in ("seen", "spots_before", "unverifiable")} == {"count_before": 0}
     #    the text itself rises while a box still shows (an earlier paste in flight): no restore
     ok, pb, _, _ = run([hits("Search"), hits("Search"), hits(chip, box), hits(chip, box)],
                        frame_changes=True)
@@ -3891,6 +3923,111 @@ def test_short_text_never_confirmed_by_a_sighting_r37():
                                           OCRHit(text="payload", nx=0.50, ny=0.08, confidence=1.0)])
     assert after == [(0.50, 0.54)] and verify.has_new_spot(before, after)  # 0.04 apart: a new spot
     assert not verify.has_new_spot(before, [(0.50, 0.52)])                 # within 0.03: the same spot
+
+
+def test_keyboard_layout_guard():
+    """review 0.2.6 #5: a ⌘ chord whose ANSI key types another character in the Mac's keyboard
+    layout (AZERTY: ⌘A from key code 0 would be ⌘Q; Dvorak: ⌘V from key code 9 would be ⌘K) is
+    refused before any event is posted or the clipboard is touched; QWERTY-style layouts and an
+    unreadable layout send the chord as before. imctl prints keyboard_layout: … and exits 2."""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+
+    import imctl.input as input_module
+    from imctl import cli
+    from imctl.input import (
+        KeyboardLayoutMismatch, _VK_A, _VK_V, _cmd_chord, check_chord_layout, clear_text, type_text,
+    )
+
+    AZERTY = {0: "q", 9: "v", 20: '"'}
+    DVORAK = {0: "a", 9: "k", 20: "3"}
+    QWERTY = {0: "a", 9: "v", 20: "3"}
+    layout = [AZERTY]
+    events = []
+    saved = {}
+
+    def patch(mod, name, value):
+        saved[(mod, name)] = getattr(mod, name)
+        setattr(mod, name, value)
+
+    class TouchLog:
+        """A pasteboard that records every call: type_text must not touch it when it refuses."""
+
+        def __init__(self):
+            self.calls = []
+
+        def __getattr__(self, name):
+            def call(*a, **k):
+                self.calls.append(name)
+                return 0
+            return call
+
+    patch(input_module, "_layout_check", lambda code: layout[0].get(code))
+    patch(input_module, "_focus_check", lambda: True)
+    patch(input_module, "ensure_frontmost", lambda: events.append("front"))
+    patch(input_module, "_source", lambda: "src")
+    patch(input_module, "CGEventCreateKeyboardEvent", lambda src, code, down: ("kb", code, down))
+    patch(input_module, "CGEventSetFlags", lambda event, flags: None)
+    patch(input_module, "CGEventPost", lambda tap, event: events.append(("post", event)))
+    patch(input_module, "_key_event", lambda keycode, down, source: events.append(("key", keycode, down)))
+    patch(input_module, "time", SimpleNamespace(sleep=lambda s: None))
+
+    def typing(pb, replace):
+        return lambda: type_text("hello", replace=replace, pasteboard=pb,
+                                 chord=lambda *a, **k: events.append("chord"),
+                                 before_check=lambda: (lambda: True), ocr_check=lambda: True,
+                                 hud_check=lambda: False, sleep=lambda s: None)
+
+    try:
+        # AZERTY: every path that sends ⌘A refuses before anything happens
+        pb = TouchLog()
+        for call in (lambda: _cmd_chord(_VK_A), clear_text, typing(pb, True)):
+            try:
+                call()
+            except KeyboardLayoutMismatch as exc:
+                assert '"q"' in str(exc) and "⌘A" in str(exc) and "nothing was sent" in str(exc), str(exc)
+            else:
+                raise AssertionError("AZERTY ⌘A was not refused")
+        assert events == [] and pb.calls == [], (events, pb.calls)
+        check_chord_layout(_VK_V)  # AZERTY keeps V where QWERTY has it
+
+        # Dvorak: ⌘V would arrive as ⌘K — refused before the clipboard is saved or written
+        layout[0] = DVORAK
+        pb = TouchLog()
+        try:
+            typing(pb, False)()
+        except KeyboardLayoutMismatch as exc:
+            assert '"k"' in str(exc) and "⌘V" in str(exc), str(exc)
+        else:
+            raise AssertionError("Dvorak ⌘V was not refused")
+        assert events == [] and pb.calls == [], (events, pb.calls)
+
+        # QWERTY-style layout, and a layout that cannot be read: the chord goes out as before
+        for table in (QWERTY, {}):
+            layout[0] = table
+            events.clear()
+            _cmd_chord(_VK_A)
+            posts = [e[1] for e in events if isinstance(e, tuple) and e[0] == "post"]
+            assert posts == [("kb", 55, True), ("kb", 0, True), ("kb", 0, False), ("kb", 55, False)], posts
+
+        # cli: the refusal is one keyboard_layout line on stderr, exit 2 (the server maps it to not_delivered)
+        layout[0] = AZERTY
+        patch(cli, "_require_live", lambda: None)
+        patch(cli, "_require_expect", lambda args: None)
+
+        def refuse(text, **kw):
+            input_module.check_chord_layout(_VK_A)
+            raise AssertionError("not refused")
+
+        patch(input_module, "type_text", refuse)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.main(["type", "--replace", "hello"])
+        assert rc == 2 and err.getvalue().startswith("keyboard_layout: ") and "nothing was sent" in err.getvalue(), (rc, err.getvalue())
+    finally:
+        for (mod, name), value in saved.items():
+            setattr(mod, name, value)
 
 if __name__ == "__main__":
     # every test_* function in this file, in file order (before 0.2.4 a hand-kept list ran 28 of 47)

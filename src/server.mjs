@@ -279,7 +279,7 @@ function resolvePython() {
 // 原样透传匹配到的那一行，不归类为 imctl unavailable。后续任务会往列表里追加更多前缀。
 // "app not found" (phone_open, printed on stdout) is taken from stdout or stderr as one whole line, so a
 // warning on stderr or a long label list cannot hide the "could not go back" note retryOpenHome looks for.
-const IMCTL_PASS_THROUGH = ["mirror_not_live", "mirror_state_unknown", "mirror_setup_required", "type_not_confirmed", "scroll_no_effect", "expect_not_found", "capture_failed", "open_not_confirmed", "focus_lost", "app not found"];
+const IMCTL_PASS_THROUGH = ["mirror_not_live", "mirror_state_unknown", "mirror_setup_required", "type_not_confirmed", "scroll_no_effect", "expect_not_found", "capture_failed", "open_not_confirmed", "focus_lost", "app not found", "keyboard_layout"];
 
 // What a timed-out command may have left behind, appended to imctl_timeout.
 const IMCTL_TIMEOUT_HINT = new Map([
@@ -747,21 +747,27 @@ async function physicalClickAt(target, label, button, count, timeoutMs) {
 // The menu bar strip (owned by Window Server, layer 24) counts as the frontmost app's. A gap remains
 // between this check and the click; force:true skips it.
 const MENU_BAR_LAYER = 24;
-async function rawPointGuard(x, y, app) {
+// scroll: mac_scroll's wording — it takes no force and no app, so its refusals point at element_index instead
+// (E2 run 2026-11-07, review R39: the click advice "pass force:true" leaked into mac_scroll's occluded message)
+async function rawPointGuard(x, y, app, { scroll = false } = {}) {
   const r = await frontmost(app === undefined ? { at: [x, y] } : { app, at: [x, y] });
-  const skip = "pass force:true to click without the check";
+  return scroll
+    ? rawPointVerdict(r, x, y, app, "pass element_index to scroll a specific element", "scroll", false)
+    : rawPointVerdict(r, x, y, app, "pass force:true to click without the check", "click", true);
+}
+function rawPointVerdict(r, x, y, app, skip, verb, appHint) {
   if (!r || r.top === undefined) return { error: `focus_unknown: could not read which window is on top at ${x},${y} — nothing was sent (delivery=not_delivered, retry=safe); ${skip}` };
   if (app !== undefined && !r.target) return { error: `app_not_found: "${app}" is not running — nothing was sent (delivery=not_delivered, retry=safe)` };
   const target = app !== undefined ? r.target : r.front;
-  if (!target) return { error: `focus_unknown: could not read the frontmost app — nothing was sent (delivery=not_delivered, retry=safe); name the app with app, or ${skip}` };
+  if (!target) return { error: `focus_unknown: could not read the frontmost app — nothing was sent (delivery=not_delivered, retry=safe); ${appHint ? "name the app with app, or " : ""}${skip}` };
   const who = app !== undefined ? `"${target.name}"` : `"${target.name}" (the frontmost app)`;
   const top = r.top;
-  if (!top) return { error: `occluded: no window is under ${x},${y} (only the desktop), so ${who} would not get the click — nothing was sent (delivery=not_delivered, retry=safe); ${skip}` };
+  if (!top) return { error: `occluded: no window is under ${x},${y} (only the desktop), so ${who} would not get the ${verb} — nothing was sent (delivery=not_delivered, retry=safe); ${skip}` };
   const menuBar = top.owner === "Window Server" && top.layer === MENU_BAR_LAYER;
   const ownerPid = menuBar ? r.front?.pid : top.pid;
   const owner = menuBar ? `the menu bar (${r.front?.name ?? "frontmost app"})` : `"${top.owner}"${top.layer ? ` (window layer ${top.layer})` : ""}`;
   if (ownerPid !== target.pid) {
-    const hint = menuBar ? "" : `pass app:"${top.owner}" if that window is the one you mean, `;
+    const hint = menuBar || !appHint ? "" : `pass app:"${top.owner}" if that window is the one you mean, `;
     return { error: `occluded: ${x},${y} is covered by ${owner}, not ${who} — nothing was sent (delivery=not_delivered, retry=safe); bring the target forward, ${hint}or ${skip}` };
   }
   return { owner };
@@ -863,8 +869,8 @@ async function macScroll(args) {
     const win = (wl?.ok ? wl.windows || [] : []).find((w) => w.pid === front.pid && (w.layer ?? 0) === 0 && w.onscreen !== false && Array.isArray(w.bounds) && w.bounds[2] > 0 && w.bounds[3] > 0);
     if (!win) return { error: `no_window: "${front.name}" (the frontmost app) has no window on screen — nothing was scrolled (delivery=not_delivered, retry=safe); pass element_index to scroll something specific` };
     const [px, py] = centerOf(win.bounds);
-    const g = await rawPointGuard(px, py, undefined);
-    if (g.error) return { error: g.error.replace(/; pass force:true to click without the check$/, "; pass element_index to scroll a specific element").replace("would not get the click", "would not get the scroll") };
+    const g = await rawPointGuard(px, py, undefined, { scroll: true });
+    if (g.error) return { error: g.error };
     const r = await sh("/usr/bin/osascript", ["-l", "JavaScript", "-e", WHEEL_SCRIPT, "--", String(dy), String(dx), String(px), String(py)], 8000);
     return r.ok
       ? { text: `scrolled ${direction} ${pages} page(s) at the center of ${win.title ? JSON.stringify(win.title) : "the front window"} of "${front.name}" (top window: ${g.owner}; physical — delivery=delivered_unverified, retry=unsafe)` }
@@ -973,9 +979,17 @@ const ENGINE_KEYS = {
   f9: { code: 101, fn: true }, f10: { code: 109, fn: true }, f11: { code: 103, fn: true }, f12: { code: 111, fn: true },
   f13: { code: 105, fn: true }, f14: { code: 107, fn: true }, f15: { code: 113, fn: true }, f16: { code: 106, fn: true },
 };
-// cliclick sequence → engine key request, or null when the chord's key is a printable character (cmd-c,
-// cmd-shift-v…), which stays on cliclick (kd/t/ku).
+// cliclick sequence → engine key request. A chord with ⌘ or ⌃ on a printable character (cmd-c, cmd-shift-v…)
+// goes to the engine as { char }, which finds the key that types it in the current layout (0.2.6: cliclick's
+// kd:cmd t:v ku:cmd typed a plain "v" on macOS 27.2 with the Pinyin layout). null: a plain character or a
+// Shift/⌥-only chord, which types text and stays on cliclick.
 function engineKeyOf(seq) {
+  const t = seq.find((a) => a.startsWith("t:"));
+  if (t) {
+    const kd = seq.find((a) => a.startsWith("kd:"));
+    const mods = kd ? kd.slice(3).split(",") : [];
+    return mods.includes("cmd") || mods.includes("ctrl") ? { char: t.slice(2), mods } : null;
+  }
   const kp = seq.find((a) => a.startsWith("kp:"));
   if (!kp) return null;
   const k = ENGINE_KEYS[kp.slice(3)];
@@ -995,7 +1009,8 @@ async function macKey(args) {
   const ek = engineKeyOf(seq);
   if (ek) {
     const r = await axEngine({ op: "key", ...ek }, 8000);
-    return r.ok ? { text: `pressed ${key} (HID key event) — delivery=delivered_unverified, retry=unsafe (frontmost: ${g.fm ?? "unknown"})${r.note ? ` — ${r.note}` : ""}` } : { error: axErrorText(r) };
+    const how = ek.char !== undefined && Number.isInteger(r.code) ? `HID key event, key code ${r.code} in this layout` : "HID key event";
+    return r.ok ? { text: `pressed ${key} (${how}) — delivery=delivered_unverified, retry=unsafe (frontmost: ${g.fm ?? "unknown"})${r.note ? ` — ${r.note}` : ""}` } : { error: axErrorText(r) };
   }
   const r = await cliclick(seq);
   return r.ok ? { text: `pressed ${key} — delivery=delivered_unverified, retry=unsafe (frontmost: ${g.fm ?? "unknown"})` } : { error: cliFail(r) };
@@ -1016,14 +1031,25 @@ async function macType(args) {
     if (l.error) return { error: l.error };
     item = l.item; target = targetOf(item); label = itemLabel(args.element_index, item);
   }
+  let noFocus = false;
   if (mechanism !== "physical") {
     const res = await axEngine({ op: "insert_text", target, app: target ? undefined : args.app, text, replace: args.replace === true });
+    // the engine names the app whose focused element it wrote (or found none in): the result says which
+    const engineApp = target ? undefined : (res.app ?? res.details?.app);
+    if (!args.app && engineApp) label = `the focused element of "${engineApp}"`;
     if (res.ok && res.delivery === "not_delivered") return { text: `nothing typed: ${label} already shows exactly this text — delivery=not_delivered, retry=safe${res.reason ? ` (${res.reason})` : ""}${await frontmostNote()}` };
     if (res.ok) return { text: `typed ${text.length} chars into ${label} via semantic ${res.via} — delivery=${res.delivery}, retry=${res.retry}${res.reason ? ` (${res.reason})` : ""}${await frontmostNote()}` };
     // keystrokes only where accessibility gives no answer (no focused element) or the focus is a text
     // view it cannot write (a terminal); a focused button, list or sheet gets no stray keys
     const fallback = mechanism === "auto" && target === null && !args.replace && res.code === "ACTION_NOT_SUPPORTED" && (res.details?.kind === "no_focus" || res.details?.textlike === true);
     if (!fallback) return { error: axErrorText(res) };
+    noFocus = res.details?.kind === "no_focus";
+    // 0.2.6 (review #2): no focused element and no app named — the keystrokes would go wherever macOS
+    // routes them in whatever app is in front; refuse
+    if (noFocus && args.app === undefined) {
+      const who = engineApp ? `"${engineApp}" (the frontmost app)` : "the frontmost app";
+      return { error: `no_focus: ${who} reports no focused element, so keystrokes would go wherever macOS routes them — nothing was sent; pass element_index to type into a specific field, or app${engineApp ? `:"${engineApp}"` : ""} to type into that app anyway (delivery=not_delivered, retry=safe)` };
+    }
   }
   if (args.replace) return { error: "invalid_args: replace needs the accessibility path (mechanism auto or semantic) (delivery=not_delivered, retry=safe)" };
   let g;
@@ -1043,14 +1069,17 @@ async function macType(args) {
   } else {
     g = await focusGuard(args.app);
     if (g.error) return g;
+    // keystrokes go to the frontmost app, not to an element noracu found: say which app that was
+    if (noFocus) label = `"${args.app}" (it reports no focused element)`;
+    else if (mechanism === "physical") label = args.app ? `"${args.app}"` : `${g.fm ? `"${g.fm}"` : "the frontmost app"} (the frontmost app; no app was named)`;
   }
   const r = await cliclick([`t:${text}`]);
   return r.ok ? { text: `typed ${text.length} chars into ${label} via physical keystrokes (not IME-safe) — delivery=delivered_unverified, retry=unsafe (frontmost: ${g.fm ?? "unknown"})` } : { error: cliFail(r) };
 }
 
 // mac_paste: the whole paste is one engine call (mac-ax.js opPaste) — focus guard, the user's clipboard
-// copied aside (every item and type, kept inside the engine process), our text written, ⌘V through
-// cliclick, and the clipboard put back only after the paste shows (or a hold) and only if nobody else
+// copied aside (every item and type, kept inside the engine process), our text written, ⌘V posted by
+// the engine on the key that types V in the current layout, and the clipboard put back only after the paste shows (or a hold) and only if nobody else
 // wrote to it meanwhile. The text goes to the engine on stdin, never in argv.
 async function macPasteImpl(args) {
   const { text } = args;
@@ -1250,7 +1279,7 @@ async function macWindow(args) {
 async function macClipboardRead(args = {}) {
   const res = await axEngine({ op: "clipboard", format: args.format || "auto", max_chars: args.max_chars }, 15000);
   if (!res.ok) return { error: axErrorText(res) };
-  if (res.type === "image") return { image: res.png_base64, mime: "image/png", meta: { type: "image", width: res.width, height: res.height, types: res.types } };
+  if (res.type === "image") return { image: res.png_base64, mime: "image/png", meta: { type: "image", width: res.width, height: res.height, types: res.types, ...(res.remote ? { remote: true, note: res.note } : {}) } };
   delete res.ok;
   return { text: JSON.stringify(res) };
 }
@@ -1675,23 +1704,31 @@ async function browserSnapshot(args = {}) {
   let elements = [];
   let total = 0;
   let capped = false;
+  let walkErr = null;
   try {
     const r = await listClickable(page);
     elements = r.elements;
     total = r.total;
     capped = r.capped;
     browserElCache.set(id, { elements, ts: Date.now(), page, url: page.url() });
-  } catch { /* 遍历失败不影响 ARIA 快照 */ }
+  } catch (e) {
+    // 遍历失败不影响 ARIA 快照，但要说出来（review 0.2.6 #8）：an empty list would read as "nothing clickable"
+    walkErr = shortErr(e);
+  }
   const omitted = Math.max(0, total - elements.length);
   const truncNote = omitted > 0
     ? `\n[truncated: showing ${elements.length} of ${total}${capped ? "+" : ""} interactive elements (${omitted}${capped ? "+" : ""} left out)]`
     : "";
-  const elHeader = `[clickable elements${omitted > 0 ? ` — truncated (${omitted}${capped ? "+" : ""} left out)` : ""} — browser_click accepts element_index]`;
+  const elHeader = walkErr
+    ? `[clickable elements unavailable: ${walkErr} — retry browser_snapshot before using element_index]`
+    : `[clickable elements${omitted > 0 ? ` — truncated (${omitted}${capped ? "+" : ""} left out)` : ""} — browser_click accepts element_index]`;
   const elList = elements.map((e) => `[${e.i}] ${e.role || e.tag} "${e.name}"${e.href ? ` (${e.href.slice(0, 40)})` : ""} @${e.x},${e.y}`).join("\n") + truncNote;
   const elBlock = `\n\n${elHeader}\n${elList}`;
   const headPrefix = `URL: ${page.url()}\n`;
   const snapBudget = Math.max(1500, 14000 - headPrefix.length - elBlock.length);
-  return { text: `${headPrefix}${snap.slice(0, snapBudget)}${elBlock}` };
+  // review 0.2.6 #8: a cut snapshot says so — the page goes on below what is shown
+  const snapCut = snap.length > snapBudget ? `\n[aria snapshot truncated: showing ${snapBudget} of ${snap.length} chars — browser_read or browser_scroll for the rest]` : "";
+  return { text: `${headPrefix}${snap.slice(0, snapBudget)}${snapCut}${elBlock}` };
 }
 
 async function browserScreenshot(args = {}) {
@@ -1839,16 +1876,21 @@ async function browserScroll(args = {}) {
   return { text: `scrolled ${direction} ${pages} page(s) at (${cx},${cy}): scrollX ${before.x} → ${after.x}, scrollY ${before.y} → ${after.y} — delivery=delivered_verified, retry=unsafe` };
 }
 
+// review 0.2.6 #8: cut text says where it was cut
+function capText(t, max) {
+  return t.length > max ? `${t.slice(0, max)}\n[truncated: showing ${max} of ${t.length} chars]` : t;
+}
+
 async function browserRead(args = {}) {
   const s = getActiveSession(args.browser_id);
   if (!s) return { error: "no browser — call browser_launch first" };
   const { page } = s;
   if (args.selector) {
     const t = await withTimeout(page.textContent(args.selector, { timeout: 10000 }), 12000, "textContent");
-    return { text: String(t ?? "").slice(0, 8000) };
+    return { text: capText(String(t ?? ""), 8000) };
   }
   const t = await withTimeout(page.evaluate(() => document.body?.innerText ?? ""), 10000, "innerText");
-  return { text: String(t).slice(0, 12000) };
+  return { text: capText(String(t), 12000) };
 }
 
 async function browserEvaluate(args) {
@@ -1864,7 +1906,7 @@ async function browserEvaluate(args) {
     return { error: `action_failed: evaluate failed: ${shortErr(e)} (delivery=unknown, retry=unsafe)` };
   }
   const out = JSON.stringify(r);
-  return { text: `${(out === undefined ? "undefined" : out).slice(0, 8000)}\n(delivery=delivered_unverified, retry=unsafe)` };
+  return { text: `${capText(out === undefined ? "undefined" : out, 8000)}\n(delivery=delivered_unverified, retry=unsafe)` };
 }
 
 async function browserClose(args = {}) {
@@ -2026,14 +2068,14 @@ const TOOLS = [
   { name: "mac_click", desc: "Click a UI element by element_index (from mac_ax_state / mac_find; valid 30 s) or at raw {x,y}. With element_index the element is re-identified first (element_no_longer_valid if gone or changed). mechanism auto (default): its own accessibility action (press / show menu / select — no pointer, no focus change, works in background windows) when it has one, else a physical click that is sent only if a hit test shows the point reaches the element (occluded otherwise); semantic / physical force one path. count 2-3 and button middle are physical. A physical click is re-checked right before it is sent, and is delivered_verified only if the element is still there, changed, and its window is still on top at the point. A raw {x,y} click is sent only when the window on top at that point belongs to app (default: the frontmost app; the menu bar counts as the frontmost app's) — otherwise occluded names what covers it and nothing is sent; force:true skips that check. Results state delivery (delivered_verified / delivered_unverified / not_delivered / unknown) and whether a retry is safe, plus newly opened sheets, dialogs or menus.", args: { element_index: "integer?", snapshot_id: "string?", x: "number?", y: "number?", app: "string?", force: "boolean?", button: "string?", count: "number?", mechanism: "string?", timeout_ms: "integer?" }, fn: macClick },
   { name: "mac_drag", desc: "Drag from one UI element to another (sliders, selections, list items) with the physical pointer; from_index/to_index come from mac_ax_state or mac_find (valid 30 s). Both ends are re-identified and hit-tested first (either one gone or covered: nothing sent). Check the drop target afterwards.", args: { from_index: "integer", to_index: "integer", snapshot_id: "string?" }, required: ["from_index", "to_index"], fn: macDrag },
   { name: "mac_scroll", desc: "Scroll up/down/left/right by a number of pages (default 1). Without element_index: the center of the frontmost app's front window (the pointer moves there), only when that app's window is on top at that point (else occluded, nothing scrolled). With element_index: a scroll area is scrolled at its own center (hit-tested; reports when the position did not change), any other element is scrolled into view (AXScrollToVisible).", args: { direction: "string?", pages: "number?", element_index: "integer?", snapshot_id: "string?" }, fn: macScroll },
-  { name: "mac_key", desc: "Press a key or modifier chord, e.g. 'return', 'esc', 'cmd-c', 'cmd-shift-v', 'arrow-up'. Named keys (return, esc, tab, space, delete, arrows, home/end, page keys, F1-F16), with or without modifiers, go out as HID key events with each modifier pressed and released around the key; chords on a character key (cmd-c) go through cliclick. Pass app to refuse input unless that app is frontmost (focus guard). Chords that quit, log out, lock, force-quit, delete immediately or empty the Trash (cmd-q, alt-cmd-q, cmd-shift-q, cmd-alt-esc, ctrl-cmd-q, cmd-alt-delete, cmd-shift-delete…) are refused unless force:true.", args: { key: "string", app: "string?", force: "boolean?" }, fn: macKey },
-  { name: "mac_type", desc: "Type text into element_index, or into the focused element (of app, if given). mechanism auto (default): inserted through accessibility at the caret (AXSelectedText) — IME-safe, clipboard untouched, works in a background app; delivered_verified only when the value reads back as exactly the old value with the text over the selection that was there (unreadable caret: delivered_unverified). replace:true sets the whole value instead (already that text: nothing sent). If the focused element takes no text through accessibility, auto falls back to physical keystrokes (not IME-safe; app is then a focus guard: refused unless that app is frontmost). mechanism physical forces keystrokes (clicking element_index first).", args: { text: "string", element_index: "integer?", snapshot_id: "string?", app: "string?", replace: "boolean?", mechanism: "string?", timeout_ms: "integer?" }, fn: macType },
-  { name: "mac_paste", desc: "Paste text with Cmd+V through the clipboard, then put the user's clipboard back: every item and type is copied aside and restored within one call, only after the paste shows in the focused element (else after a 1 s hold) and only if nothing else wrote to the clipboard meanwhile — not while the app does not answer, so a late paste cannot insert the user's own clipboard; delivered_verified only when the focused field's value becomes exactly the text pasted over its selection; a password manager's concealed item is never copied — the clipboard is cleared after the paste instead. The pasted text is marked transient for clipboard managers. Pass app to refuse input unless that app is frontmost (focus guard). Refused when the clipboard holds Universal Clipboard content or more than 64 MB (force:true pastes anyway and leaves the pasted text on the clipboard). mac_type does not touch the clipboard.", args: { text: "string", app: "string?", force: "boolean?" }, fn: macPasteImpl },
+  { name: "mac_key", desc: "Press a key or modifier chord, e.g. 'return', 'esc', 'cmd-c', 'cmd-shift-v', 'arrow-up'. Named keys (return, esc, tab, space, delete, arrows, home/end, page keys, F1-F16), with or without modifiers, go out as HID key events with each modifier pressed and released around the key; a chord with cmd or ctrl on a character key (cmd-c, cmd-shift-v) goes out the same way on the key that types that character in the current keyboard layout (no such key: not_delivered, keyboard_layout); a plain character or a shift/alt-only chord is typed through cliclick. Pass app to refuse input unless that app is frontmost (focus guard). Chords that quit, log out, lock, force-quit, delete immediately or empty the Trash (cmd-q, alt-cmd-q, cmd-shift-q, cmd-alt-esc, ctrl-cmd-q, cmd-alt-delete, cmd-shift-delete…) are refused unless force:true.", args: { key: "string", app: "string?", force: "boolean?" }, fn: macKey },
+  { name: "mac_type", desc: "Type text into element_index, or into the focused element (of app, if given). mechanism auto (default): inserted through accessibility at the caret (AXSelectedText) — IME-safe, clipboard untouched, works in a background app; delivered_verified only when the value reads back as exactly the old value with the text over the selection that was there (unreadable caret: delivered_unverified). replace:true sets the whole value instead (already that text: nothing sent). If the focused element is a text view that takes no text through accessibility (a terminal), auto falls back to physical keystrokes (not IME-safe; app is then a focus guard: refused unless that app is frontmost); a focused button, list or sheet gets none. When the app reports no focused element, auto sends keystrokes only if app names that app (else no_focus, nothing sent). The result names the app it typed into. mechanism physical forces keystrokes (clicking element_index first).", args: { text: "string", element_index: "integer?", snapshot_id: "string?", app: "string?", replace: "boolean?", mechanism: "string?", timeout_ms: "integer?" }, fn: macType },
+  { name: "mac_paste", desc: "Paste text with Cmd+V through the clipboard (⌘V goes out on the key that types V in the current keyboard layout; no such key: not_delivered, keyboard_layout), then put the user's clipboard back: every item and type is copied aside and restored within one call, only after the paste shows in the focused element (else after a 1 s hold) and only if nothing else wrote to the clipboard meanwhile — not while the app does not answer, so a late paste cannot insert the user's own clipboard; delivered_verified only when the focused field's value becomes exactly the text pasted over its selection; a password manager's concealed item is never copied — the clipboard is cleared after the paste instead. The pasted text is marked transient for clipboard managers. Pass app to refuse input unless that app is frontmost (focus guard). Refused when the clipboard holds Universal Clipboard content or more than 64 MB (force:true pastes anyway and leaves the pasted text on the clipboard). mac_type does not touch the clipboard.", args: { text: "string", app: "string?", force: "boolean?" }, fn: macPasteImpl },
   { name: "mac_menu_command", desc: "Run an app's menu bar command through accessibility (AXPress on the item: no pointer, the app need not be frontmost). command is the item title as the app shows it (unique in the menu bar) or a path such as \"File > Export > PDF…\"; an item that reads disabled is still pressed (closed menus report stale state) and the result says whether anything changed; reports delivery and any sheet or dialog it opened. Menu items under the Apple menu and items whose keyboard shortcut is one of the refused chords need force:true; Quit of the MCP host or of a macOS session process is always refused.", args: { app: "string", command: "string", force: "boolean?" }, fn: macMenuCommand },
   { name: "mac_wait", desc: "Wait (instead of sleeping) until a condition holds, polling accessibility: window / window_gone (title substring, app), text / text_gone (in app's window), element (element_index + predicate exists|gone|enabled|focused|value_equals|value_contains, value), menu / menu_closed, sheet / sheet_gone (sheet, alert or dialog), app_running / app_gone, notification (a new one, optional app / text; refused under NORACU_READ_ONLY=1). For window_gone, text_gone, menu_closed and sheet_gone the app must be running when the wait starts (a misspelled or non-running app fails immediately with app_not_found). timeout_ms default 10000, max 30000; on timeout returns what it last saw.", args: { condition: "string", app: "string?", title: "string?", text: "string?", exact: "boolean?", window: "string?", element_index: "integer?", snapshot_id: "string?", predicate: "string?", value: "string?", timeout_ms: "integer?" }, required: ["condition"], fn: macWait },
   { name: "mac_app", desc: "Launch, activate, hide, unhide or quit an app (display name, bundle id, or .app path). launch: attaches to a running instance (activate:true brings it forward), else starts it in the background unless activate:true and waits for a window (wait_window, default true). quit: graceful, verified by the process ending (a save dialog keeps it running — reported); force:true force-quits and loses unsaved work. Finder, Dock, loginwindow and other session processes, and the MCP host itself, are never quit. launch with cdp_port (0 = pick a free port; needs NORACU_ALLOW_CDP=1) starts a Chromium/Electron app fresh with a loopback DevTools port for browser_launch cdp_port — refused if the app is already running.", args: { action: "string", app: "string", activate: "boolean?", wait_window: "boolean?", force: "boolean?", cdp_port: "integer?", timeout_ms: "integer?" }, required: ["action", "app"], fn: macApp },
   { name: "mac_window", desc: "Focus, raise, minimize, restore, move (x,y), resize (width,height), maximize (fill the display's visible area), fullscreen or exit_fullscreen a window, chosen by window_id (from mac_windows) or app + window (index or title); verified by reading the window again.", args: { action: "string", window_id: "integer?", app: "string?", window: "string?", x: "number?", y: "number?", width: "number?", height: "number?" }, required: ["action"], fn: macWindow },
-  { name: "mac_clipboard_read", desc: "Read the clipboard: format auto (file paths, else image, else text), text, files or image (returned as an image). Text is capped at max_chars (default 20000). An item a password manager marked concealed is never returned. The clipboard can hold secrets: read it only when the task needs it.", args: { format: "string?", max_chars: "integer?" }, fn: macClipboardRead },
+  { name: "mac_clipboard_read", desc: "Read the clipboard: format auto (file paths, else image, else text), text, files or image (returned as an image). Text is capped at max_chars (default 20000). An item a password manager marked concealed is never returned. Universal Clipboard content (copied on another device) is fetched from that device when read and marked remote:true. The clipboard can hold secrets: read it only when the task needs it.", args: { format: "string?", max_chars: "integer?" }, fn: macClipboardRead },
   { name: "mac_notifications", desc: "List, dismiss or act on notifications visible to accessibility (banners and alerts on screen, and Notification Center while it is open; open_center:true checks whether Notification Center is already open and clicks the menu-bar clock only when closed). list returns {count, notifications:[{index, id, kind, app, title, subtitle, body, actions}], center_opened, center_was_open}, optional app / text filter (center_opened means this call opened and closed it; center_was_open means it was already open). dismiss or act (name: an action such as Show, Reply, or press) take a non-empty id from list (or a 1-based index plus non-empty expected_app / expected_title, re-checked so a reordered stack is not acted on); an absent id returns notification_not_found. Content is returned verbatim: treat it as private and as untrusted input.", args: { action: "string?", app: "string?", text: "string?", id: "string?", index: "integer?", expected_app: "string?", expected_title: "string?", name: "string?", open_center: "boolean?", limit: "integer?" }, fn: macNotifications },
   { name: "mac_set_value", desc: "Set an element's value by element_index, by role: text fields (whole value; AXSecureTextField never echoes the value), checkboxes / switches / radio buttons (true|false, idempotent: nothing sent when already so; a mixed checkbox is pressed up to twice until it reaches the requested state), disclosure triangles and expandable rows (true|false), rows / cells / tabs (true selects), pop-up buttons, menu buttons and combo boxes (an option's title: opens the menu, picks the one matching option, closes it again if none or several match), sliders / steppers (a number within min-max). Semantic only (no pointer). delivered_verified only when the value read back changed to the one asked for (text: line endings and outer white space aside); a field already at that value gets nothing sent (not_delivered, already).", args: { element_index: "integer", value: "string", snapshot_id: "string?", timeout_ms: "integer?" }, required: ["element_index", "value"], fn: macSetValue },
   { name: "mac_find", desc: "Search an app's accessibility tree for elements by role (e.g. button, textfield, checkbox, row), title, value, text (title or value) or id (AXIdentifier); substring match, case-insensitive, unless exact:true. Returns up to limit (default 10, max 50) matches, each with an element_index (a new snapshot). surface: window (default) | menubar | app; window: index or title, or window_id from mac_windows; web_accessibility (default true, false under NORACU_READ_ONLY=1) sets AXManualAccessibility on Electron/Chromium apps and never sets AXEnhancedUserInterface (which alters window behaviour); the result reports web_accessibility like mac_ax_state.", args: { app: "string?", role: "string?", title: "string?", value: "string?", text: "string?", id: "string?", exact: "boolean?", limit: "integer?", surface: "string?", window: "string?", window_id: "integer?", web_accessibility: "boolean?" }, fn: macFind },
@@ -2044,14 +2086,14 @@ const TOOLS = [
   // Browser-use (Playwright)
   { name: "browser_launch", desc: "Launch the browser with a persistent profile (headed by default; pass headless:true for headless). With cdp_port: attach to a Chromium/Electron app started by this server's mac_app launch cdp_port (needs NORACU_ALLOW_CDP=1; attaching to any other loopback port needs NORACU_ALLOW_CDP=any; refused under NORACU_READ_ONLY=1 and while another session is open; standalone browser_launch is also refused while a CDP session is open). browser_close then only disconnects.", args: { headless: "boolean?", cdp_port: "integer?" }, fn: browserLaunch },
   { name: "browser_navigate", desc: "Navigate the active page to an http(s) URL (file:// is disabled unless NORACU_ALLOW_FILE_URL=1). Reports the final URL, HTTP status (or \"no response\" for same-document navigations), title, and delivery/retry.", args: { url: "string" }, fn: browserNavigate },
-  { name: "browser_snapshot", desc: "Return the active page's ARIA accessibility snapshot plus up to 100 indexed interactive elements (reporting truncation and omitted count beyond 100); indexes feed browser_click. The active page stays the tab noracu is driving: a tab the page opens itself (window.open, target=_blank) is never switched to; another tab becomes active only after the active one closes.", args: { browser_id: "string?" }, fn: browserSnapshot },
+  { name: "browser_snapshot", desc: "Return the active page's ARIA accessibility snapshot (about 14000 characters with the list; a longer snapshot is cut and marked) plus up to 100 indexed interactive elements (reporting truncation and omitted count beyond 100, or that the list could not be read); indexes feed browser_click. The active page stays the tab noracu is driving: a tab the page opens itself (window.open, target=_blank) is never switched to; another tab becomes active only after the active one closes.", args: { browser_id: "string?" }, fn: browserSnapshot },
   { name: "browser_screenshot", desc: "Screenshot the active page with optional fullPage, format png|jpeg, quality (1-100, jpeg) and clip {x,y,width,height} (uses scale:\"css\" when attached over CDP); returns the image plus DPR/viewport metadata.", args: { fullPage: "boolean?", format: "string?", quality: "number?", clip: "object?" }, fn: browserScreenshot },
   { name: "browser_click", desc: "Click an element on the active page, preferring element_index from the latest browser_snapshot of that page (valid 30 s; re-checks page, URL, tag, name, href and position, returning element_no_longer_valid when stale). Uses real Playwright pointer input with actionability checks (returns occluded or not_actionable when covered or disabled — never falls back to synthetic JS .click()). selector is a fallback; xy pixel coordinates are not recommended. Reports delivery and retry.", args: { element_index: "integer?", selector: "string?", xy: "array?", button: "string?" }, fn: browserClick },
   { name: "browser_fill", desc: "Fill an input field matched by selector; fill replaces the whole value (browser_type appends keystrokes). Reports delivery and retry.", args: { selector: "string", value: "string?" }, fn: browserFill },
   { name: "browser_press_key", desc: "Press a key or chord, e.g. 'Enter' or 'Control+A'. Reports delivery and retry.", args: { key: "string" }, fn: browserPressKey },
   { name: "browser_type", desc: "Type up to 2000 characters via the keyboard into the focused element; type appends keystrokes (browser_fill replaces the whole value and suits longer text). Reports delivery and retry.", args: { text: "string" }, fn: browserType },
   { name: "browser_scroll", desc: "Scroll the active page up, down, left, or right by a number of pages (default: down, 1 page) via mouse wheel at the viewport center; reports the scrollX/scrollY change (or \"did not move\") plus delivery and retry.", args: { direction: "string?", pages: "number?" }, fn: browserScroll },
-  { name: "browser_read", desc: "Read the active page's visible text, optionally scoped to a selector.", args: { selector: "string?" }, fn: browserRead },
+  { name: "browser_read", desc: "Read the active page's visible text (up to 12000 characters; 8000 with a selector; longer text is cut and marked), optionally scoped to a selector.", args: { selector: "string?" }, fn: browserRead },
   { name: "browser_evaluate", desc: "Evaluate JavaScript in the active page and return the result plus delivery and retry (disabled when NORACU_DISABLE_EVAL=1).", args: { js: "string" }, fn: browserEvaluate },
   { name: "browser_close", desc: "Close the browser (or disconnect from an attached CDP session).", args: {}, fn: browserClose },
   // iPhone device-use (imctl)
@@ -2066,7 +2108,7 @@ const TOOLS = [
   { name: "phone_home", desc: "EXPERIMENTAL. Send the Home Screen command via the iPhone Mirroring menu (works without python/pyobjc on English macOS while the mirror is live), falling back to an imctl swipe (needs python/pyobjc) only when that English menu item is absent (non-English macOS). Reports only that the command or gesture was sent — nothing on the iPhone screen is verified; refuses with mirror_not_live or mirror_state_unknown (or menu_unknown on timeout) when the mirror is not live or its state cannot be confirmed. Reports delivery and retry.", args: {}, fn: phoneHome },
   { name: "phone_app_switcher", desc: "EXPERIMENTAL. Send the App Switcher command via the iPhone Mirroring menu (works without python/pyobjc on English macOS while the mirror is live), falling back to an imctl gesture (needs python/pyobjc) only when that English menu item is absent (non-English macOS). Reports only that the command or gesture was sent — nothing on the iPhone screen is verified; refuses with mirror_not_live or mirror_state_unknown (or menu_unknown on timeout) when the mirror is not live or its state cannot be confirmed. Reports delivery and retry.", args: {}, fn: phoneAppSwitcher },
   { name: "phone_scroll", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Scroll up or down by `distance` window heights (0 < distance <= 3, default 0.5) using trackpad-style scroll events. Refused with mirror_not_live or mirror_state_unknown when the mirror is not live or its state cannot be confirmed; reports scroll_no_effect when the screen did not change (list end, or the view does not scroll); a scroll that changed the screen is delivered_unverified, since a notification or an animation changes it too — take phone_screenshot to see where the list is. Optional expect: text that must be on screen (OCR) first, else nothing is sent. Reports delivery and retry.", args: { direction: "string?", distance: "number?", expect: "string?" }, fn: phoneScroll },
-  { name: "phone_type", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe; never echoes the typed text). Refused with mirror_not_live or mirror_state_unknown when the mirror is not live or its state cannot be confirmed. Saves every clipboard item and type, clearing concealed or transient items instead of copying, and restores only after OCR sees the text appear within its 2.5 s check at a spot where it was not before, below the status bar and notification strip — only that sighting makes the result delivered_verified (Universal Clipboard or >64 MB items are not copied and leave the typed text on the clipboard; a text under four characters, spaces and case aside, a paste seen only after the 2.5 s check, and type_not_confirmed are never verified and also leave the typed text on the clipboard). replace=true selects all and overwrites the field. Optional expect: on-screen text (OCR), else nothing is sent. Reports delivery and retry.", args: { text: "string", replace: "boolean?", expect: "string?" }, fn: phoneType },
+  { name: "phone_type", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Type text via the clipboard (IME-safe; never echoes the typed text). Refused with mirror_not_live or mirror_state_unknown when the mirror is not live or its state cannot be confirmed. Saves every clipboard item and type, clearing concealed or transient items instead of copying, and restores only after OCR sees the text appear within its 2.5 s check at a spot where it was not before, below the status bar and notification strip — only that sighting makes the result delivered_verified (Universal Clipboard or >64 MB items are not copied and leave the typed text on the clipboard; a text under four characters, spaces and case aside, a paste seen only after the 2.5 s check, and type_not_confirmed are never verified and also leave the typed text on the clipboard). replace=true selects all and overwrites the field. Refused with keyboard_layout (nothing sent, clipboard untouched) when the Mac's keyboard layout types another character on the key ⌘V or ⌘A is sent from (AZERTY, Dvorak). Optional expect: on-screen text (OCR), else nothing is sent. Reports delivery and retry.", args: { text: "string", replace: "boolean?", expect: "string?" }, fn: phoneType },
   { name: "phone_key", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Press a key: return, delete, up, down, left, or right. Refused with mirror_not_live or mirror_state_unknown when the mirror is not live or its state cannot be confirmed. Optional expect: text that must be on screen (OCR) first, else nothing is sent. Reports delivery and retry.", args: { key: "string", expect: "string?" }, fn: phoneKey },
   { name: "phone_open", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Refused with mirror_not_live or mirror_state_unknown when the mirror is not live or its state cannot be confirmed. Open an app: Home Screen, Spotlight via the menu, clear, type the name (the clipboard keeps it), then tap only an exact label inside the Spotlight Top Hit card (suggestion, website and Settings rows of the same name are ignored, so a name the Top Hit card does not show is app not found, and one it shows at two or more spots is open_not_confirmed with nothing tapped; reads the English \"Top Hit\" label unless NORACU_TOPHIT_LABELS names the phone's own; a pasted name that never shows up in Spotlight, even after up to 15 s, is open_not_confirmed — retry; a one- or two-letter name such as \"X\" that OCR cannot read in the Top Hit card is open_not_confirmed without the 15 s wait, nothing tapped — open it from its Home Screen icon); confirms the app opened (frame diff + OCR), taps the Top Hit icon when the label tap does nothing, else open_not_confirmed, back on the Home Screen. Reports delivery and retry.", args: { app: "string" }, fn: phoneOpen },
 ];
@@ -2486,13 +2528,14 @@ const PHONE_INPUTS = new Set(["phone_tap", "phone_longpress", "phone_swipe", "ph
 // (0.2.5, Andy's call): "the screen changed" is all it sees, and a notification or an animation changes it too
 const PHONE_CONFIRMED = new Set(["phone_open", "phone_type"]);
 // "nothing was sent": refusals before the first event (expect_not_found, a capture that failed while checking --expect, invalid_args)
-const PHONE_NOTHING_SENT = /^(mirror_not_live|mirror_state_unknown|mirror_setup_required|expect_not_found|imctl unavailable|server_shutting_down)|server is shutting down|nothing was typed|nothing was sent/;
+const PHONE_NOTHING_SENT = /^(mirror_not_live|mirror_state_unknown|mirror_setup_required|expect_not_found|imctl unavailable|server_shutting_down|keyboard_layout)|server is shutting down|nothing was typed|nothing was sent/;
 function phoneDelivery(name, text, ok) {
   if (!PHONE_INPUTS.has(name) || /delivery=/.test(text)) return text;
   if (name === "phone_launch") return `${text} (delivery=${ok ? "delivered_unverified" : PHONE_NOTHING_SENT.test(text) ? "not_delivered" : "unknown"}, retry=safe)`;
   // a paste only the frame diff saw (OCR cannot read the text back) is not verified (device run 2026-11-06); neither is
   // one character OCR saw appear, nor a text seen late — OCR cannot tell the paste from a line repeating it (review R38; E2 T15)
-  if (ok && /OCR cannot read this text back|no proof of where it landed|showed up late/.test(text)) return `${text} (delivery=delivered_unverified, retry=unsafe)`;
+  // review 0.2.6 #7: nor a text too short for OCR to confirm, nor one OCR saw only in the banner strip at the top
+  if (ok && /OCR cannot read this text back|no proof of where it landed|showed up late|never confirmed by OCR|cannot be told from a notification banner/.test(text)) return `${text} (delivery=delivered_unverified, retry=unsafe)`;
   if (ok) return `${text} (delivery=${PHONE_CONFIRMED.has(name) ? "delivered_verified" : "delivered_unverified"}, retry=unsafe)`;
   if (PHONE_NOTHING_SENT.test(text)) return `${text} (delivery=not_delivered, retry=safe)`;
   if (/^scroll_no_effect/.test(text)) return `${text} (delivery=delivered_unverified, retry=unsafe)`;

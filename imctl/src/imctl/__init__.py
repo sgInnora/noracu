@@ -27,5 +27,5 @@ Key design decisions (each backed by empirical testing):
    between actions, so we re-resolve bounds before each gesture.
 """
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 __all__ = ["cli", "window", "input", "vision", "verify", "gestures"]

@@ -341,6 +341,20 @@ def _cmd_type(args) -> int:
                   "OCR cannot read this text back — check the field; the clipboard still "
                   "holds the typed text)")
             return 0
+        # review 0.2.6 #7: the screen changed and OCR could not confirm the text for a reason
+        # known now — say that one, instead of watching for a late paste that would only
+        # report a rise it cannot attribute
+        cause = report.get("unverifiable")
+        if cause == "too_short":
+            print(f"typed {len(args.text)} chars (the screen changed after the paste, but a text "
+                  "of fewer than four characters, spaces and case aside, is never confirmed by "
+                  "OCR — check the field; the clipboard still holds the typed text)")
+            return 0
+        if cause == "strip_only":
+            print(f"typed {len(args.text)} chars (OCR saw the text appear only in the strip at the "
+                  "top of the screen, where a field cannot be told from a notification banner — "
+                  "check the field; the clipboard still holds the typed text)")
+            return 0
         # device run 2026-11-06: only the picture changed (a selection highlight, a
         # results list redraw) and OCR never saw the text — watch for it like an
         # unconfirmed paste instead of reporting it typed
@@ -761,6 +775,10 @@ def main(argv: list[str] | None = None) -> int:
     _stdin_values(args)
     try:
         return args.func(args)
+    except input.KeyboardLayoutMismatch as exc:
+        # review 0.2.6 #5: raised before any event was posted or the clipboard was written
+        print(f"keyboard_layout: {exc}", file=sys.stderr)
+        return 2
     except input.FocusLost:
         # F26: the frontmost check failed right before an event — either
         # nothing was sent at all, or (mid-scroll) nothing further was.

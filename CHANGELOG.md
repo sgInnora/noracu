@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.2.6] — 2026-11-07
+
+### Changed
+- `mac_type` without `element_index` or `app` no longer sends keystrokes
+  when the frontmost app reports no focused element: it returns `no_focus`
+  and sends nothing. Before, the keystrokes went wherever macOS routed them
+  and the result said "into the focused element". Pass
+  `element_index`, or `app` to type into that app anyway. A text view
+  accessibility cannot write (a terminal) still gets keystrokes as before.
+- `mac_type` results name the app: "into the focused element of "Notes"",
+  "into "Notes" (it reports no focused element)", or, for
+  `mechanism:"physical"` without `app`, the frontmost app.
+- `mac_clipboard_read` marks Universal Clipboard content (copied on another
+  device) with `remote: true` and a note that reading it makes macOS fetch
+  it from that device. The content is still returned.
+
+### Fixed
+- `mac_scroll`'s refusals (`occluded`, `focus_unknown`) no longer tell you to
+  pass `force:true` or `app` — `mac_scroll` takes neither. They point at
+  `element_index` instead. Before, a window center under another window or
+  the Dock came back with click advice.
+- `mac_key` with `cmd` or `ctrl` and a character key (`cmd-c`, `cmd-v`,
+  `cmd-z`) goes out on the key that types that character in the current
+  keyboard layout, and `mac_paste`'s ⌘V does the same. Before, `mac_key`
+  sent these chords through cliclick (`kd:cmd t:v ku:cmd`), the sequence
+  that in a device test (macOS 27.2, Pinyin input source) typed a plain "v"
+  instead of pasting; and `mac_paste` refused Dvorak layouts, while on
+  other layouts that move V (Workman) it sent ⌘ with the key where V sits
+  on U.S. keyboards. When no key in the layout types the character, the
+  call returns `not_delivered` with `keyboard_layout` and nothing is sent.
+  A plain character, or one with only `shift` / `alt`, is still typed
+  through cliclick.
+- `phone_type` checks the Mac's keyboard layout before it sends ⌘V (and,
+  with `replace`, ⌘A) to iPhone Mirroring. When the key the chord is sent
+  from types another character — French AZERTY has Q where ⌘A is sent from,
+  Dvorak has K where ⌘V is — it returns `keyboard_layout`
+  (`not_delivered`, `retry=safe`), sends nothing and leaves the clipboard
+  alone. Before, these chords went out from U.S. key codes whatever the
+  layout. The Spotlight shortcut `phone_open` uses falls back to clicking
+  the View menu item in that case. A layout that cannot be read is treated
+  as before.
+- `phone_type` says why a paste whose screen change it saw is not confirmed,
+  when the reason is known: a text of fewer than four characters (spaces and
+  case aside) is never confirmed by OCR, and a text OCR saw appear only in
+  the strip at the top of the screen cannot be told from a notification
+  banner. Both come back at once as `delivered_unverified`. Before, both
+  went on to the extra late-paste check of up to 15 s, which could then
+  report that the text "showed up late".
+- `browser_snapshot` says when it cut the ARIA snapshot (`[aria snapshot
+  truncated: showing N of M chars …]`) and when it could not list the
+  clickable elements (`[clickable elements unavailable: … — retry
+  browser_snapshot …]`). Before, both were silent, and an empty list read
+  as a page with nothing to click. `browser_read` and `browser_evaluate` end
+  cut text with `[truncated: showing N of M chars]`.
+
+### Known issues
+- The keyboard-layout handling in `mac_key`, `mac_paste` and `phone_type`
+  was tried on a device only with the U.S. layout and the Pinyin input
+  source (macOS 27.2). AZERTY, Dvorak and Workman are covered by unit tests
+  that stand in for the layout lookup, not by a device run.
+
 ## [0.2.5] — 2026-11-07
 
 ### Changed

@@ -216,6 +216,23 @@ def probe_spots(text: str, hits) -> list[tuple[float, float]] | None:
     return spots
 
 
+def strip_spots(text: str, hits) -> list[tuple[float, float]]:
+    """Where ``text``'s probe shows inside the banner strip at the top (the spots probe_spots leaves
+    out), the paste-progress box aside; [] when the text is too short to be confirmed at all. Only
+    explains an unconfirmed paste (review 0.2.6 #7) — never confirms one."""
+    probe = text_probe(text)
+    if probe is None or len(probe) < VERIFY_MIN_PROBE:
+        return []
+    spots = []
+    for hit in hits:
+        nx, ny = getattr(hit, "nx", None), getattr(hit, "ny", None)
+        if nx is None or ny is None or ny >= BANNER_STRIP_NY or _is_paste_hud(hit):
+            continue
+        if probe in _compact(getattr(hit, "text", hit)):
+            spots.append((nx, ny))
+    return spots
+
+
 def has_new_spot(before, after, eps: float = 0.03) -> bool:
     """True when some spot in ``after`` has no spot of ``before`` within ``eps`` in both axes."""
     return any(all(abs(ax - bx) > eps or abs(ay - by) > eps for bx, by in before) for ax, ay in after)

@@ -1452,7 +1452,8 @@ function opObserveAfter(req) {
 // selection), AXValue replaces the whole value. No key events, so no input method can re-segment it
 // and the clipboard is not touched. Verified by reading the value back (secure fields cannot be read).
 function opInsertText(req) {
-  let el, appEl, how = 'focused', label = 'the focused element';
+  // appName: the app whose focused element is written (no target) — the server names it in its result
+  let el, appEl, how = 'focused', label = 'the focused element', appName;
   if (req.target) {
     const r = resolveTarget(req.target, 3000);
     if (r.error) return fail(notDelivered(r.error));
@@ -1462,7 +1463,8 @@ function opInsertText(req) {
     if (!app) return fail(notDelivered({ code: 'APP_NOT_FOUND', message: req.app ? `no running app named "${req.app}"` : 'no frontmost app' }));
     appEl = appElement(app);
     const f = attr(appEl, 'AXFocusedUIElement');
-    if (!f || !f.el) return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `"${app.name}" reports no focused element`, details: { kind: 'no_focus' } }));
+    appName = app.name;
+    if (!f || !f.el) return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `"${app.name}" reports no focused element`, details: { kind: 'no_focus', app: appName } }));
     el = f.el; label = `the focused element of "${app.name}"`;
   }
   const v = readNode(el);
@@ -1473,7 +1475,7 @@ function opInsertText(req) {
     // text-like but read-only through accessibility (a terminal, a custom editor) vs. not text at all
     // (a button, a list, a sheet): the server only falls back to keystrokes for the first kind
     const textlike = TEXT_ROLES.has(roleKey(v)) || v.AXRole === 'AXWebArea' || attr(el, 'AXSelectedTextRange') !== null || attr(el, 'AXInsertionPointLineNumber') !== null;
-    return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `${label} (${v.AXRole}${v.AXSubrole ? '/' + v.AXSubrole : ''}) takes no text through accessibility${textlike ? '' : ' and is not a text input — focus a text field first'}`, details: { kind: 'not_text', role: v.AXRole, textlike } }));
+    return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `${label} (${v.AXRole}${v.AXSubrole ? '/' + v.AXSubrole : ''}) takes no text through accessibility${textlike ? '' : ' and is not a text input — focus a text field first'}`, details: { kind: 'not_text', role: v.AXRole, textlike, app: appName } }));
   }
   const text = String(req.text);
   const secure = v.AXSubrole === 'AXSecureTextField';
@@ -1482,7 +1484,7 @@ function opInsertText(req) {
   const selBefore = attr(el, 'AXSelectedTextRange');
   const beforeSel = JSON.stringify(selBefore);
   if (req.replace && !secure && sameText(before, text)) {
-    return { ok: true, mechanism: 'semantic', via: 'AXValue', how, role: v.AXRole, delivery: 'not_delivered', retry: 'safe', reason: 'already', note: `${label} already shows exactly this text — nothing sent` };
+    return { ok: true, mechanism: 'semantic', via: 'AXValue', how, role: v.AXRole, app: appName, delivery: 'not_delivered', retry: 'safe', reason: 'already', note: `${label} already shows exactly this text — nothing sent` };
   }
   // R36: appending through AXValue rewrites the whole value; when the value cannot be read, that would
   // replace what is there with the text — refuse instead
@@ -1497,7 +1499,7 @@ function opInsertText(req) {
   const deadline = now() + WRITE_POLL_MS;
   sleep(150);
   let after = attr(el, 'AXValue');
-  const base = { ok: true, mechanism: 'semantic', via, how, role: v.AXRole };
+  const base = { ok: true, mechanism: 'semantic', via, how, role: v.AXRole, app: appName };
   if (secure || typeof after !== 'string') return Object.assign(base, { delivery: 'delivered_unverified', retry: 'unsafe', reason: secure ? 'secure_field' : 'value_unreadable' });
   // CP: the value must be exactly what the write should give — the replaced text, the text over the
   // selection that was there (AXSelectedText), or the old value plus the text (append)
@@ -2174,14 +2176,13 @@ function keyboardLayoutId() {
     return String(ObjC.castRefToObject($.TISGetInputSourceProperty(s, $.kTISPropertyInputSourceID)).js);
   } catch (e) { return null; }
 }
-// Key code 9 is V on QWERTY, QWERTZ, AZERTY and Colemak layouts; a Dvorak layout puts K there, so ⌘ with
-// it would be ⌘K. The "Dvorak - QWERTY ⌘" layouts keep ⌘ shortcuts on QWERTY and are fine.
-function vKeyIsElsewhere(layout) { return typeof layout === 'string' && /dvorak/i.test(layout) && !/qwerty/i.test(layout); }
 function opPaste(req) {
   const text = String(req.text === undefined || req.text === null ? '' : req.text);
   if (!text) return invalid('text required');
-  const layout = keyboardLayoutId();
-  if (vKeyIsElsewhere(layout)) return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `the keyboard layout ${layout} does not have V where ⌘V is sent from (key code 9) — nothing was pasted; mac_type types without the clipboard`, details: { kind: 'keyboard_layout' } }));
+  // ⌘V goes to the key that carries V in this layout (0.2.6: key code 9 is K on Dvorak, C on Workman — ⌘C would
+  // copy over the text noracu put on the clipboard)
+  const vKey = keyCodeForChar('v', KEY_FLAGS.cmd);
+  if (vKey === null) return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `no key types "v" in the keyboard layout ${keyboardLayoutId() || '(unknown)'}, so ⌘V cannot be sent — nothing was pasted; mac_type types without the clipboard`, details: { kind: 'keyboard_layout' } }));
   const front = frontApp();
   if (!front) return fail(notDelivered({ code: 'FOCUS_UNKNOWN', message: 'could not read the frontmost app — nothing was pasted' }));
   let target = front;
@@ -2242,10 +2243,10 @@ function opPaste(req) {
     const restored = putBack(ours);
     return fail(notDelivered({ code: 'FOCUS_LOST', message: `the frontmost app changed to "${f2 ? f2.name : 'unknown'}" just before the paste — nothing was pasted (clipboard restored: ${restored})` }));
   }
-  // ⌘V is the V key itself (key code 9) with the ⌘ flag, posted here. cliclick's `kd:cmd t:v ku:cmd`
+  // ⌘V is the V key itself (vKey, found above) with the ⌘ flag, posted here. cliclick's `kd:cmd t:v ku:cmd`
   // types text, not that key: on macOS 27.2 TextEdit got a plain "v", or nothing, instead of a paste
   // (E2 run 2026-11-07, T7).
-  const sent = postKey(KEY_V, [[MOD_KEYCODES.cmd, KEY_FLAGS.cmd]], 0);
+  const sent = postKey(vKey, [[MOD_KEYCODES.cmd, KEY_FLAGS.cmd]], 0);
   releaseStuckModifiers(['cmd']);
   if (!sent) {
     // the V key was never posted (postKey creates both events before posting either)
@@ -2293,6 +2294,9 @@ function opClipboard(req) {
   const out = { ok: true, types: types.slice(0, 20), change_count: Number(pb.changeCount) };
   // a concealed mark on any item (types lists only the first item's) withholds the whole clipboard
   if (types.indexOf('org.nspasteboard.ConcealedType') >= 0 || pbItemTypes().indexOf('org.nspasteboard.ConcealedType') >= 0) { out.concealed = true; out.note = 'the clipboard holds an item marked concealed (e.g. a password manager copy); its content is not returned'; return out; }
+  // review 0.2.6 #4: Universal Clipboard content lives on the other device until it is read — say where
+  // it came from (mac_paste refuses it; reading it is what this tool is for)
+  if (types.indexOf(PB_REMOTE) >= 0) { out.remote = true; out.note = 'Universal Clipboard content copied on another device: reading it makes macOS fetch it from that device'; }
   const fmt = req.format || 'auto';
   if (fmt === 'auto' || fmt === 'files') {
     const items = pb.pasteboardItems;
@@ -2585,7 +2589,22 @@ function opMenu(req) {
 // keypad flag, as hardware sends them. The server's focus guard runs before this op.
 const KEY_FLAGS = { cmd: 0x100000, shift: 0x20000, alt: 0x80000, ctrl: 0x40000, fn: 0x800000 };
 const MOD_KEYCODES = { cmd: 55, shift: 56, alt: 58, ctrl: 59 }; // left-hand keys; fn is a flag only (pressing Fn alone can switch input source)
-const KEY_V = 9; // the V key position (ANSI); mac_paste's ⌘V — see vKeyIsElsewhere for layouts that move it
+// The key that types `ch` in the current keyboard layout while `flags` are held: AppKit is asked what each key of
+// the main block gives (charactersIgnoringModifiers of a created, never posted, key event), so ⌘V and ⌘C land on
+// whatever key carries V or C in this layout — QWERTY, AZERTY, Dvorak, Workman… (0.2.6, review: a fixed key code
+// 9 is K on Dvorak and C on Workman). With ⌘ in the flags, layouts that switch to QWERTY for ⌘ shortcuts answer
+// for that. null when no key types it. Checked on macOS 27.2 with the Pinyin layout: v → 9, a → 0, c → 8.
+function keyCodeForChar(ch, flags) {
+  const src = $.CGEventSourceCreate($.kCGEventSourceStateHIDSystemState);
+  for (let k = 0; k <= 50; k++) {
+    const e = $.CGEventCreateKeyboardEvent(src, k, true);
+    if (!e) continue;
+    $.CGEventSetFlags(e, flags);
+    const ns = $.NSEvent.eventWithCGEvent(e);
+    if (ns && !ns.isNil() && ns.charactersIgnoringModifiers.js === ch) return k;
+  }
+  return null;
+}
 const FLAG_NUMPAD = 0x200000;
 const HELD_MASK = KEY_FLAGS.cmd | KEY_FLAGS.shift | KEY_FLAGS.alt | KEY_FLAGS.ctrl;
 const EV_FLAGS_CHANGED = 12;
@@ -2637,9 +2656,27 @@ function releaseStuckModifiers(names) {
   return names.filter(m => MOD_KEYCODES[m] && (left & KEY_FLAGS[m]));
 }
 function opKey(req) {
-  const code = req.code;
+  let code = req.code;
+  let mods = Array.isArray(req.mods) ? req.mods.slice() : [];
+  if (typeof req.char === 'string') {
+    // a chord on a character key (cmd-c, cmd-shift-v…): the key that carries that character in this layout
+    if (!/^[\x21-\x7e]$/.test(req.char)) return fail(notDelivered({ code: 'INVALID_ARGS', message: 'key: char must be one printable ASCII character' }));
+    // the key is looked up by its unshifted character (AppKit reports "V" for the V key with Shift held); an
+    // uppercase letter means Shift; a character found only with Shift ("+" on a US keyboard) adds Shift
+    let ch = req.char;
+    if (/^[A-Z]$/.test(ch)) { ch = ch.toLowerCase(); if (mods.indexOf('shift') < 0) mods.push('shift'); }
+    const base = mods.indexOf('cmd') >= 0 ? KEY_FLAGS.cmd : 0;
+    code = keyCodeForChar(ch, base);
+    if (code === null) {
+      code = keyCodeForChar(ch, base | KEY_FLAGS.shift);
+      if (code !== null && mods.indexOf('shift') < 0) mods.push('shift');
+    }
+    if (code === null) {
+      const layout = keyboardLayoutId();
+      return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `no key types "${req.char}" in the keyboard layout ${layout || '(unknown)'} — nothing was sent`, details: { kind: 'keyboard_layout' } }));
+    }
+  }
   if (!Number.isInteger(code) || code < 0 || code > 127) return fail(notDelivered({ code: 'INVALID_ARGS', message: 'key: code must be an integer 0-127' }));
-  const mods = Array.isArray(req.mods) ? req.mods : [];
   const modKeys = [];
   let extra = 0;
   for (const m of mods) {
@@ -2652,7 +2689,7 @@ function opKey(req) {
   const sent = postKey(code, modKeys, extra);
   const stuck = releaseStuckModifiers(mods.filter(m => m !== 'fn'));
   if (!sent) return fail(notDelivered({ code: 'ACTION_FAILED', message: 'key: could not create the keyboard events', details: stuck.length ? { modifiers_still_held: stuck } : undefined }));
-  const out = { ok: true, delivery: 'delivered_unverified', retry: 'unsafe', flags: modKeys.reduce((a, [, f]) => a | f, 0) | extra };
+  const out = { ok: true, delivery: 'delivered_unverified', retry: 'unsafe', flags: modKeys.reduce((a, [, f]) => a | f, 0) | extra, code };
   if (stuck.length) out.note = `the system still reports ${stuck.join('+')} held — press and release it on the keyboard`;
   return out;
 }

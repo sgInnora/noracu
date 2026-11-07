@@ -302,11 +302,63 @@ _ANSI_KEYCODES = {
 }
 
 
+_ANSI_CHARS = {code: char for char, code in _ANSI_KEYCODES.items()}
+
+
 def keycode_for_char(char: str) -> int | None:
     """ANSI virtual keycode for a single digit/letter, else None."""
     if len(char) != 1:
         return None
     return _ANSI_KEYCODES.get(char.lower())
+
+
+class KeyboardLayoutMismatch(InputError):
+    """The Mac's keyboard layout does not put the chord's character on its key.
+
+    Command chords are sent from ANSI key codes; iPhone Mirroring (a Mac
+    app) reads its own key equivalents through the Mac's layout first. On
+    French AZERTY key code 0 is "q": a ⌘A select-all would arrive as ⌘Q.
+    Raised before anything is posted (review 0.2.6 #5).
+    """
+
+
+def _layout_char(keycode: int) -> str | None:
+    """What the Mac's current keyboard layout types on ``keycode`` with ⌘ held.
+
+    The event is created, never posted; AppKit translates it through the
+    current input source. None when it cannot be read — the chord then goes
+    out as it did before this check.
+    """
+    try:
+        from AppKit import NSEvent
+
+        event = CGEventCreateKeyboardEvent(_source(), keycode, True)
+        if event is None:
+            return None
+        CGEventSetFlags(event, kCGEventFlagMaskCommand)
+        ns = NSEvent.eventWithCGEvent_(event)
+        chars = ns.charactersIgnoringModifiers() if ns is not None else None
+        return str(chars) if chars else None
+    except Exception:
+        return None
+
+
+# Module-level so tests can swap it (like _focus_check).
+_layout_check = _layout_char
+
+
+def check_chord_layout(keycode: int) -> None:
+    """Refuse a ⌘ chord whose ANSI key types another character in the Mac's layout."""
+    expect = _ANSI_CHARS.get(keycode)
+    if expect is None:
+        return
+    got = _layout_check(keycode)
+    if got is None or got.lower() == expect:
+        return
+    raise KeyboardLayoutMismatch(
+        f'the Mac keyboard layout types "{got}" on the key that ⌘{expect.upper()} is sent from '
+        f"(key code {keycode}), so iPhone Mirroring would get ⌘{got.upper()} — nothing was sent; "
+        "switch the Mac to a QWERTY-style input source (U.S., ABC, Pinyin) and retry")
 
 
 def _cmd_chord(keycode: int, before_key=None) -> None:
@@ -324,6 +376,7 @@ def _cmd_chord(keycode: int, before_key=None) -> None:
     event: the caller's last chance to call the chord off by raising —
     nothing is posted then (F35).
     """
+    check_chord_layout(keycode)  # review 0.2.6 #5: before anything is sent
     ensure_frontmost()
     _require_focus()  # F26: before the chord's first event
     if before_key is not None:
@@ -624,6 +677,11 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
 
     from . import verify, vision
 
+    # review 0.2.6 #5: both chords are checked against the Mac's keyboard layout before anything is
+    # sent, the mirror is brought forward or the clipboard is touched (the chord checks again itself)
+    if replace:
+        check_chord_layout(_VK_A)
+    check_chord_layout(_VK_V)
     ensure_frontmost()
     if chord is None:
         chord = _cmd_chord
@@ -646,6 +704,13 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     count_before = [None]
     # 0.2.5: where the probe showed before the paste (None = unknown → no confirmation)
     spots_before = [None]
+    strip_before = [[]]  # and inside the banner strip (review 0.2.6 #7: explains, never confirms)
+    # review 0.2.6 #7: why OCR could not confirm a paste the frame diff saw — "too_short" (fewer
+    # than VERIFY_MIN_PROBE characters, never confirmed) or "strip_only" (the text appeared only in
+    # the banner strip at the top, where a field cannot be told from a banner)
+    unverifiable = [None]
+    if multi and len(verify.text_probe(text)) < verify.VERIFY_MIN_PROBE:
+        unverifiable[0] = "too_short"
 
     def sweep_read():
         return vision.read_screen(language_correction=False, sweep=True)
@@ -707,6 +772,10 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                             or verify.probe_count(text, hits) <= count_before[0]
                             or spots_before[0] is None
                             or not verify.has_new_spot(spots_before[0], verify.probe_spots(text, hits))):
+                        if (unverifiable[0] is None and not verify.shows_paste_hud(hits)
+                                and verify.probe_count(text, hits) > count_before[0]
+                                and verify.has_new_spot(strip_before[0], verify.strip_spots(text, hits))):
+                            unverifiable[0] = "strip_only"
                         return False
                 return True
             return verify.screen_shows_text(text, vision.read_screen)
@@ -746,6 +815,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 count_before[0] = max(first, verify.probe_count(text, r2))
                 # both reads: a spot either one saw is not new after the paste
                 spots_before[0] = verify.probe_spots(text, r1) + verify.probe_spots(text, r2)
+                strip_before[0] = verify.strip_spots(text, r1) + verify.strip_spots(text, r2)
             except Exception as exc:
                 if not verify.is_capture_error(exc):
                     raise
@@ -834,6 +904,8 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             # confirmed a paste that never reached the field — the caller must
             # not report such a paste as verified
             report["seen"] = bool(restore_ok)
+            if not restore_ok and unverifiable[0] is not None:
+                report["unverifiable"] = unverifiable[0]
 
         if not landed:
             # F18 invariant: never restore unconfirmed — a late paste
@@ -869,6 +941,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
 
 def clear_text() -> None:
     """Select-all and delete in the focused field."""
+    check_chord_layout(_VK_A)  # review 0.2.6 #5: before the mirror is brought forward
     ensure_frontmost()
     _cmd_chord(_VK_A)  # Cmd+A — real chord, same reason as type_text
     time.sleep(0.05)
