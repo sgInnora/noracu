@@ -473,6 +473,11 @@ class PendingRestore:
     against the still pre-paste baseline); once it confirms, the user's
     clipboard goes back, under the same changeCount rule as type_text().
     Nothing else restores it.
+
+    Since review R38 (Andy's call, 2026-11-07) type_text() creates none: a
+    one-character paste never puts the clipboard back. The class stays for
+    its own tests and for open_app's offer loop, which still takes any
+    PendingRestore an injected type_text hands over.
     """
 
     def __init__(self, pasteboard, saved, saved_change, confirm, *, sent_at,
@@ -539,7 +544,8 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     the typed text over any chance of the user's original clipboard
     being pasted into the phone.
 
-    The restore therefore happens only when the paste landed, OCR
+    The restore therefore happens only when the text has four or more
+    characters (spaces and case aside), the paste landed, OCR
     saw the text, at least ``min_hold_s`` has passed since Cmd+V
     (the phone's asynchronous read must see the paste first), and
     the changeCount shows nothing else touched the pasteboard.
@@ -604,14 +610,12 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     this one or an earlier one, is still on its way and could fetch the
     restored clipboard — and the box's own words never count as the text.
 
-    ``pending`` (F33): when a one-character paste was not licensed for a
-    restore here — not seen within the checks, or landed while OCR stayed
-    blind — and the caller passes a list, a PendingRestore is appended to
-    it. The caller offers it the screen reads it makes anyway; it restores
-    only on the evidence the checks above require (the same new position
-    in two separate reads), under the same changeCount rule. Longer texts
-    never get one: without a pre-paste read, text already on screen could
-    pose as the paste.
+    ``pending`` (F33): kept for callers that pass one, but nothing is
+    appended to it any more. A one-character paste used to hand over a
+    PendingRestore for a later restore on evidence; since Andy's call
+    (2026-11-07, review R38) a one-character paste never puts the user's
+    clipboard back, here or later — like a text of two or three
+    characters, it leaves the clipboard holding ``text``.
 
     Requires the calling terminal to have Accessibility permission
     (same as every other imctl input).
@@ -628,37 +632,23 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     # F27: a single character is invisible to the default OCR probe
     # (screen_shows_text never matches it) and may already be on screen, so
     # the default checks wait for a still screen, read it with the
-    # minimumTextHeight sweep before Cmd+V, and license a restore only when
+    # minimumTextHeight sweep before Cmd+V, and confirm the paste only when
     # the character shows up at the same NEW position in two separate
     # reads, looking for up to 4 s (the paste can land while Spotlight
     # redraws its results; the field echo blinks with the cursor). A screen
-    # that never holds still gets no baseline and so no restore; otherwise
-    # too the clipboard keeps holding ``text``, as before.
+    # that never holds still gets no baseline and so no such sighting. Since
+    # review R38 the sighting never licenses a restore: the clipboard keeps
+    # holding ``text``.
     single = verify.is_short_text(text, limit=1)
     sweep_before = [None]
     # F41: the probe count of a 2+ character text before the paste (None = unknown)
     multi = not single and verify.text_probe(text) is not None
     count_before = [None]
+    # 0.2.5: where the probe showed before the paste (None = unknown → no confirmation)
+    spots_before = [None]
 
     def sweep_read():
         return vision.read_screen(language_correction=False, sweep=True)
-
-    def defer_restore():
-        # F33: hand the caller what it needs to restore later, on evidence.
-        before = sweep_before[0]
-        if pending is None or not single or before is None or not restore:
-            return
-
-        sighting = verify.RepeatedSighting(text, before)
-
-        def confirm(hits):
-            # F44: as in ocr_check — a read showing the paste-progress box is
-            # no evidence (a paste is still on its way)
-            return not verify.shows_paste_hud(hits) and sighting.add(hits)
-
-        pending.append(PendingRestore(pasteboard, saved, saved_change, confirm,
-                                      sent_at=t0, clock=clock,
-                                      min_hold_s=min_hold_s))
 
     pre_read = single and before_check is None
     pre_count = multi and ocr_check is None
@@ -714,7 +704,9 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                     # F44: no license while the paste-progress box shows — a paste
                     # (this one or an earlier one) is still on its way
                     if (verify.shows_paste_hud(hits)
-                            or verify.probe_count(text, hits) <= count_before[0]):
+                            or verify.probe_count(text, hits) <= count_before[0]
+                            or spots_before[0] is None
+                            or not verify.has_new_spot(spots_before[0], verify.probe_spots(text, hits))):
                         return False
                 return True
             return verify.screen_shows_text(text, vision.read_screen)
@@ -747,13 +739,18 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             # occurrence from one read). A capture failure in either leaves it
             # unknown: then OCR can never license a restore for this paste.
             try:
-                first = verify.probe_count(text, vision.read_screen())
+                r1 = vision.read_screen()
+                first = verify.probe_count(text, r1)
                 sleep(0.3)
-                count_before[0] = max(first, verify.probe_count(text, vision.read_screen()))
+                r2 = vision.read_screen()
+                count_before[0] = max(first, verify.probe_count(text, r2))
+                # both reads: a spot either one saw is not new after the paste
+                spots_before[0] = verify.probe_spots(text, r1) + verify.probe_spots(text, r2)
             except Exception as exc:
                 if not verify.is_capture_error(exc):
                     raise
                 count_before[0] = None
+                spots_before[0] = None
         if report is not None:
             report["count_before"] = count_before[0]
 
@@ -841,10 +838,12 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
         if not landed:
             # F18 invariant: never restore unconfirmed — a late paste
             # must at worst repeat `text`, never the user's own clipboard.
-            defer_restore()
             return False
 
-        if restore_ok and restore:
+        # Andy's call (2026-11-07, review R38): one character seen on screen
+        # confirms the paste but never licenses a restore — like a text of two or
+        # three characters (VERIFY_MIN_PROBE), it keeps the clipboard holding `text`.
+        if restore_ok and restore and not single:
             # Hold the paste long enough for the asynchronous
             # pasteboard read before putting the user's data back.
             elapsed = clock() - t0
@@ -853,11 +852,9 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             # Restore the user's clipboard only if nothing else changed it.
             if pasteboard.changeCount() == saved_change + 1:
                 restore_pasteboard(pasteboard, saved)
-        else:
-            # landed but OCR is blind to it (short/cropped text), or the
-            # caller keeps the clipboard (restore=False): success, but the
-            # clipboard keeps `text` — see the docstring's tradeoff.
-            defer_restore()
+        # else: landed but OCR is blind to it (short/cropped text), a single
+        # character, or the caller keeps the clipboard (restore=False): success,
+        # but the clipboard keeps `text` — see the docstring's tradeoff.
         return True
     except BaseException:
         # Before Cmd+V the phone never got a paste command, so the

@@ -260,10 +260,13 @@ checkHW("mac_ax_state", ax?.content?.[0]?.text?.includes("role"), String(ax?.con
 if (LOCAL && TE_READY()) {
   spawnSync("/usr/bin/osascript", ["-e", 'tell application "TextEdit" to activate'], { timeout: 10000 });
   await sleepMs(400);
+  // the developer's clipboard (text) is set aside and put back after this check (E2 run 2026-11-07: it was lost)
+  const devClip = spawnSync("/usr/bin/pbpaste", { timeout: 5000 }).stdout?.toString() ?? "";
   spawnSync("/usr/bin/pbcopy", { input: "noracu-sentinel", timeout: 5000 });
   const mp = await call("mac_paste", { text: "x", app: "TextEdit" });
   await new Promise(r => setTimeout(r, 400));
   const after = spawnSync("/usr/bin/pbpaste", { timeout: 5000 }).stdout?.toString() ?? "";
+  spawnSync("/usr/bin/pbcopy", { input: devClip, timeout: 5000 });
   check("G2：mac_paste 还原剪贴板", after === "noracu-sentinel", `${String(mp?.content?.[0]?.text).slice(0, 60)} | pbpaste=${JSON.stringify(after.slice(0, 20))}`);
 } else skipLocal("G2：mac_paste 还原剪贴板");
 
@@ -389,6 +392,14 @@ if (LOCAL && TE_READY()) {
   const wid = (wl.windows || []).find((w) => w.title === TE_DOC)?.id;
   const shot = wid ? await call("mac_screenshot", { window_id: wid }) : null;
   checkHW("B3：mac_screenshot window_id 截单个窗口", shot?.content?.[0]?.type === "image" && String(shot?.content?.[1]?.text).includes(`window ${wid}`), shot ? String(shot?.content?.[1]?.text).slice(0, 80) : `no window titled ${TE_DOC}: ${JSON.stringify((wl.windows || []).map((w) => [w.id, w.title, w.bounds]))}`);
+  // 0.2.5: mac_scroll without element_index — the frontmost app's front window, scrolled at its center only after
+  // the top-window check (the TextEdit test document is frontmost here)
+  if (LOCAL) {
+    const msc = await call("mac_scroll", { direction: "down", pages: 1 });
+    console.log(`   mac_scroll (no element_index): ${say(msc)}`);
+    checkHW("0.2.5：mac_scroll 不带 element_index → 先查最上层窗口，再在前台 App 前窗中心滚动",
+      !msc?.isError && /of "TextEdit"/.test(say(msc)) && /top window: /.test(say(msc)) && /delivery=delivered_unverified/.test(say(msc)), say(msc).slice(0, 160));
+  } else skipLocal("0.2.5：mac_scroll 不带 element_index → 先查最上层窗口，再在前台 App 前窗中心滚动");
   if (!CI) {
     const saved = spawnSync("/usr/bin/pbpaste", { timeout: 5000, env: { ...process.env, LANG: "en_US.UTF-8" } }).stdout;
     spawnSync("/usr/bin/pbcopy", { input: "noracu-clip 剪贴板", timeout: 5000, env: { ...process.env, LANG: "en_US.UTF-8" } });
@@ -557,6 +568,10 @@ echo "$@" >> "${imctlLog}"
 IN=""
 if [ "$5" = "-" ]; then IN="$(cat)"; echo "stdin:$IN" >> "${imctlLog}"; fi
 if [ "$3" = "type" ] && [ "$IN" = "X" ]; then echo "typed 1 chars (the screen changed after the paste, but OCR cannot read this text back — check the field; the clipboard still holds the typed text)"; exit 0; fi
+if [ "$3" = "type" ] && [ "$IN" = "Y" ]; then echo "typed 1 chars (one character: OCR saw it appear, which is no proof of where it landed — check the field; the clipboard still holds the typed text)"; exit 0; fi
+if [ "$3" = "type" ] && [ "$IN" = "LATEtext" ]; then echo "typed 8 chars (the text showed up late, during an extra 3s check after the 2.5s confirmation window — OCR cannot tell whether that is the paste or a line repeating it, such as a search result: check the field before typing again; the clipboard still holds the typed text)"; exit 0; fi
+if [ "$3" = "type" ] && [ "$IN" = "Seen here" ]; then echo "typed 9 chars"; exit 0; fi
+if [ "$3" = "scroll" ]; then echo "scrolled down 0.5"; exit 0; fi
 if [ "$3" = "open" ] && [ "$IN" = "NoSuchApp" ]; then echo "app not found: 'NoSuchApp' (Spotlight showed no Top Hit)"; exit 1; fi
 if [[ "$*" == *"--expect=CapFail"* ]]; then echo "capture_failed: could not capture the iPhone Mirroring window to check --expect; no image was returned, so nothing was sent" >&2; exit 7; fi
 if [ "$3" = "status" ]; then
@@ -693,6 +708,14 @@ echo "home gesture sent"
     const tu = await s.call("phone_type", { text: "X" });
     check("B5/device：phone_type 只有画面变化、OCR 读不回 → delivered_unverified",
       !tu?.isError && /OCR cannot read this text back/.test(say(tu)) && /delivery=delivered_unverified, retry=unsafe/.test(say(tu)), say(tu).slice(-70));
+    // 0.2.5 (Andy's call): only a sighting in the field confirms phone_type; phone_scroll never claims verified
+    const tY = await s.call("phone_type", { text: "Y" });
+    const tL = await s.call("phone_type", { text: "LATEtext" });
+    const tS = await s.call("phone_type", { text: "Seen here" });
+    const sc = await s.call("phone_scroll", { direction: "down" });
+    check("0.2.5：phone_type 单字符、迟到（R38：不论看到在哪）→ delivered_unverified；在输入处看到 → delivered_verified；phone_scroll → delivered_unverified",
+      /delivery=delivered_unverified/.test(say(tY)) && /showed up late/.test(say(tL)) && /delivery=delivered_unverified/.test(say(tL)) && /delivery=delivered_verified/.test(say(tS)) && /delivery=delivered_unverified/.test(say(sc)),
+      [say(tY), say(tL), say(tS), say(sc)].map((t) => t.slice(-40)).join(" | "));
     check("B5/R19：phone_open app not found → delivered_unverified；--expect 截图失败 → not_delivered",
       nf?.isError && /app not found/.test(say(nf)) && /delivery=delivered_unverified, retry=safe/.test(say(nf))
         && cf?.isError && /capture_failed/.test(say(cf)) && /delivery=not_delivered, retry=safe/.test(say(cf)),

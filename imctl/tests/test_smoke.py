@@ -98,9 +98,27 @@ def test_choose_app_hit():
     TOP = hit("Top Hit", 0.26)
 
     # ① the typed query echoes in the bottom search field (ny≈0.95) —
-    #    only a result row above it (ny<0.88) counts; topmost row wins.
-    hits = [TOP, hit("Calculator", 0.95), hit("Calculator", 0.30), hit("Calculator", 0.40)]
+    #    only a result row above it (ny<0.88) counts
+    hits = [TOP, hit("Calculator", 0.95), hit("Calculator", 0.30)]
     assert choose_app_hit(hits, "Calculator").ny == 0.30
+    #    Y6 (review R37): the name at two spots inside the card → none is chosen,
+    #    and the caller is told why
+    split = []
+    hits = [TOP, hit("Calculator", 0.95), hit("Calculator", 0.30), hit("Calculator", 0.40)]
+    assert choose_app_hit(hits, "Calculator", split) is None and split == [True]
+    assert choose_app_hit(hits, "Calculator") is None  # no list given: still none
+    #    side by side at the same height is two spots too
+    split = []
+    assert choose_app_hit([TOP, hit("Calculator", 0.30, nx=0.2), hit("Calculator", 0.30, nx=0.7)],
+                          "Calculator", split) is None and split == [True]
+    #    the same label read twice (within SAME_SPOT_EPS) is one label: the topmost stands
+    split = []
+    twice = [TOP, hit("Calculator", 0.31, nx=0.51), hit("Calculator", 0.30, nx=0.50)]
+    assert choose_app_hit(twice, "Calculator", split).ny == 0.30 and split == []
+    #    a second label of the same name OUTSIDE the card does not split it (F35 geometry)
+    split = []
+    assert choose_app_hit([TOP, hit("Calculator", 0.30), hit("Calculator", 0.50)],
+                          "Calculator", split).ny == 0.30 and split == []
     # ② only the search field matches → nothing to tap
     assert choose_app_hit([TOP, hit("Calculator", 0.95)], "Calculator") is None
     # ③ case and surrounding whitespace don't matter
@@ -239,9 +257,12 @@ def test_short_app_names():
         assert choose_app_hit([TOP, hit(other, 0.30)], "X") is None, other
     # the search field echoing "X" at the bottom still doesn't count
     assert choose_app_hit([TOP, hit("X", 0.95)], "X") is None
-    # several matching rows → the topmost (smallest ny) wins
+    # Y6: matching rows at two spots inside the card (0.30 and 0.40; 0.50 is
+    # outside it) → none is tapped
     hits = [TOP, hit("X", 0.50), hit("×", 0.30), hit("X.", 0.40)]
-    assert choose_app_hit(hits, "X").ny == 0.30
+    assert choose_app_hit(hits, "X") is None
+    # one spot in the card plus one outside → the in-card label
+    assert choose_app_hit([TOP, hit("X", 0.50), hit("×", 0.30)], "X").ny == 0.30
 
     # ② find_app_hit: short names get a second, language-correction-off
     #    read in the same pass when the default read misses.
@@ -572,6 +593,15 @@ def test_open_app_confirm():
     res, taps, homes, *_ = run(
         name="Photos", screens=[[HEADER, hit("Photo Booth", 0.27), ECHO_P]] * 2, lumas=[])
     assert res == "not_found" and taps == [] and homes == [1]
+    #    Y6 (review R37): every read shows the name at two spots in the card →
+    #    "ambiguous", nothing tapped, back on the Home Screen
+    TWO = [HEADER, hit("Photos", 0.22), hit("Photos", 0.28), ECHO_P]
+    res, taps, homes, *_ = run(name="Photos", screens=[list(TWO), list(TWO)], lumas=[])
+    assert res == "ambiguous" and taps == [] and homes == [1]
+    #    …also when only the stability re-read splits: no tap at all
+    res, taps, homes, *_ = run(
+        name="Photos", screens=[[HEADER, hit("Photos", 0.22), ECHO_P], list(TWO)], lumas=[])
+    assert res == "ambiguous" and taps == [] and homes == [1]
 
     # ⑧ ③ re-locates the label in the post-tap read; when that read
     #    shows the label somewhere else in the card, the icon above the NEW
@@ -671,6 +701,10 @@ def test_open_app_confirm():
              "two-letter name, in the Top Hit card and in the search field alike, so nothing was "
              "tapped and the app may well be installed; back on the Home Screen — open it from "
              "its Home Screen icon instead (phone_screenshot, then phone_tap)", True),
+            ("ambiguous", 4,
+             "open_not_confirmed: Spotlight's Top Hit card showed 'X' at more than one spot, so "
+             "nothing was tapped; back on the Home Screen — open it from its Home Screen icon "
+             "instead (phone_screenshot, then phone_tap)", True),
         ):
             cli.gestures = SimpleNamespace(
                 open_spotlight_checked=lambda: True,
@@ -684,7 +718,8 @@ def test_open_app_confirm():
 
         # the trip back to the Home Screen failed: the message must not claim it
         for result, code in (("deadline", 4), ("not_confirmed", 4), ("not_typed", 4),
-                             ("short_unreadable", 4), ("not_found", 1), ("no_top_hit", 1)):
+                             ("short_unreadable", 4), ("ambiguous", 4), ("not_found", 1),
+                             ("no_top_hit", 1)):
             cli.gestures = SimpleNamespace(
                 open_spotlight_checked=lambda: True,
                 open_app=lambda name, spotlight_open=True, report=None, **kw:
@@ -1967,10 +2002,10 @@ def test_short_names_sweep_pass():
 
 
 def test_type_single_char_restore():
-    """F27 (+ review): typing one character restores the clipboard only when
-    the SAME new position shows up in two separate sweep reads against a
-    baseline read on a still screen; otherwise the clipboard keeps the
-    typed text (the F18 tradeoff, unchanged)."""
+    """F27 (+ review): typing one character counts as seen only when the SAME
+    new position shows up in two separate sweep reads against a baseline read
+    on a still screen. Review R38 (Andy's call, 2026-11-07): even then the
+    clipboard is never put back — it keeps the typed text in every case."""
     import imctl.input as input_module
     from imctl import verify, vision
     from imctl.input import type_text
@@ -2035,26 +2070,28 @@ def test_type_single_char_restore():
             now[0] += s
 
         pb = Pasteboard()
+        report = {}
         ok = type_text("X", pasteboard=pb, chord=lambda k, before_key=None: before_key and before_key(), sleep=sleep,
-                       clock=lambda: now[0])
+                       clock=lambda: now[0], report=report)
+        run.seen = report.get("seen")
         return ok, pb, reads
 
     try:
         patch(input_module, "ensure_frontmost", lambda: None)
         # one "X" before (an app label); the pasted one shows up elsewhere, in
-        # two separate reads at the same spot: restored
+        # two separate reads at the same spot: seen — but never restored (R38)
         ok, pb, left = run([[X(0.2)], [X(0.2), X(0.6)], [X(0.2), X(0.6)]])
-        assert ok and pb.data == b"orig" and left == []
+        assert ok and run.seen is True and pb.data == b"X" and left == []
         # only later reads show it (mid-transition frame, echo blinking)
         ok, pb, left = run([[X(0.2)], [X(0.2)], [X(0.2), X(0.18, 0.38)],
                             [X(0.2), X(0.18, 0.38)]])
-        assert ok and pb.data == b"orig" and left == []
-        # seen once only (a banner, a flaky read): never restored
+        assert ok and run.seen is True and pb.data == b"X" and left == []
+        # seen once only (a banner, a flaky read): not seen, never restored
         ok, pb, left = run([[X(0.2)], [X(0.2), X(0.6)], [X(0.2)]])
-        assert ok and pb.data == b"X" and left == []
-        # two reads, two different spots (a list still moving): never restored
+        assert ok and run.seen is False and pb.data == b"X" and left == []
+        # two reads, two different spots (a list still moving): not seen, never restored
         ok, pb, left = run([[X(0.2)], [X(0.2), X(0.6)], [X(0.2), X(0.7)]])
-        assert ok and pb.data == b"X" and left == []
+        assert ok and run.seen is False and pb.data == b"X" and left == []
         # nothing new for 4 s: landed, but the clipboard keeps the typed text
         ok, pb, left = run([[X(0.2)], [X(0.2)], [X(0.2)]])
         assert ok and pb.data == b"X" and left == []
@@ -2275,8 +2312,8 @@ def test_open_app_short_rows_and_deferred_restore():
     assert ev.add([X(0.6)]) is False and ev.add([X(0.62)]) is True   # within eps
     assert verify.RepeatedSighting("X", []).add([X(0.6), X(0.6)]) is False  # one read
 
-    # type_text hands one over for a single character its checks did not
-    # license; a longer text never gets one
+    # review R38 (Andy's call): type_text hands none over any more — not for a
+    # single character, not for a longer text; the clipboard keeps the typed text
     saved = {}
 
     def patch(mod, name, value):
@@ -2296,22 +2333,7 @@ def test_open_app_short_rows_and_deferred_restore():
         pb, pending = Pasteboard(), []
         assert type_text("X", pasteboard=pb, chord=lambda k, before_key=None: before_key and before_key(), sleep=sleep,
                          clock=lambda: now[0], pending=pending)
-        assert pb.data == b"X" and len(pending) == 1
-        assert pending[0].offer([X(0.2)]) is False            # nothing new
-        assert pending[0].offer([X(0.2), X(0.6)]) is False    # first read of evidence
-        assert pending[0].offer([X(0.6)]) is True and pb.data == b"orig"
-
-        #    (F44) reads that show the phone's "Pasting from …" box are no evidence:
-        #    a paste is still on its way
-        frames[:] = [b"\x00" * 8] * 3
-        pb, pending = Pasteboard(), []
-        assert type_text("X", pasteboard=pb, chord=lambda k, before_key=None: before_key and before_key(), sleep=sleep,
-                         clock=lambda: now[0], pending=pending)
-        box = OCRHit(text="Pasting from “M5pro”…", nx=0.5, ny=0.47, confidence=1.0)
-        assert pending[0].offer([X(0.2), X(0.6), box]) is False
-        assert pending[0].offer([X(0.2), X(0.6), box]) is False and pb.data == b"X"
-        assert pending[0].offer([X(0.6)]) is False            # first box-free read of evidence
-        assert pending[0].offer([X(0.6)]) is True and pb.data == b"orig"
+        assert pb.data == b"X" and pending == []
 
         frames[:] = [b"\x00" * 8] * 3
         patch(vision, "read_screen", lambda language_correction=True, sweep=False: [])
@@ -2707,7 +2729,7 @@ def test_bring_front_waits_for_a_frame():
 def test_watch_late_paste_and_type_messages():
     """F38: a paste unconfirmed at 2.5 s is watched (read-only) a little longer.
 
-    Seen later → "typed … (landed late …)", exit 0, no second paste; never
+    Seen later → "typed … (the text showed up late …)", exit 0, no second paste; never
     seen → type_not_confirmed that tells the caller to read the screen before
     retyping; a capture failure during the watch is "not seen", never "seen".
     """
@@ -2844,7 +2866,7 @@ def test_watch_late_paste_and_type_messages():
                                  clock=clock) is None
     assert now[0] == 0.0
 
-    # _cmd_type wiring: unconfirmed + seen late → exit 0, "landed late"
+    # _cmd_type wiring: unconfirmed + seen late → exit 0, "showed up late"
     real = (cli._require_live, cli._require_expect, cli.input.type_text, cli._watch_late_paste)
     try:
         cli._require_live = lambda: None
@@ -2856,14 +2878,14 @@ def test_watch_late_paste_and_type_messages():
             return False
         cli.input.type_text = unconfirmed
         args = argparse.Namespace(text="hello world", replace=False, expect=None)
-        cli._watch_late_paste = lambda text, baseline=None: seen_baseline.append(baseline) or 2.0
+        cli._watch_late_paste = lambda text, baseline=None, **k: seen_baseline.append(baseline) or 2.0
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             assert cli._cmd_type(args) == 0
         assert "showed up late" in out.getvalue() and "extra 2s check" in out.getvalue()
         #    never seen → exit 4 with the read-before-retyping advice
         assert seen_baseline == [1]  # the watch got type_text's baseline
-        cli._watch_late_paste = lambda text, baseline=None: None
+        cli._watch_late_paste = lambda text, baseline=None, **k: None
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             assert cli._cmd_type(args) == 4
@@ -3050,8 +3072,9 @@ def test_type_text_restore_needs_a_rise():
         def setData_forType_(self, d, _t):
             self.data = d
 
-    def hits(*texts):
-        return [OCRHit(text=t, nx=0.5, ny=0.1 + i * 0.05, confidence=0.9) for i, t in enumerate(texts)]
+    def hits(*texts, top=0.3):
+        # below the banner strip unless top says otherwise (0.2.5: sightings in the top strip never confirm)
+        return [OCRHit(text=t, nx=0.5, ny=top + i * 0.05, confidence=0.9) for i, t in enumerate(texts)]
 
     def run(screens, *, frame_changes=False, restore=True, text="iPhone 17 Pro Max case"):
         """screens: what each vision.read_screen() call returns (an Exception raises)."""
@@ -3084,7 +3107,7 @@ def test_type_text_restore_needs_a_rise():
     #    change: not confirmed, and the user's clipboard is NOT restored (it keeps the text)
     screens = [hits(chip), hits(chip), hits(chip)]
     ok, pb, report, reads = run(screens)
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 1}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 1}
     assert screens == []  # two pre-reads; the first post-read already shows no rise
     #    …same, but the frame changed: landed, yet still no restore (no rise)
     ok, pb, report, _ = run([hits(chip), hits(chip), hits(chip)], frame_changes=True)
@@ -3092,25 +3115,29 @@ def test_type_text_restore_needs_a_rise():
     # ② 0 before → 1 after, in two post-reads: the paste is seen → confirmed and restored
     screens = [hits("Search"), hits("Search"), hits(chip), hits(chip)]
     ok, pb, report, _ = run(screens)
-    assert ok is True and pb.data == b"orig" and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 0}
+    assert ok is True and pb.data == b"orig" and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 0}
     assert screens == []
     #    1 before → 2 after: a rise over the chip → restored
     ok, pb, _, _ = run([hits(chip), hits(chip), hits(chip, chip), hits(chip, chip)])
     assert ok is True and pb.data == b"orig"
+    # 0.2.5 (Andy's call): the count rises only because a notification banner at the top carries
+    #    the text → no sighting where a field can be → not confirmed, and the clipboard is NOT restored
+    ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(chip, top=0.08), hits(chip, top=0.08)])
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 0}
     # ③ a pre-paste read fails: count unknown → OCR never licenses a restore
     ok, pb, report, _ = run([CaptureError("blank"), hits(chip)])
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": None}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": None}
     ok, pb, report, _ = run([hits(chip), CaptureError("blank"), hits(chip)])
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": None}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": None}
     ok, pb, report, _ = run([CaptureError("blank"), hits(chip)], frame_changes=True)
     assert ok is True and pb.data == chip.encode()
     # ④ one pre-read misses the chip (a redraw): the count is the higher one, so the
     #    chip alone after the paste is no rise → no restore
     ok, pb, report, _ = run([hits("Search"), hits(chip), hits(chip)])
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 1}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 1}
     # ⑤ a rise in only one post-read (an OCR blip) licenses nothing
     ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(chip), hits("Search")])
-    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 0}
+    assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 0}
     # ⑥ restore=False (open_app): a confirmed paste still never gives the clipboard back
     ok, pb, _, _ = run([hits("Search"), hits("Search"), hits(chip), hits(chip)], restore=False)
     assert ok is True and pb.data == chip.encode()
@@ -3119,7 +3146,7 @@ def test_type_text_restore_needs_a_rise():
     #    on its way and could fetch the restored clipboard
     box = "Pasting from “M5pro”…"
     ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(box), hits(box)], text="pro")
-    assert ok is False and pb.data == b"pro" and {k: v for k, v in report.items() if k != "seen"} == {"count_before": 0}
+    assert ok is False and pb.data == b"pro" and {k: v for k, v in report.items() if k not in ("seen", "spots_before")} == {"count_before": 0}
     #    the text itself rises while a box still shows (an earlier paste in flight): no restore
     ok, pb, _, _ = run([hits("Search"), hits("Search"), hits(chip, box), hits(chip, box)],
                        frame_changes=True)
@@ -3810,12 +3837,12 @@ def test_device_run_frame_diff_alone_is_not_typed():
             return True
         cli.input.type_text = frame_only
         watched = []
-        cli._watch_late_paste = lambda text, baseline=None: watched.append(baseline) or None
+        cli._watch_late_paste = lambda text, baseline=None, **k: watched.append(baseline) or None
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             assert cli._cmd_type(argparse.Namespace(text="测试文本", replace=True, expect=None)) == 4
         assert watched == [0] and err.getvalue().startswith("type_not_confirmed:")
-        cli._watch_late_paste = lambda text, baseline=None: 3.0
+        cli._watch_late_paste = lambda text, baseline=None, **k: 3.0
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             assert cli._cmd_type(argparse.Namespace(text="测试文本", replace=True, expect=None)) == 0
@@ -3848,6 +3875,22 @@ def test_page_swipes_start_above_the_dock_f45():
     assert seen == [(0.9, 0.8, 0.1, 0.8), (0.1, 0.8, 0.9, 0.8)], seen
     assert all(0.78 <= fy <= 0.83 and fy == ty for _, fy, _, ty in seen)
 
+
+
+def test_short_text_never_confirmed_by_a_sighting_r37():
+    """R37 / Andy's call: "in" showing up inside a new "Sign in" line is no sighting of the typed text;
+    a text of four or more characters at a new spot below the banner strip still is."""
+    from imctl import verify
+    from imctl.vision import OCRHit
+    assert verify.probe_spots("in", [OCRHit(text="Sign in", nx=0.5, ny=0.7, confidence=1.0)]) == []
+    assert not verify.has_new_spot([], verify.probe_spots("in", [OCRHit(text="Sign in", nx=0.5, ny=0.7, confidence=1.0)]))
+    assert verify.has_new_spot([], verify.probe_spots("hello", [OCRHit(text="hello", nx=0.5, ny=0.7, confidence=1.0)]))
+    # R37 counterexample 2: the text was at (0.50,0.50) before; after, (0.50,0.54) and the banner strip
+    before = [(0.50, 0.50)]
+    after = verify.probe_spots("payload", [OCRHit(text="payload", nx=0.50, ny=0.54, confidence=1.0),
+                                          OCRHit(text="payload", nx=0.50, ny=0.08, confidence=1.0)])
+    assert after == [(0.50, 0.54)] and verify.has_new_spot(before, after)  # 0.04 apart: a new spot
+    assert not verify.has_new_spot(before, [(0.50, 0.52)])                 # within 0.03: the same spot
 
 if __name__ == "__main__":
     # every test_* function in this file, in file order (before 0.2.4 a hand-kept list ran 28 of 47)

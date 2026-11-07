@@ -49,7 +49,7 @@ First success is `mac_ax_state` (or a browser snapshot) — not a click, and not
 
 ```bash
 npm install noracu          # server at node_modules/noracu/src/server.mjs
-brew install cliclick       # needed for physical Mac input (mac_key, mac_paste, mac_drag, and physical mac_click/mac_type)
+brew install cliclick       # needed for physical Mac input (mac_key, mac_drag, and physical mac_click/mac_type)
 ```
 
 Or from source: `git clone https://github.com/sgInnora/noracu.git && cd noracu && npm install && npm test` (add `NORACU_CI=1` to skip hardware-gated checks).

@@ -433,7 +433,11 @@ def _norm_label(s: str) -> str:
     return "".join(_LABEL_LOOKALIKES.get(ch, ch) for ch in s)
 
 
-def choose_app_hit(hits: list, name: str) -> vision.OCRHit | None:
+# Two matching labels closer than this in both axes are one label read twice (choose_app_hit, Y6).
+SAME_SPOT_EPS = 0.03
+
+
+def choose_app_hit(hits: list, name: str, ambiguous: list | None = None) -> vision.OCRHit | None:
     """Pick the Spotlight result row for ``name`` from OCR hits.
 
     iOS 26 draws the Spotlight search field at the BOTTOM of the screen
@@ -445,9 +449,15 @@ def choose_app_hit(hits: list, name: str) -> vision.OCRHit | None:
         "x", "×", "X." or full-width "Ｘ"), and
       - lie above the bottom search-field zone (ny < 0.88).
     The comparison stays EXACT — substring/prefix matching is
-    forbidden: "X" must never hit "Xcode" or "X Corp". When several
-    rows match, the topmost (smallest ny) wins. Returns None when
-    nothing qualifies.
+    forbidden: "X" must never hit "Xcode" or "X Corp". Returns None
+    when nothing qualifies.
+
+    Y6 (review R37, 2026-11-07): when labels that match sit at two or
+    more different spots inside the card (more than SAME_SPOT_EPS apart
+    in either axis), nothing says which one is the app, so none is
+    chosen: the result is None and, when the caller passes a list as
+    ``ambiguous``, True is appended to it. Matches at one spot (the same
+    label read twice) are one label; the topmost of them is returned.
 
     F35 (2026-11-05 real-device): an exact label is not an app. The
     query "Pinduoduo" matched a Chrome *suggestion* row of that name
@@ -464,7 +474,7 @@ def choose_app_hit(hits: list, name: str) -> vision.OCRHit | None:
     header = _tophit_header(hits)
     if header is None:
         return None
-    best = None
+    found = []
     for hit in hits:
         if _norm_label(hit.text) != want:
             continue
@@ -472,13 +482,19 @@ def choose_app_hit(hits: list, name: str) -> vision.OCRHit | None:
             continue  # the search field echoing the query
         if not header.ny < hit.ny <= header.ny + TOP_HIT_CARD_SPAN:
             continue  # outside the Top Hit card (F35)
-        if best is None or hit.ny < best.ny:
-            best = hit
+        found.append(hit)
+    if not found:
+        return None
+    best = min(found, key=lambda h: h.ny)
+    if any(abs(h.nx - best.nx) > SAME_SPOT_EPS or abs(h.ny - best.ny) > SAME_SPOT_EPS for h in found):
+        if ambiguous is not None:
+            ambiguous.append(True)
+        return None  # Y6: several labels of the same name are never tapped
     return best
 
 
 def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep,
-                 deadline=None, clock=time.monotonic):
+                 deadline=None, clock=time.monotonic, ambiguous=None):
     """Read the screen up to ``attempts`` times for a Spotlight result row.
 
     Each pass calls ``read_screen()`` for OCR hits and hands them to
@@ -501,6 +517,7 @@ def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep,
     stays exact either way. Long names keep the exact original
     read/sleep sequence. ``deadline`` (a ``clock()`` value) is checked
     before every read; once reached, no further read happens.
+    ``ambiguous`` is handed to every choose_app_hit() call (Y6).
     """
     short = len(_norm_label(name)) <= 2
 
@@ -522,7 +539,7 @@ def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep,
         for kwargs in reads:
             if expired():
                 return None  # out of time before this read (open_app reports it)
-            hit = choose_app_hit(read_screen(**kwargs), name)
+            hit = choose_app_hit(read_screen(**kwargs), name, ambiguous)
             if hit is not None:
                 return hit
     return None
@@ -712,8 +729,10 @@ def open_app(name: str, *, spotlight_open: bool = False,
     Top Hit card and the search field alike, so whether it was typed or
     the app exists is unknown — nothing was tapped; back on the Home Screen);
     "deadline" (the OPEN_DEADLINE_S budget ran out before a tap; back on
-    the Home Screen); or "spotlight_unavailable" (Spotlight could not be
-    opened; nothing was typed or tapped).
+    the Home Screen); "ambiguous" (Y6: the Top Hit card showed the name at
+    two or more spots and no read showed it at one — nothing was tapped;
+    back on the Home Screen); or "spotlight_unavailable" (Spotlight could
+    not be opened; nothing was typed or tapped).
 
     ``read_screen`` (default vision.read_screen), ``luma`` (default
     verify.window_luma), ``sleep``, ``tap`` (default inp.tap),
@@ -751,6 +770,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
     deadline = None if deadline_s is None else clock() + deadline_s
     saw_top_hit = [False]
     saw_echo = [False]
+    ambiguous: list = []  # Y6: a read showed the name at two or more spots in the card
 
     def read_screen(**kwargs):
         # F33: every later read is also evidence for a clipboard restore an
@@ -794,7 +814,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
     hit = None
     if typed is not False:
         hit = find_app_hit(read_screen, name, attempts=2, sleep=sleep,
-                           deadline=deadline, clock=clock)
+                           deadline=deadline, clock=clock, ambiguous=ambiguous)
     if hit is None and not saw_echo[0]:
         # F33/F42: the name is not in the search field yet — the paste may still be on its
         # way, whether type_text missed it or took another change for it (a clear that
@@ -813,7 +833,8 @@ def open_app(name: str, *, spotlight_open: bool = False,
                     break
                 sleep(1.0)
             hit = find_app_hit(read_screen, name, attempts=1, sleep=sleep,
-                               deadline=deadline if confirming else limit, clock=clock)
+                               deadline=deadline if confirming else limit, clock=clock,
+                               ambiguous=ambiguous)
             if hit is not None:
                 break
             # only the search field showing the name proves the paste arrived — a Top Hit
@@ -827,6 +848,8 @@ def open_app(name: str, *, spotlight_open: bool = False,
         tidy()
         if out_of_time():
             return "deadline"
+        if ambiguous:
+            return "ambiguous"  # Y6: the card showed the name at more than one spot
         if short:
             # OCR misses one- and two-letter text in the card and in the field alike: neither
             # "not typed" nor "not found" is known — say that instead (2026-11-06 device run)
@@ -842,13 +865,21 @@ def open_app(name: str, *, spotlight_open: bool = False,
         # ① the Spotlight results can still be reflowing when
         # find_app_hit returns; re-read after 0.5s and re-pick.
         sleep(0.5)
-        again = choose_app_hit(reread(), name)
+        split: list = []
+        again = choose_app_hit(reread(), name, split)
+        if split:
+            # Y6: this read shows the name at two or more spots — tap none of them
+            tidy()
+            return "ambiguous"
         if again is not None:
             if math.hypot(again.nx - hit.nx, again.ny - hit.ny) > 0.02:
                 # the row moved: the second read wins, with at most
                 # one more read — still moving → the last one wins
                 hit = again
-                once_more = choose_app_hit(reread(), name)
+                once_more = choose_app_hit(reread(), name, split)
+                if split:
+                    tidy()
+                    return "ambiguous"
                 if (once_more is not None
                         and math.hypot(once_more.nx - hit.nx,
                                        once_more.ny - hit.ny) > 0.02):

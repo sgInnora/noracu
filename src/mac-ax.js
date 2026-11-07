@@ -1250,14 +1250,71 @@ function opFrontmost(req) {
   }
   return out;
 }
+// The strips of each display that macOS keeps for the Dock: the display's frame minus its visible frame,
+// at the bottom, left and right (the top strip is the menu bar). screens: [{ f, v }] — frame and visible
+// frame in AppKit coordinates (origin bottom-left of the main screen); returns top-left [x, y, w, h].
+function dockStripsOf(screens) {
+  const mainH = screens.length ? screens[0].f[3] : 0;
+  const out = [];
+  for (const { f, v } of screens) {
+    const [fx, fy, fw] = f, [vx, vy, vw, vh] = v;
+    const tl = (y, h) => mainH - y - h;
+    if (vy > fy) out.push([fx, tl(fy, vy - fy), fw, vy - fy]);
+    if (vx > fx) out.push([fx, tl(vy, vh), vx - fx, vh]);
+    if (fx + fw > vx + vw) out.push([vx + vw, tl(vy, vh), fx + fw - vx - vw, vh]);
+  }
+  return out;
+}
+function dockStrips() {
+  const s = $.NSScreen.screens;
+  const screens = [];
+  for (let i = 0; i < Number(s.count); i++) {
+    const sc = s.objectAtIndex(i), f = sc.frame, v = sc.visibleFrame;
+    screens.push({ f: [f.origin.x, f.origin.y, f.size.width, f.size.height].map(Number), v: [v.origin.x, v.origin.y, v.size.width, v.size.height].map(Number) });
+  }
+  return dockStripsOf(screens);
+}
+function inRect(x, y, r) { return x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3]; }
+// While a banner or alert shows, Notification Center keeps one full-display window above everything (layer
+// 23) that lets clicks through except where a notification is drawn (E2 run 2026-11-07, macOS 27.2: a
+// memory-warning banner at the top right made a point in the middle of the screen read as covered). The
+// frames of the banners and alerts on screen, from accessibility; null — the whole overlay counts as
+// covering — when Notification Center's list is open, an element cannot be read, or none is found.
+function ncDrawnRects() {
+  const a = ncApp();
+  if (!a) return null;
+  const rects = [];
+  let doubt = false;
+  const visit = (el, d) => {
+    if (d > 14 || doubt) return;
+    const v = readNode(el);
+    if (v.__err) { doubt = true; return; }
+    const sr = String(v.AXSubrole || '');
+    if (sr.indexOf('AXNotificationCenter') === 0) {
+      const fr = frameOf(v);
+      if ((sr !== 'AXNotificationCenterBanner' && sr !== 'AXNotificationCenterAlert') || !fr) { doubt = true; return; }
+      rects.push([fr[0] - 4, fr[1] - 4, fr[2] + 8, fr[3] + 8]); // a little margin for the shadow
+      return;
+    }
+    for (const k of v.AXChildren || []) visit(k, d + 1);
+  };
+  for (const w of windowsOf(appElement(a))) visit(w, 0);
+  return doubt || !rects.length ? null : rects;
+}
+
 // The topmost on-screen window at a point, front to back, as the window server stacks them. Skipped:
 // invisible windows (alpha 0), desktop-level ones (negative layer), and the Dock's full-display overlay,
-// which lets clicks through everywhere — only a Dock window as large as a whole display; the Dock itself
-// (its platter) and other Dock-owned strips do cover what is under them.
+// which lets clicks through — except over the strip macOS keeps for the Dock, where the Dock is drawn:
+// there the overlay counts as covering (E2 run 2026-11-07: on macOS 27 the Dock has no window of its own
+// for its platter, so a point under the Dock read as the window behind it). The strip is the whole width
+// (or height) the Dock reserves, the gaps beside its platter included. Other Dock-owned windows cover
+// what is under them. Notification Center's full-display overlay (shown with a banner or alert) is
+// skipped the same way except over a banner or alert frame (ncDrawnRects), or everywhere when those
+// frames cannot be told.
 function cgTopAt(x, y) {
   const list = cast($.CGWindowListCopyWindowInfo((1 << 0) | (1 << 4), 0)); // on screen only, no desktop elements
   if (!list) return null;
-  let screens = null;
+  let screens = null, strips = null, nc;
   for (let i = 0; i < Number(list.count); i++) {
     const d = list.objectAtIndex(i);
     const g = k => { const o = d.objectForKey(ks(k)); return o && !o.isNil() ? o.js : null; };
@@ -1268,9 +1325,17 @@ function cgTopAt(x, y) {
     if (!b || b.isNil()) continue;
     const [bx, by, bw, bh] = ['X', 'Y', 'Width', 'Height'].map(k => Number(b.objectForKey(ks(k)).js));
     if (bw * bh < 4 || x < bx || y < by || x >= bx + bw || y >= by + bh) continue;
-    if (owner === 'Dock') {
+    if (owner === 'Dock' || owner === 'Notification Center') {
       if (!screens) screens = displays().map(s => s.frame);
-      if (screens.some(f => rectNear(f, [bx, by, bw, bh], 2))) continue;
+      if (screens.some(f => rectNear(f, [bx, by, bw, bh], 2))) {
+        if (owner === 'Dock') {
+          if (!strips) strips = dockStrips();
+          if (!strips.some(r => inRect(x, y, r))) continue;
+        } else {
+          if (nc === undefined) nc = ncDrawnRects();
+          if (nc && !nc.some(r => inRect(x, y, r))) continue;
+        }
+      }
     }
     return { pid: Number(g('kCGWindowOwnerPID')), owner, layer, wid: Number(g('kCGWindowNumber')) };
   }
@@ -1998,7 +2063,7 @@ function opWindowOp(req) {
 // ── paste (mac_paste) ────────────────────────────────────────────────────────────────────────────
 // One engine call does the whole paste, so the user's clipboard never leaves this process and nothing
 // can slip in between the steps: focus guard → copy every item and type aside → write the text (marked
-// transient, so clipboard managers skip it) → ⌘V through cliclick, only if the clipboard and the
+// transient, so clipboard managers skip it) → ⌘V as a key event, only if the clipboard and the
 // frontmost app are still as they were → wait for the paste to show in the focused element (else at
 // least 1 s, and only while the app answers) → put the user's items back, only if nobody else wrote
 // to the clipboard meanwhile. A password manager's concealed item is never copied or put back: the
@@ -2101,9 +2166,22 @@ function focusEvidence(appEl) {
   return { el: f.el, key: JSON.stringify([val, typeof n === 'number' ? n : null, sel || null]), raw, sel: sel || null };
 }
 const PASTE_MIN_HOLD_MS = 300;
+// The current keyboard layout's id (e.g. com.apple.keylayout.US), or null when it cannot be read.
+function keyboardLayoutId() {
+  try {
+    ObjC.import('Carbon');
+    const s = $.TISCopyCurrentKeyboardLayoutInputSource();
+    return String(ObjC.castRefToObject($.TISGetInputSourceProperty(s, $.kTISPropertyInputSourceID)).js);
+  } catch (e) { return null; }
+}
+// Key code 9 is V on QWERTY, QWERTZ, AZERTY and Colemak layouts; a Dvorak layout puts K there, so ⌘ with
+// it would be ⌘K. The "Dvorak - QWERTY ⌘" layouts keep ⌘ shortcuts on QWERTY and are fine.
+function vKeyIsElsewhere(layout) { return typeof layout === 'string' && /dvorak/i.test(layout) && !/qwerty/i.test(layout); }
 function opPaste(req) {
   const text = String(req.text === undefined || req.text === null ? '' : req.text);
   if (!text) return invalid('text required');
+  const layout = keyboardLayoutId();
+  if (vKeyIsElsewhere(layout)) return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `the keyboard layout ${layout} does not have V where ⌘V is sent from (key code 9) — nothing was pasted; mac_type types without the clipboard`, details: { kind: 'keyboard_layout' } }));
   const front = frontApp();
   if (!front) return fail(notDelivered({ code: 'FOCUS_UNKNOWN', message: 'could not read the frontmost app — nothing was pasted' }));
   let target = front;
@@ -2164,17 +2242,15 @@ function opPaste(req) {
     const restored = putBack(ours);
     return fail(notDelivered({ code: 'FOCUS_LOST', message: `the frontmost app changed to "${f2 ? f2.name : 'unknown'}" just before the paste — nothing was pasted (clipboard restored: ${restored})` }));
   }
-  const tool = req.cliclick || '/opt/homebrew/bin/cliclick';
-  const k = runTool(tool, ['kd:cmd', 't:v', 'ku:cmd'], 10000);
-  if (!k.started) {
+  // ⌘V is the V key itself (key code 9) with the ⌘ flag, posted here. cliclick's `kd:cmd t:v ku:cmd`
+  // types text, not that key: on macOS 27.2 TextEdit got a plain "v", or nothing, instead of a paste
+  // (E2 run 2026-11-07, T7).
+  const sent = postKey(KEY_V, [[MOD_KEYCODES.cmd, KEY_FLAGS.cmd]], 0);
+  releaseStuckModifiers(['cmd']);
+  if (!sent) {
+    // the V key was never posted (postKey creates both events before posting either)
     const restored = putBack(ours);
-    return fail(notDelivered({ code: 'INTERNAL', message: `cliclick could not start: ${k.error} — nothing was pasted (clipboard restored: ${restored})` }));
-  }
-  if (k.timedOut || k.status !== 0) {
-    // ⌘V may or may not have gone out (and ⌘ may still be down): release ⌘, keep our text on the
-    // clipboard — a late paste must at worst repeat the text, never the user's clipboard
-    runTool(tool, ['ku:cmd'], 2000);
-    return fail({ code: 'ACTION_FAILED', message: `cliclick ${k.timedOut ? 'timed out' : `exited ${k.status}`} while sending ⌘V — the paste may or may not have happened (clipboard restored: false (paste_uncertain))`, delivery: 'unknown', retry: 'unsafe' });
+    return fail(notDelivered({ code: 'ACTION_FAILED', message: `could not create the keyboard events for ⌘V — nothing was pasted (clipboard restored: ${restored})` }));
   }
   // the paste is done when the focused element shows it; without that evidence the clipboard stays
   // ours for at least hold_ms, so an app that reads it late does not get the user's clipboard instead
@@ -2509,6 +2585,7 @@ function opMenu(req) {
 // keypad flag, as hardware sends them. The server's focus guard runs before this op.
 const KEY_FLAGS = { cmd: 0x100000, shift: 0x20000, alt: 0x80000, ctrl: 0x40000, fn: 0x800000 };
 const MOD_KEYCODES = { cmd: 55, shift: 56, alt: 58, ctrl: 59 }; // left-hand keys; fn is a flag only (pressing Fn alone can switch input source)
+const KEY_V = 9; // the V key position (ANSI); mac_paste's ⌘V — see vKeyIsElsewhere for layouts that move it
 const FLAG_NUMPAD = 0x200000;
 const HELD_MASK = KEY_FLAGS.cmd | KEY_FLAGS.shift | KEY_FLAGS.alt | KEY_FLAGS.ctrl;
 const EV_FLAGS_CHANGED = 12;

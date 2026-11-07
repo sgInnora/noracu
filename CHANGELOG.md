@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.2.5] — 2026-11-07
+
+### Changed
+- `phone_scroll` that changed the screen is reported `delivered_unverified`
+  instead of `delivered_verified`: a changed screen is all it sees, and a
+  notification or an animation changes the screen too. Take
+  `phone_screenshot` to see where the list is. `scroll_no_effect` is
+  unchanged.
+- `phone_type` is `delivered_verified` only when OCR sees the typed text at a
+  spot where it was not before the paste, below the strip at the top where the
+  status bar and notification banners are drawn. A rise in how often the text
+  shows anywhere on screen (a banner carrying the same words, a label
+  elsewhere) no longer confirms the paste, and no longer licenses putting the
+  user's clipboard back. Text that shows up only after the 2.5 s window is
+  `delivered_unverified`, and the result no longer says the paste landed: in
+  a device test a second paste of the same text into the Settings search
+  field was "seen late" while the field still showed the text once. The
+  clipboard keeps the typed text. One character that OCR saw appear is
+  `delivered_unverified` and no longer puts the user's clipboard back. A text
+  of two or three characters (spaces and case aside) is never confirmed by a
+  sighting — "in" is part of "Sign in" — so it is `delivered_unverified` and
+  leaves the typed text on the clipboard.
+- `mac_scroll` without `element_index` scrolls at the center of the
+  frontmost app's front window on screen, and only when that app's window is
+  on top at that point — otherwise it reports `occluded` (or `no_window`) and
+  scrolls nothing. Before, the pointer went to the first window System Events
+  named, or stayed wherever it was when that lookup failed.
+- `phone_open` taps nothing when Spotlight's Top Hit card shows the app name
+  at two or more different spots: it reports `open_not_confirmed` and goes
+  back to the Home Screen. Before, it tapped the topmost one.
+
+### Fixed
+- `mac_paste` sends ⌘V as the V key (key code 9) with ⌘ held, posted by the
+  accessibility engine, instead of cliclick's `kd:cmd t:v ku:cmd`. On macOS
+  27.2 with the Pinyin keyboard layout, cliclick's version reached TextEdit as
+  nothing, or as a plain "v" typed into the document, so `mac_paste` reported
+  `delivered_unverified` and the text was never pasted. Under a Dvorak layout,
+  where key code 9 is K, `mac_paste` now refuses (`not_delivered`) instead of
+  sending ⌘K; "Dvorak - QWERTY ⌘" layouts are fine. `mac_paste` no longer needs
+  cliclick.
+- A point under the Dock no longer counts as the window behind it. On macOS
+  27.2 (the version tested) the Dock is one full-display window that lets
+  clicks through, and the check of which window is on top skipped it, so
+  `mac_scroll` without `element_index` scrolled a window whose center was
+  under the Dock, and a `mac_click` at x,y there would have been sent. The
+  strip each display keeps for the Dock (its whole width, the gaps beside the
+  icons included) now counts as covered by the Dock: `occluded`, nothing
+  sent. The same check guards physical clicks and drags on an element.
+- While a notification banner shows, a point away from it is no longer
+  `occluded` by Notification Center. On macOS 27.2 Notification Center then
+  keeps a full-display window above everything, and every raw click, drag or
+  scroll anywhere on the screen was refused until the banner left. Now only
+  the banner's or alert's own frame (read through accessibility, plus a small
+  margin) counts as covered; when those frames cannot be read, or the
+  notification list is open, the whole screen still counts as covered.
+
+### Docs
+- SECURITY.md opens with what noracu hands to your model and what it can
+  reach — text returned to the model, the clipboard, privacy-consent and
+  authorization dialogs, secrets an app displays, browser cookies, the iPhone
+  Mirroring session — with who receives each and what noracu does and does
+  not do, plus its boundaries: macOS permissions belong to the host app,
+  noracu does not constrain the host's own shell, and tool annotations
+  restrict nothing. New threat 18 covers the clipboard on the phone path: the
+  iPhone fetches a paste late, so `phone_type` puts the clipboard back only on
+  screen evidence. The iPhone Mirroring row notes that the mirror delivers
+  pointer input, not touches (Apple TN3210), so swiping in from the left edge
+  to go back does nothing through it.
+
 ## [0.2.4] — 2026-11-07
 
 ### Changed

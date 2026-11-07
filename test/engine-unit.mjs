@@ -677,7 +677,10 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     ctx.pbWriteText = (t) => { log.push(`write:${t}`); const mine = ++cc; pb.types = ["public.utf8-plain-text", "org.nspasteboard.TransientType"]; pb.items = [[["public.utf8-plain-text", t]]]; if (opts.afterWrite) opts.afterWrite(api); return mine; };
     ctx.pbRestore = (saved) => { log.push("restore"); cc++; pb.items = saved.items; pb.types = ["public.utf8-plain-text"]; return true; };
     ctx.pbClear = () => { log.push("clear"); cc++; pb.items = []; pb.types = []; };
-    ctx.runTool = (path, args) => { log.push(`tool:${args.join(" ")}`); if (opts.afterKey && args[0] === "kd:cmd") opts.afterKey(api); return opts.toolResult && args[0] === "kd:cmd" ? opts.toolResult : { started: true, status: 0 }; };
+    // E2 T7: ⌘V is posted by the engine as key code 9 with the ⌘ modifier (no cliclick)
+    ctx.postKey = (code, mods) => { log.push(`key:${code}:${mods.map((m) => m[0]).join("+")}`); if (opts.afterKey) opts.afterKey(api); return opts.keyResult ?? true; };
+    ctx.releaseStuckModifiers = () => [];
+    ctx.keyboardLayoutId = () => opts.layout ?? "com.apple.keylayout.US";
     const FOCUSED = { id: "field" };
     // CP: evidence carries the raw value and selection; "after" is the pasted text over an empty field
     let ev = opts.evidence === undefined ? null : { el: FOCUSED, key: opts.evidence, raw: opts.raw ?? "", sel: opts.sel === undefined ? { location: 0, length: 0 } : opts.sel };
@@ -690,7 +693,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     const t = setup({ evidence: "before", afterKey: (a) => a.setEvidence("after") });
     const r = t.ctx.opPaste({ op: "paste", text: "hello", app: "TextEdit" });
     check("paste: the user's items are copied aside and put back after the paste shows → delivered_verified, restored true",
-      r.ok && r.delivery === "delivered_verified" && r.restored === "true" && t.log.join(",") === "save,write:hello,tool:kd:cmd t:v ku:cmd,restore" && t.pb.items[0][0][1] === "user text", JSON.stringify({ r, log: t.log }));
+      r.ok && r.delivery === "delivered_verified" && r.restored === "true" && t.log.join(",") === "save,write:hello,key:9:55,restore" && t.pb.items[0][0][1] === "user text", JSON.stringify({ r, log: t.log }));
   }
   {
     const t = setup({ types: ["public.utf8-plain-text", "org.nspasteboard.ConcealedType"], evidence: "before", afterKey: (a) => a.setEvidence("after") });
@@ -714,13 +717,13 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     const t = setup({ afterWrite: (a) => a.bump() });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
     check("paste: another app writes to the clipboard just before ⌘V → no keystroke, its content is left alone",
-      !r.ok && r.code === "NOT_CONFIRMED" && r.delivery === "not_delivered" && !t.log.some((x) => x.startsWith("tool:")) && t.log.indexOf("restore") < 0, JSON.stringify({ r, log: t.log }));
+      !r.ok && r.code === "NOT_CONFIRMED" && r.delivery === "not_delivered" && !t.log.some((x) => x.startsWith("key:")) && t.log.indexOf("restore") < 0, JSON.stringify({ r, log: t.log }));
   }
   {
     const t = setup({ afterWrite: (a) => a.setFront(91) });
     const r = t.ctx.opPaste({ op: "paste", text: "hello", app: "TextEdit" });
     check("paste: the frontmost app changes just before ⌘V → no keystroke, the user's clipboard is put back",
-      !r.ok && r.code === "FOCUS_LOST" && !t.log.some((x) => x.startsWith("tool:")) && t.log[t.log.length - 1] === "restore", JSON.stringify({ r, log: t.log }));
+      !r.ok && r.code === "FOCUS_LOST" && !t.log.some((x) => x.startsWith("key:")) && t.log[t.log.length - 1] === "restore", JSON.stringify({ r, log: t.log }));
   }
   {
     const t = setup({ afterKey: (a) => a.bump() });
@@ -749,18 +752,27 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
       r.ok && r.restored === "false (app_unresponsive)" && t.log.indexOf("restore") < 0, JSON.stringify({ r, log: t.log }));
   }
   {
-    // R15: cliclick failing mid-chord → ⌘ released, the user's clipboard NOT put back (the paste may be late)
-    const t = setup({ toolResult: { started: true, timedOut: true } });
+    // E2 T7: the key events for ⌘V cannot be created → the V key never went out: not delivered, clipboard put back
+    const t = setup({ keyResult: false });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
-    check("paste: cliclick times out during ⌘V → ⌘ released, clipboard not restored, delivery unknown (R15 §1-1)",
-      !r.ok && r.delivery === "unknown" && /paste_uncertain/.test(r.message) && t.log.indexOf("restore") < 0 && t.log.indexOf("tool:ku:cmd") >= 0, JSON.stringify({ r, log: t.log }));
+    check("paste: ⌘V events cannot be created → not_delivered, the user's clipboard is put back",
+      !r.ok && r.delivery === "not_delivered" && r.code === "ACTION_FAILED" && t.log[t.log.length - 1] === "restore", JSON.stringify({ r, log: t.log }));
+  }
+  {
+    // E2 T7: a Dvorak layout has K on key code 9 → refused before anything is read or written; Dvorak - QWERTY ⌘ is fine
+    const t = setup({ layout: "com.apple.keylayout.Dvorak" });
+    const r = t.ctx.opPaste({ op: "paste", text: "hello" });
+    const t2 = setup({ layout: "com.apple.keylayout.DVORAK-QWERTYCMD", evidence: "before", afterKey: (a) => a.setEvidence("after") });
+    const r2 = t2.ctx.opPaste({ op: "paste", text: "hello" });
+    check("paste: Dvorak → refused, nothing read or written; Dvorak - QWERTY ⌘ → pasted",
+      !r.ok && r.delivery === "not_delivered" && t.log.length === 0 && r2.ok && r2.delivery === "delivered_verified", JSON.stringify({ r, log: t.log, r2: r2.delivery }));
   }
   {
     // R15: a copy that lands while the clipboard is being copied aside is not overwritten
     const t = setup({ duringSave: (a) => a.bump() });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
     check("paste: another app copies during the save → nothing written, nothing sent (R15 §1-3)",
-      !r.ok && r.code === "NOT_CONFIRMED" && !t.log.some((x) => x.startsWith("write") || x.startsWith("tool:")), JSON.stringify({ r, log: t.log }));
+      !r.ok && r.code === "NOT_CONFIRMED" && !t.log.some((x) => x.startsWith("write") || x.startsWith("key:")), JSON.stringify({ r, log: t.log }));
   }
   {
     // R15: the paste shows at once → still held for the minimum before the clipboard goes back
@@ -1439,5 +1451,53 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const r = ctx.opInsertText({ target: targetOf(res, nodeAt(res, (n) => n.role === "AXTextArea")), text: "XY" });
   check("CP R36: append path with an unreadable value → ACTION_NOT_SUPPORTED not_delivered, nothing written (no clobbering)",
     r.ok === false && r.code === "ACTION_NOT_SUPPORTED" && r.delivery === "not_delivered" && calls.length === 0, JSON.stringify({ ok: r.ok, code: r.code, delivery: r.delivery, calls }));
+}
+
+{
+  // E2 run 2026-11-07 (T11): on macOS 27 the Dock is one full-display overlay window; a point over the strip
+  // the Dock reserves must read as covered by the Dock, not as the window behind it
+  const ctx = loadEngine(ENGINE);
+  // AppKit coordinates: main 2560×1440 with a 66-pt Dock at the bottom; a second display on the left with no Dock
+  const strips = ctx.dockStripsOf([{ f: [0, 0, 2560, 1440], v: [0, 66, 2560, 1349] }, { f: [-1728, 0, 1728, 1117], v: [-1728, 0, 1728, 1092] }]);
+  const left = ctx.dockStripsOf([{ f: [0, 0, 1000, 800], v: [70, 0, 930, 775] }]);
+  const right = ctx.dockStripsOf([{ f: [0, 0, 1000, 800], v: [0, 0, 930, 775] }]);
+  check("E2 T11: dockStripsOf — bottom Dock strip in top-left coordinates; no strip for a display without a Dock; left / right Docks",
+    JSON.stringify(strips) === "[[0,1374,2560,66]]" && JSON.stringify(left) === "[[0,25,70,775]]" && JSON.stringify(right) === "[[930,25,70,775]]",
+    JSON.stringify({ strips, left, right }));
+  // a fake window list, front to back: the Dock's full-display overlay, then a TextEdit window reaching into the strip
+  const win = (owner, pid, layer, b, wid) => ({ kCGWindowOwnerName: owner, kCGWindowOwnerPID: pid, kCGWindowLayer: layer, kCGWindowAlpha: 1, kCGWindowNumber: wid, kCGWindowBounds: { X: b[0], Y: b[1], Width: b[2], Height: b[3] } });
+  const rows = [win("Dock", 20, 20, [0, 0, 2560, 1440], 80), win("TextEdit", 30, 0, [1030, 1257, 500, 300], 90)];
+  const box = (v) => ({ isNil: () => v === undefined, js: v, objectForKey: (k) => box(v?.[k]) });
+  ctx.cast = () => ({ count: rows.length, objectAtIndex: (i) => box(rows[i]) });
+  ctx.ks = (k) => k;
+  ctx.displays = () => [{ frame: [0, 0, 2560, 1440] }];
+  ctx.dockStrips = () => [[0, 1374, 2560, 66]];
+  const under = ctx.cgTopAt(1280, 1407), beside = ctx.cgTopAt(1040, 1400), above = ctx.cgTopAt(1280, 1300);
+  check("E2 T11: cgTopAt — under the Dock strip → the Dock (also beside its platter); above it → the window",
+    under?.owner === "Dock" && under?.layer === 20 && beside?.owner === "Dock" && above?.owner === "TextEdit",
+    JSON.stringify({ under, beside, above }));
+  // E2 T10: a banner shows → Notification Center's full-display overlay sits on top; only the banner covers
+  rows.unshift(win("Notification Center", 11, 23, [0, 0, 2560, 1440], 40));
+  ctx.ncDrawnRects = () => [[2186, 36, 368, 88]];
+  const mid = ctx.cgTopAt(1280, 700), onBanner = ctx.cgTopAt(2400, 70), dock = ctx.cgTopAt(1280, 1407);
+  ctx.ncDrawnRects = () => null; // the list is open, or the banner frames cannot be read
+  const unsure = ctx.cgTopAt(1280, 700);
+  check("E2 T10: cgTopAt — Notification Center's overlay covers only its banners; when they cannot be told, everything",
+    mid === null && onBanner?.owner === "Notification Center" && dock?.owner === "Dock" && unsure?.owner === "Notification Center",
+    JSON.stringify({ mid, onBanner, dock, unsure }));
+}
+
+{
+  // E2 T10: ncDrawnRects reads banner / alert frames from Notification Center's accessibility tree
+  const ctx = loadEngine(ENGINE);
+  const banner = el("AXGroup", { subrole: "AXNotificationCenterBanner", frame: [2190, 40, 360, 80] });
+  const win = el("AXWindow", { title: "", frame: [0, 0, 2560, 1440], wid: 40 }, [el("AXGroup", {}, [banner])]);
+  installApp(ctx, { pid: 11, name: "Notification Center", bundle: "com.apple.notificationcenterui", windows: [win] });
+  const rects = ctx.ncDrawnRects();
+  const panelCtx = loadEngine(ENGINE);
+  const panel = el("AXWindow", { title: "", frame: [0, 0, 2560, 1440], wid: 41 }, [el("AXGroup", { subrole: "AXNotificationCenterWidget", frame: [2100, 40, 400, 900] })]);
+  installApp(panelCtx, { pid: 12, name: "Notification Center", bundle: "com.apple.notificationcenterui", windows: [panel] });
+  check("E2 T10: ncDrawnRects — a banner's frame (with a 4-pt margin); an open list or another NC element → null",
+    JSON.stringify(rects) === "[[2186,36,368,88]]" && panelCtx.ncDrawnRects() === null, JSON.stringify({ rects, panel: panelCtx.ncDrawnRects() }));
 }
 done("engine unit");

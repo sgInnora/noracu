@@ -344,11 +344,17 @@ can rearrange the Home Screen or drop the icon on another one and make a folder.
 `phone_type` pastes through the clipboard with a real Command-V chord (never
 echoing the typed text), saving every clipboard item and type, clearing
 concealed or transient items instead of copying, and restoring the clipboard
-once OCR sees the pasted text appear on the phone (more often than before the
-paste — text already on screen does not count). Universal Clipboard or >64 MB
-items are not copied and leave the typed text on the clipboard; if the paste
-only shows up a few seconds late (still reported as typed — do not type it
-again) or ends in `type_not_confirmed`, the clipboard also keeps the typed text.
+once OCR sees the pasted text appear on the phone at a spot where it was not
+before the paste, below the strip at the top where the status bar and
+notification banners are drawn (text already on screen, or the same words in a
+banner, do not count); only that sighting makes the result
+`delivered_verified`. Universal Clipboard or >64 MB items are not copied and
+leave the typed text on the clipboard. A text shorter than four characters
+(spaces and case aside) is never confirmed and never restores the clipboard. If
+the text only shows up a few seconds late (reported as typed but
+`delivered_unverified` — OCR cannot tell the paste from a line that repeats it,
+such as a search result, so read the field before typing again) or the call
+ends in `type_not_confirmed`, the clipboard also keeps the typed text.
 `phone_open {"app": "Calculator"}` opens Spotlight through iPhone Mirroring's
 own shortcut, pastes the name, and taps it only when Spotlight's Top Hit card
 shows exactly that name (a web suggestion or Settings row with the same name

@@ -326,6 +326,13 @@ def _cmd_type(args) -> int:
     report = {}
     if input.type_text(args.text, replace=args.replace, report=report):
         if report.get("seen", True):
+            if _late_paste_probe(args.text) is None:
+                # 0.2.5 (review Y6): one character that OCR saw appear is no proof of where it went,
+                # and (review R38) no license to put the clipboard back
+                print(f"typed {len(args.text)} chars (one character: OCR saw it appear, which is no "
+                      "proof of where it landed — check the field; the clipboard still holds the "
+                      "typed text)")
+                return 0
             print(f"typed {len(args.text)} chars")
             return 0
         if _late_paste_probe(args.text) is None:
@@ -340,15 +347,20 @@ def _cmd_type(args) -> int:
     count_before = report.get("count_before")
     late = _watch_late_paste(args.text, baseline=count_before)
     if late is not None:
-        # F38: the paste did land, just late — report it so the caller does not
-        # retype it. The clipboard is deliberately NOT restored here: type_text()
+        # F38: the text showed up late — report it so the caller reads the field before
+        # retyping. The clipboard is deliberately NOT restored here: type_text()
         # restores only under its own checks (a rise seen inside its window, the
         # minimum hold, an untouched changeCount); after the fact, leaving the
         # typed text on the clipboard is the choice that can never hand the phone
         # the user's original clipboard (possibly a password).
-        print(f"typed {len(args.text)} chars (the paste showed up late, during an extra "
-              f"{late:.0f}s check after the 2.5s confirmation window; the clipboard "
-              "still holds the typed text)")
+        # E2 run 2026-11-07 (T15): a second paste of the same text into the Settings search
+        # field was "seen late" while the field still showed the text once — a line repeating
+        # the query can rise too — so the wording claims no landing (the server reports it
+        # delivered_unverified, review R38).
+        print(f"typed {len(args.text)} chars (the text showed up late, during an extra "
+              f"{late:.0f}s check after the 2.5s confirmation window — OCR cannot tell whether "
+              "that is the paste or a line repeating it, such as a search result: check the "
+              "field before typing again; the clipboard still holds the typed text)")
         return 0
     watched = (f" or a further {LATE_PASTE_WATCH_S:.0f}s check"
                if _late_paste_probe(args.text) else
@@ -545,6 +557,11 @@ def _open_and_report(args) -> int:
     if result == "deadline":
         print(f"open_not_confirmed: ran out of time opening {args.app!r} (the Mac may be "
               f"under heavy load); {home_note}", file=sys.stderr)
+        return 4
+    if result == "ambiguous":
+        print(f"open_not_confirmed: Spotlight's Top Hit card showed {args.app!r} at more than one "
+              f"spot, so nothing was tapped; {home_note} — open it from its Home Screen icon "
+              "instead (phone_screenshot, then phone_tap)", file=sys.stderr)
         return 4
     if result == "short_unreadable":
         print(f"open_not_confirmed: could not read {args.app!r} in Spotlight — OCR often misses a "

@@ -49,7 +49,7 @@ noracu 是本地的"手"，不是"脑"。决策由你的 MCP client（Claude Des
 
 ```bash
 npm install noracu          # server 位于 node_modules/noracu/src/server.mjs
-brew install cliclick       # 物理 Mac 输入所需（mac_key、mac_paste、mac_drag 及物理路径的 mac_click/mac_type）
+brew install cliclick       # 物理 Mac 输入所需（mac_key、mac_drag 及物理路径的 mac_click/mac_type）
 ```
 
 或从源码：`git clone https://github.com/sgInnora/noracu.git && cd noracu && npm install && npm test`（加 `NORACU_CI=1` 可跳过依赖硬件的检查）。

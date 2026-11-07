@@ -187,6 +187,40 @@ def text_probe(text: str) -> str | None:
     return probe if len(probe) >= 2 else None
 
 
+# 0.2.5 (Andy's call, 2026-11-07): a typed text is confirmed only by a sighting where a field can be —
+# a spot where the text's probe was not seen before the paste, below the strip at the top where the
+# status bar and notification banners are drawn. A rise in the whole-screen count alone (a banner that
+# carries the same words, a label somewhere else) no longer confirms a paste.
+BANNER_STRIP_NY = 0.15
+# Andy's call (2026-11-07, review R37): a text shorter than this (after the probe's compaction) is never
+# confirmed by a sighting — "in" is part of "Sign in", "ok" of "Book" — so it never licenses a restore either
+VERIFY_MIN_PROBE = 4
+
+
+def probe_spots(text: str, hits) -> list[tuple[float, float]] | None:
+    """Where ``text``'s probe shows in ``hits`` (one spot per OCR line that holds it), leaving out the
+    paste-progress box (F44) and the banner strip at the top; None when the text is too short for a
+    probe. Hits without a position never count."""
+    probe = text_probe(text)
+    if probe is None:
+        return None
+    if len(probe) < VERIFY_MIN_PROBE:
+        return []
+    spots = []
+    for hit in hits:
+        nx, ny = getattr(hit, "nx", None), getattr(hit, "ny", None)
+        if nx is None or ny is None or ny < BANNER_STRIP_NY or _is_paste_hud(hit):
+            continue
+        if probe in _compact(getattr(hit, "text", hit)):
+            spots.append((nx, ny))
+    return spots
+
+
+def has_new_spot(before, after, eps: float = 0.03) -> bool:
+    """True when some spot in ``after`` has no spot of ``before`` within ``eps`` in both axes."""
+    return any(all(abs(ax - bx) > eps or abs(ay - by) > eps for bx, by in before) for ax, ay in after)
+
+
 def probe_count(text: str, hits) -> int | None:
     """How many times ``text``'s probe occurs in the joined OCR ``hits``;
     None when the text is too short for a probe. The phone's "Pasting from …"
