@@ -339,12 +339,13 @@ def open_spotlight_checked(settle_s=1.0, *, luma=None, sleep=time.sleep, opener=
         # a Top Hit card header near the top of the window (Spotlight's sits at ny ≈ 0.14; a
         # "Top Hit" line far down is no evidence), "none", or "unreadable"
         try:
-            header = _tophit_header(read_screen())
+            hits = read_screen()
         except Exception as exc:
             if not verify.is_capture_error(exc):
                 raise
             return "unreadable"
-        return "card" if header is not None and header.ny < SPOTLIGHT_HEADER_MAX_NY else "none"
+        # 2026-11-08: or the top-field layout's field (a completion, or "Search or Ask")
+        return "card" if _spotlight_up(hits) else "none"
 
     before_home = card()
     if not home():
@@ -469,19 +470,36 @@ def choose_app_hit(hits: list, name: str, ambiguous: list | None = None) -> visi
     label inside the card → None: "not found" beats opening the
     wrong thing. Suggestion, website and Settings deep-link rows of
     the same name are never candidates.
+
+    2026-11-08 (iOS 27 "Search or Ask"): Spotlight may put the search
+    field at the TOP and show no "Top Hit" header. Then the label band
+    under the field counts (more than TOP_FIELD_LABEL_MIN and at most
+    TOP_FIELD_CARD_SPAN below it: not the field line, not the Home Screen
+    showing through above the label, not the first section header) — but only when the field shows exactly ``name``
+    completed with "— Open" (OPEN_COMPLETION_ACTIONS): Spotlight's own
+    statement that its top result is something of that name that opens.
+    Any other completion, or none, → None.
     """
     want = _norm_label(name)
     header = _tophit_header(hits)
-    if header is None:
-        return None
+    if header is not None:
+        lo, hi = header.ny, header.ny + TOP_HIT_CARD_SPAN
+    else:
+        # 2026-11-08, top-field layout: no "Top Hit" header. Only when the field itself
+        # completes the exact name with "— Open" is the block right under it the top result;
+        # the field line (and any part of it OCR split off) is never a candidate.
+        field = _top_field_for(hits, name)
+        if field is None or field[1] not in OPEN_COMPLETION_ACTIONS:
+            return None
+        lo, hi = field[0] + TOP_FIELD_LABEL_MIN, field[0] + TOP_FIELD_CARD_SPAN
     found = []
     for hit in hits:
         if _norm_label(hit.text) != want:
             continue
         if hit.ny >= SEARCH_FIELD_NY:
             continue  # the search field echoing the query
-        if not header.ny < hit.ny <= header.ny + TOP_HIT_CARD_SPAN:
-            continue  # outside the Top Hit card (F35)
+        if not lo < hit.ny <= hi:
+            continue  # outside the Top Hit card (F35) / the block under the top field
         found.append(hit)
     if not found:
         return None
@@ -609,6 +627,89 @@ def _field_echo(hits, name) -> bool:
         # the magnifier glyph may come back as "Q", "Q." or "Q:" in front of the text
         if _echo_matches(got, want) or _echo_matches(re.sub(r"^q[\s.,:;·•]*", "", got, count=1), want):
             return True
+    # 2026-11-08: the top-field layout echoes the query at the top, often with a completion
+    # ("Calculator — Open"); the query part alone is compared, with the same OCR-slip tolerance
+    return any(_echo_matches(query, want) for _, query, _a in _top_field_lines(hits))
+
+
+# 2026-11-08 device run (iOS 27, the "Search or Ask" Spotlight): the search field can sit at the
+# TOP of the window (ny ≈ 0.12). Typing an app's exact name then shows the query with an inline
+# completion in the field — read as "Calculator -Open" — and the results start right under it with
+# that app's icon and label (label at ny ≈ 0.28) under NO "Top Hit" header; the first section
+# header ("Chrome", "Settings", …) follows at ny ≈ 0.32, and a Settings row of the same name lower
+# down (ny ≈ 0.49). phone_open's every read failed there: no header, and the bottom-field echo
+# never matched (0.2.6 failed the same way). The field's own completion is the evidence this layout
+# offers: "<name> — Open" says Spotlight's top result is something named <name> that opens.
+TOP_FIELD_MAX_NY = 0.16       # the top search field line (measured 0.12)
+TOP_FIELD_LINE_EPS = 0.02     # hits this close to the field line are parts of it (OCR may split it)
+# the top result's label band under the field: label measured at +0.16, the first section header at
+# +0.20, and the dimmed Home Screen behind the panel shows through above the label (a widget's
+# "SUNDAY" at +0.06). Only (field + TOP_FIELD_LABEL_MIN, field + TOP_FIELD_CARD_SPAN] counts, so
+# neither that background text nor a section header that carries the app's name ("Chrome" over
+# Chrome's own results) is ever a candidate.
+TOP_FIELD_LABEL_MIN = 0.10
+TOP_FIELD_CARD_SPAN = 0.18
+OPEN_COMPLETION_ACTIONS = ("open",)   # the completion word that marks something that opens (English)
+# completion words that also show Spotlight is up (a previous query that was no app: "— Ask Siri")
+SPOTLIGHT_UP_ACTIONS = OPEN_COMPLETION_ACTIONS + ("ask siri",)
+# the dash needs whitespace on at least one side: OCR reads the completion as "Calculator -Open" or
+# "zq7pdcan- Ask Siri" (both seen on the device); a hyphen inside a name ("Wi-Fi") has none
+_COMPLETION = re.compile(r"^(?P<q>.*\S)(?:\s+[—–-]\s*|[—–-]\s+)(?P<a>\S.*)$")
+
+
+def _top_field_lines(hits):
+    """(ny, query, action) for each line in the top search-field zone: the hits within
+    TOP_FIELD_LINE_EPS of each other joined left to right, split at a " — <action>" completion
+    (action None without one). Query and action are _norm_label'ed."""
+    top = sorted((h for h in hits if h.ny < TOP_FIELD_MAX_NY), key=lambda h: (h.ny, h.nx))
+    lines, used = [], set()
+    for i, h in enumerate(top):
+        if i in used:
+            continue
+        group = [j for j in range(i, len(top)) if j not in used and abs(top[j].ny - h.ny) <= TOP_FIELD_LINE_EPS]
+        used.update(group)
+        text = " ".join(top[j].text for j in sorted(group, key=lambda j: top[j].nx))
+        m = _COMPLETION.match(unicodedata.normalize("NFKC", text).strip())
+        if m:
+            lines.append((h.ny, _norm_label(m.group("q")), _norm_label(m.group("a"))))
+        else:
+            lines.append((h.ny, _norm_label(text), None))
+    return lines
+
+
+def _top_field_for(hits, name):
+    """(ny, action) of the top search field when it shows ``name`` (exactly, after _norm_label),
+    with or without a completion; None otherwise."""
+    want = _norm_label(name)
+    for ny, query, action in _top_field_lines(hits):
+        if query == want:
+            return ny, action
+    return None
+
+
+def _spotlight_up(hits, name=None) -> bool:
+    """Spotlight is on screen: a "Top Hit" header near the top, or (top-field layout) the empty
+    field's "Search or Ask", or a field line completed with a SPOTLIGHT_UP_ACTIONS word whose
+    query is exactly ``name`` — or, without a name (the F43 check), completed with "Open" AND
+    with that query's label in the label band under it. Any other line in that zone (the
+    notification strip: a banner can read "X - Y" or even "X - Open") is no evidence."""
+    header = _tophit_header(hits)
+    if header is not None and header.ny < SPOTLIGHT_HEADER_MAX_NY:
+        return True
+    want = None if name is None else _norm_label(name)
+    for ny, query, action in _top_field_lines(hits):
+        if query == "search or ask":
+            return True
+        if want is not None:
+            if action in SPOTLIGHT_UP_ACTIONS and query == want:
+                return True
+        elif action in OPEN_COMPLETION_ACTIONS and any(
+                _norm_label(h.text) == query and ny + TOP_FIELD_LABEL_MIN < h.ny <= ny + TOP_FIELD_CARD_SPAN
+                for h in hits):
+            # without a name to match (the F43 check after Home), an "Open" completion counts
+            # only with Spotlight's own structure under it — that query's label in the label band;
+            # a banner that happens to read "Calendar - Open" has none
+            return True
     return False
 
 
@@ -636,7 +737,7 @@ def home_via_menu(timeout: float = TIDY_OSASCRIPT_TIMEOUT_S) -> bool:
     return _run_view_menu_command("Home Screen", timeout=timeout)
 
 
-def _tap_and_confirm_open(nx, ny, *, luma, sleep, tap, read_screen):
+def _tap_and_confirm_open(nx, ny, *, luma, sleep, tap, read_screen, name=None):
     """Tap (nx, ny) and confirm the app actually opened (F24 ②).
 
     One luma frame before the tap, one after a 1.0s settle, then one
@@ -654,8 +755,10 @@ def _tap_and_confirm_open(nx, ny, *, luma, sleep, tap, read_screen):
     sleep(1.0)
     after = luma()
     hits = read_screen()
+    # 2026-11-08: Spotlight still up in either layout (a Top Hit header near the top, or the top
+    # field with its completion / "Search or Ask") means the tap did not open anything
     opened = (verify.mean_abs_diff(before, after) >= OPEN_MIN_DIFF
-              and _tophit_header(hits) is None)
+              and _tophit_header(hits) is None and not _spotlight_up(hits, name))
     return opened, hits
 
 
@@ -731,8 +834,14 @@ def open_app(name: str, *, spotlight_open: bool = False,
     "deadline" (the OPEN_DEADLINE_S budget ran out before a tap; back on
     the Home Screen); "ambiguous" (Y6: the Top Hit card showed the name at
     two or more spots and no read showed it at one — nothing was tapped;
-    back on the Home Screen); or "spotlight_unavailable" (Spotlight could
-    not be opened; nothing was typed or tapped).
+    back on the Home Screen); "focus_lost" (another app came to the front
+    during type_text's wait after the clipboard write: the paste was called
+    off and nothing was tapped; Spotlight is left as it is — going Home
+    would pull the mirror forward again); "clipboard_changed" (another app or
+    device wrote the clipboard before ⌘V: nothing was pasted or tapped, the
+    new clipboard is left alone; back on the Home Screen); or
+    "spotlight_unavailable" (Spotlight could not be opened; nothing was
+    typed or tapped).
 
     ``read_screen`` (default vision.read_screen), ``luma`` (default
     verify.window_luma), ``sleep``, ``tap`` (default inp.tap),
@@ -809,7 +918,21 @@ def open_app(name: str, *, spotlight_open: bool = False,
         return "deadline"
     clear_text()  # iOS kept the last query; new input would append (F17)
     sleep(0.3)
-    typed = type_text(name)
+    try:
+        typed = type_text(name)
+    except inp.PasteFocusLost:
+        # 0.2.7: another app came to the front during the wait after the clipboard write;
+        # the paste was called off. No trip Home: that would pull the mirror forward again, the
+        # very thing the paste refused to do (Spotlight closes by itself when left idle).
+        return "focus_lost"
+    except inp.ClipboardChanged:
+        # another app or device wrote the clipboard before ⌘V: nothing was pasted and their
+        # clipboard is left alone. Tidy up only while the mirror is still in front — if the
+        # user also moved away, going Home would pull it forward: report focus_lost instead
+        if not inp._focus_check():
+            return "focus_lost"
+        tidy()
+        return "clipboard_changed"
     sleep(1.5)  # wait for Spotlight results
     hit = None
     if typed is not False:
@@ -894,7 +1017,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
         # so ③ can find the label again (F32/F35).
         opened, hits = _tap_and_confirm_open(
             hit.nx, hit.ny, luma=luma, sleep=sleep, tap=tap,
-            read_screen=reread)
+            read_screen=reread, name=name)
         if opened:
             return "opened"
 
@@ -906,7 +1029,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
         if again is not None and not out_of_time():
             opened, _ = _tap_and_confirm_open(
                 again.nx, again.ny - SPOTLIGHT_ICON_ABOVE_LABEL,
-                luma=luma, sleep=sleep, tap=tap, read_screen=reread)
+                luma=luma, sleep=sleep, tap=tap, read_screen=reread, name=name)
             if opened:
                 return "opened"
     except Exception as exc:

@@ -3,6 +3,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
 
+// 0.2.7: every server of this suite runs with the person-goes-first guard off (NORACU_USER_IDLE_S=0) unless
+// the developer set it: several servers act in turn here, and each would take the others' input for a
+// person's. The guard has its own block below, which turns it on for one server.
+if (process.env.NORACU_USER_IDLE_S === undefined) process.env.NORACU_USER_IDLE_S = "0";
+
 const proc = spawn("node", [new URL("../src/server.mjs", import.meta.url).pathname], {
   stdio: ["pipe", "pipe", "inherit"],
 });
@@ -513,6 +518,64 @@ if (LOCAL && TE_READY()) {
     const stRes = await s2.call("mac_status");
     check("t10：NORACU_TRACE 使用 O_NOFOLLOW 拒绝符号链接且不影响工具调用", !stRes?.isError && rf(target, "utf8") === "untouched", rf(target, "utf8"));
   } finally { s2.proc.kill(); rmSync(dir2, { recursive: true, force: true }); }
+}
+
+// 0.2.7：电脑前的人优先（NORACU_USER_IDLE_S）—— 解析（CI 安全）；本机：有人刚动过键鼠就不发、只读工具不受影响、
+// 自己的输入不算人的、物理点击 / 滚动后光标回原处，=0 时全部关闭
+{
+  const say = (r) => String(r?.content?.[0]?.text);
+  const idleOf = async (val) => { const s = await spawnServer({ NORACU_USER_IDLE_S: val }); try { return jsonOf(await s.call("mac_status")).user_idle_s; } finally { s.proc.kill(); } };
+  const seen = {};
+  for (const v of ["0", "1.5", "60", "", "abc", "-1", "61", "0x2"]) seen[v] = await idleOf(v);
+  check("0.2.7：NORACU_USER_IDLE_S — 0 关闭，0 到 60 的数照用，其余（空、非数、负数、超 60）回到 2",
+    seen["0"] === 0 && seen["1.5"] === 1.5 && seen["60"] === 60 && ["", "abc", "-1", "61", "0x2"].every((v) => seen[v] === 2), JSON.stringify(seen));
+  if (LOCAL && TE_READY()) {
+    const cc = process.env.NORACU_CLICLICK || "/opt/homebrew/bin/cliclick";
+    const pointerAt = () => String(spawnSync("/usr/bin/osascript", ["-l", "JavaScript", "-e", 'ObjC.import("CoreGraphics"); const p = $.CGEventGetLocation($.CGEventCreate(null)); p.x + "," + p.y'], { encoding: "utf8", timeout: 5000 }).stdout || "").trim().split(",").map(Number);
+    const near = (a, b) => a.length === 2 && b.length === 2 && Math.abs(a[0] - b[0]) <= 2 && Math.abs(a[1] - b[1]) <= 2;
+    const NOAPP = { key: "return", app: "__noracu_no_such_app__" };
+    const YIELD_DOC = "noracu-e2e-yield";  // gets past the guard, then focus_lost: nothing sent either way
+    await sleepMs(2300);  // input the other servers of this suite sent is not this server's own: let it age
+    const s = await spawnServer({ NORACU_USER_IDLE_S: "2" });
+    const s0 = await spawnServer({ NORACU_USER_IDLE_S: "0" });
+    try {
+      spawnSync(cc, ["m:+0,+0"], { timeout: 5000 });  // "the person": a zero-distance mouse move from this test process
+      const busy = await s.call("mac_key", NOAPP);
+      const read = await s.call("phone_status");
+      const off = await s0.call("mac_key", NOAPP);
+      check("0.2.7：刚有人动过键鼠 → 输入工具返回 user_active、什么都不发；只读工具不受影响；=0 时不拦",
+        busy?.isError && /^ERROR: user_active: /.test(say(busy)) && /delivery=not_delivered, retry=safe/.test(say(busy))
+          && !/user_active/.test(say(read)) && off?.isError && /focus_lost/.test(say(off)),
+        `${say(busy).slice(0, 80)} | ${say(read).slice(0, 30)} | ${say(off).slice(0, 40)}`);
+      await sleepMs(2300);
+      const calm = await s.call("mac_key", NOAPP);
+      check("0.2.7：静止 2 s 后同一调用照常执行", calm?.isError && /focus_lost/.test(say(calm)) && !/user_active/.test(say(calm)), say(calm).slice(0, 80));
+      // a document of its own: the shared test document may carry a sheet by now (B2's format changes)
+      spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to make new document with properties {name:"${YIELD_DOC}", text:"pointer test"}`, "-e", 'tell application "TextEdit" to activate'], { timeout: 10000 });
+      await sleepMs(800);
+      const ta = jsonOf(await s.call("mac_find", { app: "TextEdit", window: YIELD_DOC, role: "textarea" })).matches?.[0]?.i;
+      const p1 = pointerAt();
+      const clk = Number.isInteger(ta) ? await s.call("mac_click", { element_index: ta, mechanism: "physical" }) : null;
+      const p2 = pointerAt();
+      const next = await s.call("mac_key", NOAPP);
+      const scr = Number.isInteger(ta) ? await s.call("mac_scroll", { element_index: ta, direction: "down" }) : null;
+      const p3 = pointerAt();
+      check("0.2.7：物理点击、滚动之后光标回到原处；紧接着的输入不把自己刚发的事件当成有人在用",
+        Number.isInteger(ta) && !clk?.isError && /physical/.test(say(clk)) && near(p1, p2) && near(p1, p3)
+          && next?.isError && /focus_lost/.test(say(next)) && !scr?.isError,
+        `${say(clk).slice(0, 50)} | pointer ${p1} → ${p2} → ${p3} | ${say(next).slice(0, 30)} | ${say(scr).slice(0, 40)}`);
+      const ta0 = jsonOf(await s0.call("mac_find", { app: "TextEdit", window: YIELD_DOC, role: "textarea" })).matches?.[0]?.i;
+      const q1 = pointerAt();
+      const clk0 = Number.isInteger(ta0) ? await s0.call("mac_click", { element_index: ta0, mechanism: "physical" }) : null;
+      const q2 = pointerAt();
+      check("0.2.7：NORACU_USER_IDLE_S=0 时光标留在点击处", Number.isInteger(ta0) && !clk0?.isError && q2.length === 2 && !near(q1, q2), `pointer ${q1} → ${q2}`);
+      // put the developer's pointer back where it was before the =0 click
+      if (q1.length === 2) spawnSync(cc, [`m:${Math.round(q1[0])},${Math.round(q1[1])}`], { timeout: 5000 });
+    } finally {
+      s.proc.kill(); s0.proc.kill();
+      spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to close (every document whose name contains "${YIELD_DOC}") saving no`], { timeout: 10000 });
+    }
+  } else skipLocal("0.2.7：刚有人动过键鼠 → user_active", "0.2.7：静止 2 s 后照常执行", "0.2.7：光标回到原处", "0.2.7：=0 时光标留在点击处");
 }
 
 // B5（0.2.0）：假 AX 引擎（NORACU_AX_ENGINE）—— 不需要 macOS 权限即可检验 server 侧的 Mac 逻辑（CI 安全）

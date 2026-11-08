@@ -1,5 +1,94 @@
 # Changelog
 
+## [0.2.7] — 2026-11-08
+
+### Changed
+- The person at the Mac goes first. Before a Mac or iPhone input tool acts,
+  noracu reads how long ago the Mac's keyboard or mouse was last used; when
+  that was less than 2 s ago and not noracu's own input, the call returns
+  `user_active` and sends nothing (`delivery=not_delivered, retry=safe`) —
+  retry after a pause. Read-only tools (screenshots, accessibility reads,
+  `phone_status`, OCR) and the browser layer are not held up. After a
+  physical Mac click, drag or scroll, and after a phone gesture, the pointer
+  goes back where it was — moved back without an event, and only while it
+  is still where noracu left it, so a pointer someone moved meanwhile stays
+  where they put it. `NORACU_USER_IDLE_S` sets the wait (default 2, 0 to
+  60); `0` turns both off, for a Mac dedicated to the agent. `mac_status`
+  reports the value as `user_idle_s`. macOS keeps one idle time, and
+  noracu's own events reset it too (measured on macOS 27.2), so an event
+  counts as the person's only when it came after noracu's previous input
+  had ended: a key pressed or mouse moved while that input was running is
+  not seen, and the check runs once, before the call acts.
+
+### Fixed
+- `phone_type` (and the name `phone_open` types into Spotlight) waits at
+  least 1.5 s between writing the Mac clipboard and sending ⌘V. iPhone
+  Mirroring pastes through Universal Clipboard, which tells the phone
+  about new clipboard content with a delay. In a device run (macOS 27.2),
+  once in about 30 pastes, a ⌘V sent about 0.5 s after the write pasted
+  the text the Mac clipboard held before the write instead of the new
+  text. The 1.5 s is a judgement, not a measured delay: it is meant to let
+  the new text reach the phone first and does not rule the race out, and
+  it does not help when the phone shows "Pasting from …" and then pastes
+  nothing, which was also seen. `type_not_confirmed` now says the field
+  may hold the phone's older clipboard, so read it before typing again,
+  and `phone_open`'s `open_not_confirmed` no longer says the name was
+  pasted. A clipboard change during the wait still stops the paste before
+  ⌘V. The screen count that decides whether the paste showed up (and
+  whether your clipboard is put back) is now read after the wait, right
+  before ⌘V, so text that appears during the wait cannot pass for the
+  paste. Each `phone_type` and `phone_open` call takes about 1.5 s longer.
+- If another app (or another Space) comes to the front during that wait,
+  ⌘V is called off — checked right after the wait, before any screen read,
+  and again right before ⌘V — instead of bringing iPhone Mirroring back to
+  the front, and your clipboard is put back unless something else copied
+  meanwhile: `phone_type` returns `focus_lost` saying nothing was sent
+  (or, with `replace`, that only the select-all went out), and
+  `phone_open` returns `focus_lost` without going back to the Home Screen,
+  which would also bring iPhone Mirroring forward (Spotlight may stay
+  open). When another app or device writes the clipboard before ⌘V,
+  `phone_open` now goes back to the Home Screen and says the name was not
+  pasted, instead of ending with an input error. `phone_type` results that
+  OCR cannot confirm (a text of one to three characters, or one seen only
+  in the top strip) now say the field may hold the phone's older
+  clipboard, and the phone's "Pasting from …" box also counts when OCR
+  splits it over two lines.
+- `phone_open` opens apps again on iPhones whose Spotlight puts the search
+  field at the top and shows no "Top Hit" card (iOS 27's "Search or Ask").
+  There every `phone_open` failed with `open_not_confirmed: … never showed
+  up on the phone` although the name had been pasted (0.2.6 too). It now
+  reads the field, which shows the query completed as "<name> — Open", and
+  taps the exact label just under the field (above the first section
+  header) only when that completion names exactly this app; any other
+  completion, or none, is `app not found` with nothing tapped. In a device
+  run (iOS 27, macOS 27.2): Calculator 2/2 and Clock 2/2 back to back
+  opened, an unknown name returned `app not found`. The "Open" completion
+  is read in English only; `NORACU_TOPHIT_LABELS` covers the Top Hit
+  label, not this word.
+- The iPhone layer no longer loses the mirror window while the phone's
+  keyboard is composing (for example a Pinyin letter that is still
+  underlined). iPhone Mirroring then shows a small candidate-bar window
+  (397×28 in a device run on macOS 27.2), and the window lookup took that
+  one: `phone_status` reported its size with `live: null`, and `phone_key`,
+  `phone_tap` and the other inputs returned `mirror_state_unknown` and sent
+  nothing — so even the `delete` that ends the composition could not go
+  out. The bounds, overlay and Resume lookups now use the iPhone Mirroring
+  window itself (the first standard window, found by its position in the
+  window list on every call) and fall back to the old lookup only when
+  there is none. A failed bounds read is retried once after 0.3 s (a read
+  sends nothing to the phone): during a connection blip System Events
+  briefly could not find the window.
+
+### Docs
+- SECURITY.md threat 18 (clipboard on the phone path) now describes the
+  wait before ⌘V and the `focus_lost` call-off, and lists what remains: an
+  early ⌘V can still paste the phone's own older clipboard, an older
+  clipboard that contains the typed text can pass for the paste, and the
+  "Pasting from" box is recognized only in English.
+- README (both languages): `open_not_confirmed: … never showed up` no
+  longer reads as "the name did not arrive" only, and the known limits
+  describe the top-field Spotlight.
+
 ## [0.2.6] — 2026-11-07
 
 ### Changed

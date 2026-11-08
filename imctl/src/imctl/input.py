@@ -43,11 +43,20 @@ from Quartz import (
     CGEventSetFlags,
 )
 
-from . import window
+from . import pointer, window
 from .window import WindowBounds, ensure_frontmost, get_bounds
 
 TAP_INTERVAL_S = 0.05
 LONG_PRESS_S = 0.8
+# Device run 2026-11-07/08 (macOS 27.2): iPhone Mirroring pastes
+# through Universal Clipboard, which tells the phone about new Mac clipboard content
+# asynchronously. Once in about 30 pastes (23:33, Cmd+V ~0.5 s after the write) the phone pasted
+# the text the Mac clipboard held BEFORE the write; shell pastes 0.4-3.4 s after the write landed
+# 23/23 the same night, so the race is rare. type_text waits this long between its write and
+# Cmd+V to narrow it. The value is a judgement, not a measured threshold, and it does not close
+# the race. It does not address the other failure seen (the phone shows "Pasting from ..." and
+# then pastes nothing), whose cause is not established.
+PASTE_SETTLE_S = 1.5
 SWIPE_STEPS = 20
 SWIPE_NUDGE_PX = 3
 SWIPE_DEFAULT_MS = 300
@@ -65,6 +74,13 @@ class FocusLost(InputError):
     (a Cmd+V pasted into a terminal, a Return running a command) is the
     failure this prevents.
     """
+
+
+class PasteFocusLost(FocusLost):
+    """type_text's Cmd+V was called off: another app came to the front during
+    the wait after the clipboard write. Nothing was pasted (a replace's Cmd+A
+    had already been sent), and the clipboard went back under the changeCount
+    rule. Raised instead of bringing iPhone Mirroring forward again."""
 
 
 # F26: consulted right before every synthesized event. Module-level so
@@ -139,6 +155,7 @@ def _mouse_event(kind: int, x: float, y: float, source) -> None:
     if event is None:
         raise InputError(f"CGEventCreateMouseEvent returned None for {kind}")
     CGEventPost(kCGHIDEventTap, event)
+    pointer.moved_to(x, y)  # 0.2.7: the CLI puts the pointer back after the command
 
 
 def _key_event(keycode: int, down: bool, source) -> None:
@@ -361,7 +378,7 @@ def check_chord_layout(keycode: int) -> None:
         "switch the Mac to a QWERTY-style input source (U.S., ABC, Pinyin) and retry")
 
 
-def _cmd_chord(keycode: int, before_key=None) -> None:
+def _cmd_chord(keycode: int, before_key=None, activate: bool = True) -> None:
     """Send a real Command chord: ⌘ down → key down → key up → ⌘ up.
 
     iPhone Mirroring forwards the *state* of the physical modifier
@@ -375,9 +392,16 @@ def _cmd_chord(keycode: int, before_key=None) -> None:
     ``before_key`` runs after the focus checks, right before the first
     event: the caller's last chance to call the chord off by raising —
     nothing is posted then (F35).
+
+    ``activate=False``: never bring iPhone Mirroring forward — when another
+    app is frontmost, raise FocusLost before anything is posted. type_text's
+    ⌘V uses it: by then the user may have moved to another app during the
+    wait after the clipboard write, and pulling the mirror back would send
+    the paste (and their next keystrokes) to the phone.
     """
     check_chord_layout(keycode)  # review 0.2.6 #5: before anything is sent
-    ensure_frontmost()
+    if activate:
+        ensure_frontmost()
     _require_focus()  # F26: before the chord's first event
     if before_key is not None:
         before_key()
@@ -564,7 +588,8 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
               sleep=time.sleep, clock=time.monotonic,
               timeout_s: float = 2.5, poll_s: float = 0.15,
               min_hold_s: float = 0.3, pending: list | None = None,
-              report: dict | None = None, restore: bool = True) -> bool:
+              report: dict | None = None, restore: bool = True,
+              settle_s: float = PASTE_SETTLE_S) -> bool:
     """Type text via clipboard paste (IME-safe), confirmed on screen.
 
     Direct CGEvent keystroke synthesis breaks under CJK IMEs and is
@@ -635,7 +660,8 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     search-history chip with the same query, an older message) licensed a
     restore at once, and a paste that the phone read late could then paste
     the user's ORIGINAL clipboard. The default checks now count the text's
-    probe before the pasteboard write — the higher of two reads 0.3 s
+    probe right before Cmd+V (after the pasteboard write and the
+    ``settle_s`` wait) — the higher of two reads 0.3 s
     apart, so a read that misses an occurrence cannot fake a rise — and
     license a restore only when the count RISES over it, in two reads 0.3 s
     apart. Without a pre-paste count (a read failed) OCR never licenses a
@@ -643,6 +669,18 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     frame diff. ``report`` (a dict), when given, receives that pre-paste
     count as ``count_before`` (None: unknown), for a caller that keeps
     watching after a False result.
+
+    ``settle_s`` (device run 2026-11-07/08): the wait between writing the
+    pasteboard and Cmd+V. The phone reads the Mac clipboard through Universal
+    Clipboard, which announces new content asynchronously; a Cmd+V that
+    arrives first pastes the phone's OWN clipboard (an older paste, or
+    something copied on the phone) instead of ``text``. The wait lowers that
+    chance; it cannot rule it out, so an unconfirmed paste is still reported
+    as unconfirmed and the caller reads the field. The pre-paste reads come
+    after the wait, so the write-to-Cmd+V time is ``settle_s`` plus those
+    reads. Cmd+V never brings iPhone Mirroring back to the front: when
+    another app took it during the wait, FocusLost (nothing pasted; the
+    clipboard goes back under the changeCount rule).
 
     ``restore=False``: once Cmd+V may be on its way the user's clipboard is
     never put back — no restore here and no PendingRestore — and it keeps
@@ -683,8 +721,21 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
         check_chord_layout(_VK_A)
     check_chord_layout(_VK_V)
     ensure_frontmost()
+    default_chord = chord is None
     if chord is None:
         chord = _cmd_chord
+
+        def paste_chord(keycode, before_key=None):
+            # the ⌘V after the wait never re-activates the mirror: PasteFocusLost instead
+            # (_cmd_chord raises FocusLost only before its first event)
+            try:
+                return _cmd_chord(keycode, before_key=before_key, activate=False)
+            except PasteFocusLost:
+                raise
+            except FocusLost as exc:
+                raise PasteFocusLost(str(exc)) from exc
+    else:
+        paste_chord = chord  # injected (tests): one chord for both keys
     if pasteboard is None:
         pasteboard = NSPasteboard.generalPasteboard()
     # F27: a single character is invisible to the default OCR probe
@@ -788,12 +839,40 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             chord(_VK_A)  # select the focused field's content first (see docstring)
             sleep(0.05)
 
+        # the change count first: a copy that lands while the clipboard is being saved must not be
+        # overwritten by our write
+        saved_change = pasteboard.changeCount()
+        saved = save_pasteboard(pasteboard)
+        if pasteboard.changeCount() != saved_change:
+            saved_change = None  # nothing of ours to undo
+            raise ClipboardChanged(
+                "another app or device changed the clipboard while it was being saved; "
+                "nothing was typed and the clipboard was left as it is")
+
+        pasteboard.clearContents()
+        pasteboard.setString_forType_(text, "public.utf8-plain-text")
+        # Device run 2026-11-07/08: let Universal Clipboard tell the phone about the new content
+        # before Cmd+V (PASTE_SETTLE_S). The pre-paste reads, the "before" frame, the chord's
+        # focus check and last_check (the changeCount guard) all come after the wait, so each
+        # describes the moment right before Cmd+V.
+        sleep(max(0.05, settle_s))
+        # 0.2.7: the wait is when someone copies something or moves to another app (or Space):
+        # say so now, before any screen read — the same checks run again right before Cmd+V
+        # focus first: when both happened, the user moved away — a caller must not take the
+        # clipboard change for a reason to bring the mirror forward again (open_app tidies on it)
+        if default_chord and not _focus_check():
+            raise PasteFocusLost("iPhone Mirroring is not the frontmost app")
+        if pasteboard.changeCount() != saved_change + 1:
+            raise ClipboardChanged(
+                "another app or device changed the clipboard during the wait before the paste; "
+                "nothing was typed and the clipboard was left as it is")
+
         if pre_read:
             # F27: the pre-paste sweep for a single character, taken on a
             # still screen only (a mid-transition read could miss a label
             # that is already there and later pass it off as the paste).
-            # It runs before the pasteboard write so the stretch between our
-            # write and Cmd+V (F35) stays short.
+            # Taken after the clipboard write and the wait (0.2.7), so
+            # the baseline is the screen right before Cmd+V.
             try:
                 if verify.wait_still(sleep=sleep, clock=clock):
                     sweep_before[0] = sweep_read()
@@ -807,6 +886,9 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             # 0.3 s apart (a redraw or the select-all highlight can hide an
             # occurrence from one read). A capture failure in either leaves it
             # unknown: then OCR can never license a restore for this paste.
+            # 0.2.7: read after the clipboard write and the wait, so
+            # text that appears during the wait is part of the baseline and
+            # can never pass for the paste (a restore license).
             try:
                 r1 = vision.read_screen()
                 first = verify.probe_count(text, r1)
@@ -824,21 +906,14 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
         if report is not None:
             report["count_before"] = count_before[0]
 
-        # the change count first: a copy that lands while the clipboard is being saved must not be
-        # overwritten by our write
-        saved_change = pasteboard.changeCount()
-        saved = save_pasteboard(pasteboard)
-        if pasteboard.changeCount() != saved_change:
-            saved_change = None  # nothing of ours to undo
-            raise ClipboardChanged(
-                "another app or device changed the clipboard while it was being saved; "
-                "nothing was typed and the clipboard was left as it is")
-
-        pasteboard.clearContents()
-        pasteboard.setString_forType_(text, "public.utf8-plain-text")
-        sleep(0.05)
-
-        changed = before_check()
+        try:
+            changed = before_check()
+        except Exception as exc:
+            # the mirror window left the screen during the reads (another Space came to the
+            # front): that is the user moving away, not a broken capture — call the paste off
+            if default_chord and verify.is_capture_error(exc) and not _focus_check():
+                raise PasteFocusLost("iPhone Mirroring is not the frontmost app") from exc
+            raise
 
         def last_check():
             # F35: the last look at the pasteboard, after the chord's focus
@@ -853,7 +928,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             sent[0] = True
 
         # real ⌘ chord — flags alone reach the phone as "v" (F14)
-        chord(_VK_V, before_key=last_check)
+        paste_chord(_VK_V, before_key=last_check)  # never re-activates the mirror after the wait
         t0 = clock()
 
         # landed: did the paste show up on screen? (decides the return

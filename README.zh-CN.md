@@ -34,6 +34,7 @@ noracu 是本地的"手"，不是"脑"。决策由你的 MCP client（Claude Des
 - **server 完全在本机运行。** 无云服务、无 API key、无遥测、无 postinstall 脚本。唯一运行期依赖是 Playwright。noracu 自身不发任何网络请求；唯一的自动网络行为是首次 `browser_launch` 时一次性下载 Chromium（`NORACU_DISABLE_AUTO_INSTALL=1` 可关闭）。设置 `NORACU_ALLOW_CDP=1` 后，它还会访问自己在 127.0.0.1 上打开的 DevTools 端口（连接其他本地回环端口需 `NORACU_ALLOW_CDP=any`）。你让浏览器打开的页面当然会被抓取，你的 MCP client 也仍会把工具结果（截图、OCR 文本）发给它所用的模型。
 - **按语义动作，而非像素。** 观察返回 accessibility 树（Mac 直接经 macOS 辅助功能 API 读取——在我们的测试机上，500 个元素的窗口约 0.15 秒）或 ARIA 树（browser）的带索引列表——是文本，不是截图。动作引用 `element_index`；索引 30 秒后过期。Mac 上每个索引背后都有身份证据（窗口 ID、子节点路径、角色、标识符、名称），每次动作前先重新识别元素；browser 则重校验 tag/name/href/位置。元素已消失或已变化时返回 `element_no_longer_valid`，而不是点错位置。树不够用时才用截图。
 - **如实报告结果。** Mac 动作优先用元素自己的辅助功能动作（按下、选中、设值、插入文本——不移动指针、不抢焦点，文字输入不受输入法影响）；只有命中检测确认该点确实落在元素上，才会发送物理点击。每个输入动作（Mac、浏览器和 iPhone）的结果都写明是否送达（观察到变化为 `delivered_verified`，另有 `delivered_unverified`、`not_delivered`，以及超时或中途失败时的 `unknown`）以及能否安全重试；Mac 动作还会列出它打开的 sheet、对话框或菜单。
+- **和你共用这台 Mac。** Mac 与 iPhone 的输入让电脑前的人先来：最近 2 秒内键盘或鼠标被用过（不是 noracu 自己），输入工具就返回 `user_active`、什么都不发；物理点击、拖动、滚动和手机手势之后，指针回到原处，除非这期间有人动过它。只读工具和浏览器层不受影响。专给 agent 用的 Mac 上设 `NORACU_USER_IDLE_S=0` 关闭。
 - **一个循环，三个面。** Mac 原生应用和持久化 profile 的浏览器共用 `element_index` 协议（观察一棵树、按索引动作）。实验性的 iPhone 层在 Apple 的 iPhone Mirroring 上跑同一个 observe → act 循环，用的是 OCR 文本和归一化坐标——因为手机不向 Mac 暴露 accessibility 树。
 - **用你真实的会话。** 你已登录的浏览器 profile、你的 Mac 应用——不是托管的 VM。与云端 computer-use 相比：两者没有谁普遍更可靠，只是失败方式不同。noracu 把屏幕留在你本机。
 - **真正能关掉的开关。** `NORACU_READ_ONLY=1`（只观察，默认拒绝）、`NORACU_DISABLE_EVAL=1`、以及默认封禁 `file://`。见 [安全](#安全)。
@@ -93,7 +94,8 @@ Claude Code：`claude mcp add noracu -- /绝对路径/TO/node /绝对路径/TO/n
 | `phone_launch` 报 `mirror_setup_required` | iPhone Mirroring 正显示设置或欢迎页（例如升级 macOS 后首次启动）——请在 iPhone Mirroring 窗口里自己完成；noracu 从不替你点击这类页面 |
 | `imctl_timeout: phone … did not finish within …s` | Mac 负载过高或系统卡住——操作可能已部分执行，重试前先看 `phone_status` / `phone_screenshot`（`phone_open` 超时后 noracu 会回到主屏幕）；在此期间 server 仍会响应其他调用 |
 | `input_busy: …` | 前一个手机或 Mac 操作占用输入队列超过 60 秒（或 `NORACU_PHONE_TIMEOUT_MS` + 15 秒）；本次调用什么都没做——重试即可 |
-| 已安装的 App，`phone_open` 却报 app not found | 它只点 Spotlight「Top Hit」卡片里的标签——名字要和手机图标下显示的一致（例如 `拼多多`，而不是 `Pinduoduo`）。已安装却报 "Spotlight showed no Top Hit"，通常说明 iPhone 系统语言不是英文：`phone_open` 读的是 Spotlight 的 "Top Hit" 标签——把 `NORACU_TOPHIT_LABELS` 设成手机上显示的标签。报 `open_not_confirmed: … never showed up on the phone` 则是粘贴的名字没有到达手机（粘贴到 iPhone 可能要好几秒）——重试即可。只有一两个字母的名字（如 `X`）OCR 常常读不出来，`phone_open` 会报 `open_not_confirmed` 且不点任何东西——这类 App 请从主屏图标打开（先 `phone_screenshot`，再 `phone_tap`）。`phone_open` 之后剪贴板里是 App 名字 |
+| `user_active: …` | 最近 2 秒内有人用过这台 Mac 的键盘或鼠标——什么都没发；停一下再重试。没有别人用的 Mac 上，`NORACU_USER_IDLE_S=0` 关闭这项检查 |
+| 已安装的 App，`phone_open` 却报 app not found | 它只点 Spotlight「Top Hit」卡片里的 App 标签；若 Spotlight 把搜索框放在顶部、没有「Top Hit」卡片，则只在搜索框把名字补全成「<名字> — Open」时点搜索框正下方的标签——名字要和手机图标下显示的一致（例如 `拼多多`，而不是 `Pinduoduo`）。已安装却报 "Spotlight showed no Top Hit"，通常说明 iPhone 系统语言不是英文：`phone_open` 读的是 Spotlight 的 "Top Hit" 标签——把 `NORACU_TOPHIT_LABELS` 设成手机上显示的标签（它只管「Top Hit」标签；「— Open」补全只认英文）。报 `open_not_confirmed: … never showed up on the phone` 是说 ⌘V 之后 Spotlight 里一直没出现这个名字：可能粘贴还没到（可能要好几秒），也可能手机把自己的旧剪贴板贴进了搜索框——重试即可，`phone_open` 会先清空搜索框。只有一两个字母的名字（如 `X`）OCR 常常读不出来，`phone_open` 会报 `open_not_confirmed` 且不点任何东西——这类 App 请从主屏图标打开（先 `phone_screenshot`，再 `phone_tap`）。`phone_open` 之后剪贴板里是 App 名字 |
 | 输入的文本被重新空格化（如 "no ra cu"） | 文字是以按键方式送出的（`mac_type` 用了 `mechanism: "physical"`，或焦点元素不接受辅助功能写入），同时 CJK 输入法在激活——用 `mac_type` 的默认方式，或用 `mac_paste` |
 | `element_no_longer_valid` | 快照超过 30 秒，或元素已消失、已变化、所在窗口已关闭——重跑 `mac_ax_state` / `browser_snapshot` 并用新索引 |
 | `occluded: … — on top: {…}` | 物理点击会落在别的东西上（另一个窗口、一个 sheet）——把目标窗口置前或关掉遮挡物；本次什么都没发送 |
@@ -120,7 +122,7 @@ noracu 可以经 Apple 的 **iPhone Mirroring** 操作真实 iPhone。agent 在 
 
 **首次成功路径：** `phone_status` → 若 `live` 不是 `true` 先 `phone_launch` → `phone_screenshot` → `phone_ocr` → `phone_find` + `phone_tap`。
 
-**已知限制：** 点击落在 OCR 识别到文字的位置，重复或识别错的标签可能点错（若 Spotlight 的「Top Hit」里是同名的联系人或网站，`phone_open` 分辨不出它不是 App）；`phone_scroll` 用触控板式的滚动事件移动列表（竖向的 `phone_swipe` 拖拽不会滚动列表——它用于主屏翻页这类手势，起点放在 Dock 上方的空白带：起点落在 App 图标上的拖动会把图标拿起来挪走）；在一套实测环境（iPhone 17 Pro Max 运行 iOS 27.0.1，Mac 运行 macOS 26.6.2）上，iPhone Mirroring 在所有 View 尺寸下都把手机画面画得比窗口大约 17%，右列和最底行被裁掉、无法点到；在显示器之间移动窗口、切换主屏、重开 App 都无效，主要怀疑是 iOS 27 与 macOS 26 版本错位——边缘附近点不中时先看 `phone_screenshot`；`phone_open` 把 App 名输入 Spotlight，只有当 Spotlight 的「Top Hit」卡片显示的正是这个名字时才点击（同名的网页建议、网站和设置行一律不点），否则回到主屏——它读的是 Spotlight 的英文 "Top Hit" 标签，iPhone 设为其他语言时找不到任何 App，除非用 `NORACU_TOPHIT_LABELS` 指定那个标签；`phone_home` / `phone_app_switcher` 在镜像在线时走 iPhone Mirroring 菜单（英文 macOS 下无需 python，仅在菜单项不存在时回退 `imctl` 手势，菜单超时返回 `menu_unknown` 而不补发第二次手势），且只报告指令已发送（`screen not verified`）；`phone_type` 要求 Mac 键盘布局里 A 和 V 的位置与美式 QWERTY 相同（美式、ABC、拼音都满足；法式 AZERTY、Dvorak 不满足），否则返回 `keyboard_layout`，什么都不发。
+**已知限制：** 点击落在 OCR 识别到文字的位置，重复或识别错的标签可能点错（若 Spotlight 的「Top Hit」里是同名的联系人或网站，`phone_open` 分辨不出它不是 App）；`phone_scroll` 用触控板式的滚动事件移动列表（竖向的 `phone_swipe` 拖拽不会滚动列表——它用于主屏翻页这类手势，起点放在 Dock 上方的空白带：起点落在 App 图标上的拖动会把图标拿起来挪走）；在一套实测环境（iPhone 17 Pro Max 运行 iOS 27.0.1，Mac 运行 macOS 26.6.2）上，iPhone Mirroring 在所有 View 尺寸下都把手机画面画得比窗口大约 17%，右列和最底行被裁掉、无法点到；在显示器之间移动窗口、切换主屏、重开 App 都无效，主要怀疑是 iOS 27 与 macOS 26 版本错位——边缘附近点不中时先看 `phone_screenshot`；`phone_open` 把 App 名输入 Spotlight，只有当 Spotlight 的「Top Hit」卡片显示的正是这个名字时才点击——若 Spotlight 把搜索框放在顶部、没有「Top Hit」卡片（iOS 27 上见过），则只在搜索框把这个名字补全成「<名字> — Open」时才点（同名的网页建议、网站和设置行一律不点），否则回到主屏——它读的是 Spotlight 的英文 "Top Hit" 标签，iPhone 设为其他语言时找不到任何 App，除非用 `NORACU_TOPHIT_LABELS` 指定那个标签（顶部搜索框布局里的「Open」补全只认英文，`NORACU_TOPHIT_LABELS` 管不到它）；`phone_home` / `phone_app_switcher` 在镜像在线时走 iPhone Mirroring 菜单（英文 macOS 下无需 python，仅在菜单项不存在时回退 `imctl` 手势，菜单超时返回 `menu_unknown` 而不补发第二次手势），且只报告指令已发送（`screen not verified`）；`phone_type` 要求 Mac 键盘布局里 A 和 V 的位置与美式 QWERTY 相同（美式、ABC、拼音都满足；法式 AZERTY、Dvorak 不满足），否则返回 `keyboard_layout`，什么都不发；手机经「通用剪贴板」读取 Mac 的剪贴板，新内容要过一会儿才通知到手机，所以 `phone_type` 在写入剪贴板后至少等 1.5 秒再发 ⌘V（这期间若有别的 App 切到前台，就返回 `focus_lost`，不发 ⌘V）——一次真机测试中，写入后约 0.5 秒就发出的 ⌘V 贴出了手机自己的旧剪贴板（上一次粘贴的内容），粘贴也可能在手机显示「Pasting from …」后中断；收到 `type_not_confirmed` 后，先读输入框再重打。
 
 ## 环境变量
 
@@ -138,6 +140,7 @@ noracu 可以经 Apple 的 **iPhone Mirroring** 操作真实 iPhone。agent 在 
 | `NORACU_PHONE_TIMEOUT_MS` | 30000（`phone_open` / `phone_type` 为 45000） | iPhone 层每一步的时限，1000–600000 毫秒；到时该步被终止并返回 `imctl_timeout` |
 | `NORACU_OCR_LANGUAGES` | `zh-Hans,en-US` | 识别 iPhone 画面的 OCR 语言及优先顺序（逗号分隔的 Vision 语言代码，如 `zh-Hant,en-US` 或 `en-US`；Vision 不支持的代码会被跳过并给出警告） |
 | `NORACU_TOPHIT_LABELS` | `Top Hit` | `phone_open` 要找的 Spotlight「Top Hit」分区标签，逗号分隔——iPhone 不是英文时，设成手机上实际显示的那个标签 |
+| `NORACU_USER_IDLE_S` | `2` | Mac 或 iPhone 输入工具动作前，键盘和鼠标须已空闲的秒数（noracu 自己的输入不算）；不到就返回 `user_active`、什么都不发。不为 0 时，物理点击、拖动、滚动和手机手势之后指针还会回到原处，除非这期间有人动过它。取值 0–60；`0` 两项都关（专给 agent 用的 Mac）；其他值按 2 处理 |
 
 ## 安全
 

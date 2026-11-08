@@ -682,20 +682,23 @@ def test_open_app_confirm():
             ("opened", 0, "opened 'X'", False),
             ("not_found", 1, "app not found: 'X' (Spotlight's Top Hit did not show "
              "exactly this name — use the name the phone shows under the app icon)", False),
-            ("no_top_hit", 1, "app not found: 'X' (Spotlight showed no Top Hit — no app "
-             "by that name, or the iPhone is not set to English: phone_open reads "
-             "Spotlight's \"Top Hit\" label; set NORACU_TOPHIT_LABELS to the label your "
-             "iPhone shows)", False),
+            ("no_top_hit", 1, "app not found: 'X' (Spotlight showed no Top Hit, and its search "
+             "field did not complete the name with \"— Open\" — no app by that name, or the "
+             "iPhone is not set to English: phone_open reads Spotlight's \"Top Hit\" label and "
+             "\"Open\" completion; NORACU_TOPHIT_LABELS sets the Top Hit label for another "
+             "language, the \"Open\" completion is read in English only)", False),
             ("deadline", 4, "open_not_confirmed: ran out of time opening 'X' (the Mac "
              "may be under heavy load); back on the Home Screen", True),
             ("not_confirmed", 4,
              "open_not_confirmed: tapped 'X' in Spotlight but the app "
              "did not open; back on the Home Screen", True),
             ("not_typed", 4,
-             "open_not_confirmed: the name 'X' was pasted into Spotlight but never showed "
+             "open_not_confirmed: ⌘V was sent to Spotlight but the name 'X' never showed "
              "up on the phone (a paste can take several seconds to reach the iPhone, or be "
-             "lost; an iPhone not set to English also needs NORACU_TOPHIT_LABELS) — nothing "
-             "was tapped; back on the Home Screen; retry phone_open", True),
+             "lost, and the phone may have pasted its own older clipboard into the search "
+             "field instead; an iPhone not set to English also needs NORACU_TOPHIT_LABELS) — "
+             "nothing was tapped; back on the Home Screen; retry phone_open, which clears the "
+             "search field first", True),
             ("short_unreadable", 4,
              "open_not_confirmed: could not read 'X' in Spotlight — OCR often misses a one- or "
              "two-letter name, in the Top Hit card and in the search field alike, so nothing was "
@@ -705,6 +708,16 @@ def test_open_app_confirm():
              "open_not_confirmed: Spotlight's Top Hit card showed 'X' at more than one spot, so "
              "nothing was tapped; back on the Home Screen — open it from its Home Screen icon "
              "instead (phone_screenshot, then phone_tap)", True),
+            # 0.2.7: the paste was called off (another app in front / the clipboard changed)
+            ("focus_lost", 6,
+             "focus_lost: another app came to the front before ⌘V, so iPhone Mirroring was not "
+             "brought back and 'X' was not pasted or tapped — Spotlight was opened and cleared on "
+             "the phone and may still be open; the clipboard was put back unless something else "
+             "had copied meanwhile; retry phone_open", True),
+            ("clipboard_changed", 4,
+             "open_not_confirmed: another app or device changed the clipboard before ⌘V, so 'X' "
+             "was not pasted or tapped and the new clipboard was left as it is; back on the Home "
+             "Screen; retry phone_open", True),
         ):
             cli.gestures = SimpleNamespace(
                 open_spotlight_checked=lambda: True,
@@ -1739,6 +1752,548 @@ def test_overlay_hover_controls():
     assert parse_overlay(paused4) == {"live": False, "overlay": "Connection Paused", "buttons": 1}
 
 
+def test_scripts_pick_the_phone_window():
+    """Device run 2026-11-07: the IME candidate bar (AXDialog, 397x28) is System Events' window 1
+    while the phone's keyboard composes; the bounds / overlay / Resume scripts read the first
+    AXStandardWindow instead, and keep window 1 only as the fallback."""
+    import os
+    import shutil
+    import tempfile
+
+    from imctl import window
+
+    for name in ("_GET_BOUNDS_SCRIPT", "_OVERLAY_SCRIPT", "_CLICK_RESUME_SCRIPT"):
+        s = getattr(window, name)
+        assert window._PICK_WINDOW in s, name
+        assert "window 1" not in s, name  # the fallback is index 1 through mi
+        assert "set mi to 1" in s and s.index("set mi to 1") < s.index("AXStandardWindow"), name
+        # device run 2026-11-08: never a stored reference (`contents of` a window resolves BY NAME
+        # and failed during a connection blip); every use goes through the index
+        assert "contents of cand" not in s and " mw" not in s, name
+        assert "window mi" in s, name
+        if shutil.which("osacompile"):  # syntax only, nothing runs
+            out = os.path.join(tempfile.mkdtemp(), "s.scpt")
+            r = subprocess.run(["osacompile", "-o", out, "-e", s], capture_output=True, text=True)
+            assert r.returncode == 0, (name, r.stderr)
+
+
+def test_get_bounds_retries_one_transient_failure():
+    """Device run 2026-11-08 03:44: a single -1728 from System Events is retried once (a read,
+    nothing sent); two failures in a row still raise WindowError."""
+    import time as time_module
+
+    from imctl import window
+    from imctl.window import WindowError
+
+    real = (window._run_osascript, time_module.sleep)
+    calls = []
+
+    def flaky(answers):
+        def run(script, strip=True, timeout=10):
+            calls.append(script)
+            a = answers.pop(0)
+            if isinstance(a, Exception):
+                raise a
+            return a
+        return run
+
+    try:
+        slept = []
+        time_module.sleep = slept.append
+        window._run_osascript = flaky([WindowError("osascript failed: -1728"), "2001,143,294,651"])
+        b = window.get_bounds()
+        assert (b.x, b.y, b.width, b.height) == (2001, 143, 294, 651) and len(calls) == 2
+        assert slept == [0.3], slept  # one short pause, then the second read
+        calls.clear()
+        window._run_osascript = flaky([WindowError("-1728"), WindowError("-1728")])
+        try:
+            window.get_bounds()
+            assert False, "two failures must raise"
+        except WindowError:
+            pass
+        assert len(calls) == 2
+    finally:
+        window._run_osascript, time_module.sleep = real
+
+
+def test_type_text_settles_before_cmd_v():
+    """Device run 2026-11-07/08: a Cmd+V that reaches the phone before Universal Clipboard has
+    announced the new content pastes the phone's own older clipboard. type_text waits
+    PASTE_SETTLE_S between its write and Cmd+V; the changeCount guard still runs right before
+    the chord, so a copy made during the wait means nothing is sent."""
+    import imctl.input as input_module
+    from imctl.input import PASTE_SETTLE_S, _VK_A, _VK_V, ClipboardChanged, type_text
+
+    class PB:
+        def __init__(self, log):
+            self.log, self.count, self.data = log, 5, b"user"
+
+        def dataForType_(self, _t):  # no types(): saved as a text-only stand-in
+            return self.data
+
+        def changeCount(self):
+            return self.count
+
+        def clearContents(self):
+            self.log.append(("pb", "clear"))
+            self.count += 1
+
+        def setString_forType_(self, s, _t):
+            self.log.append(("pb", "set", s))
+            self.data = s.encode()
+
+        def setData_forType_(self, d, _t):
+            self.log.append(("pb", "setData", d))
+            self.data = d
+
+    def run(*, settle=None, replace=False, copy_during_settle=False, log=None):
+        log, now = ([] if log is None else log), [0.0]
+        pb = PB(log)
+
+        def sleep(s):
+            log.append(("sleep", s))
+            now[0] += s
+            if copy_during_settle and s >= 1.0:
+                pb.count += 1  # another app copies while we wait
+
+        def chord(keycode, before_key=None):
+            if before_key is not None:
+                before_key()
+            log.append(("chord", keycode))
+
+        kw = {} if settle is None else {"settle_s": settle}
+        ok = type_text("hello world", replace=replace, pasteboard=pb, chord=chord,
+                       before_check=lambda: (lambda: True), ocr_check=lambda: True,
+                       hud_check=lambda: False, sleep=sleep, clock=lambda: now[0], **kw)
+        return ok, log, pb
+
+    real = input_module.ensure_frontmost
+    input_module.ensure_frontmost = lambda: None
+    try:
+        assert PASTE_SETTLE_S >= 1.0
+        ok, log, pb = run()
+        assert ok is True
+        w = log.index(("pb", "set", "hello world"))
+        v = log.index(("chord", _VK_V))
+        between = [e[1] for e in log[w + 1:v] if e[0] == "sleep"]
+        assert between == [PASTE_SETTLE_S], between
+        assert ("pb", "setData", b"user") in log[v:], log  # seen on screen: the restore runs
+        # a caller-chosen wait is used as is; zero still leaves the old 0.05 s floor
+        ok, log, _ = run(settle=3.0)
+        w, v = log.index(("pb", "set", "hello world")), log.index(("chord", _VK_V))
+        assert [e[1] for e in log[w + 1:v] if e[0] == "sleep"] == [3.0]
+        ok, log, _ = run(settle=0)
+        w, v = log.index(("pb", "set", "hello world")), log.index(("chord", _VK_V))
+        assert [e[1] for e in log[w + 1:v] if e[0] == "sleep"] == [0.05]
+        # replace: Cmd+A still goes out before the write, so the wait never sits between them
+        ok, log, _ = run(replace=True)
+        assert log.index(("chord", _VK_A)) < log.index(("pb", "set", "hello world"))
+        # a copy during the wait: ClipboardChanged before Cmd+V, nothing pasted, and the other
+        # app's newer clipboard is left alone (no restore over it)
+        log = []
+        try:
+            run(copy_during_settle=True, log=log)
+            assert False, "a clipboard change during the wait must stop the paste"
+        except ClipboardChanged:
+            pass
+        assert ("chord", _VK_V) not in log, log
+        assert not [e for e in log if e[:2] == ("pb", "setData")], log  # no restore over it
+    finally:
+        input_module.ensure_frontmost = real
+
+
+def test_type_text_reads_the_baseline_after_the_wait():
+    """0.2.7: the pre-paste OCR count (the restore license's baseline) is read after the
+    clipboard write and the PASTE_SETTLE_S wait, right before Cmd+V. Text that shows up during the
+    wait — here the same query appearing in a suggestion — is part of the baseline, so it cannot
+    pass for the paste and license a restore."""
+    from imctl import input as input_module, vision
+    from imctl.input import PASTE_SETTLE_S, _VK_V, type_text
+    from imctl.vision import OCRHit
+
+    text = "iPhone 17 Pro Max case"
+    log, now, waited = [], [0.0], [False]
+
+    class PB:
+        def __init__(self):
+            self.data, self.count = b"orig", 3
+
+        def dataForType_(self, _t):
+            return self.data
+
+        def changeCount(self):
+            return self.count
+
+        def clearContents(self):
+            self.count += 1
+
+        def setString_forType_(self, s, _t):
+            log.append(("write",))
+            self.data = s.encode()
+
+        def setData_forType_(self, d, _t):
+            log.append(("restore",))
+            self.data = d
+
+    def sleep(s):
+        log.append(("sleep", s))
+        now[0] += s
+        if s == PASTE_SETTLE_S:
+            waited[0] = True
+
+    def read(**_kw):
+        log.append(("read",))
+        # the text is on screen (a suggestion) from the end of the wait on, and the paste adds nothing
+        return [OCRHit(text=text, nx=0.5, ny=0.4, confidence=0.9)] if waited[0] else []
+
+    def chord(keycode, before_key=None):
+        if before_key is not None:
+            before_key()
+        log.append(("chord", keycode))
+
+    real_read, real_front = vision.read_screen, input_module.ensure_frontmost
+    vision.read_screen, input_module.ensure_frontmost = read, (lambda: None)
+    try:
+        pb, report = PB(), {}
+        ok = type_text(text, pasteboard=pb, chord=chord, before_check=lambda: (lambda: False),
+                       sleep=sleep, clock=lambda: now[0], report=report)
+    finally:
+        vision.read_screen, input_module.ensure_frontmost = real_read, real_front
+    w = log.index(("write",))
+    settle = log.index(("sleep", PASTE_SETTLE_S))
+    first_read = log.index(("read",))
+    v = log.index(("chord", _VK_V))
+    assert w < settle < first_read < v, log
+    assert report["count_before"] == 1  # the suggestion is in the baseline
+    assert ok is False and ("restore",) not in log and pb.data == text.encode()  # no rise, no restore
+
+
+def test_paste_chord_never_reactivates_the_mirror():
+    """0.2.7: type_text's Cmd+V comes after a wait of at least PASTE_SETTLE_S. If
+    another app came to the front meanwhile, the chord must not pull iPhone Mirroring back (the
+    paste and the user's next keystrokes would go to the phone): FocusLost, nothing posted, and
+    the user's clipboard goes back. The pre-wait Cmd+A (replace) still activates as before."""
+    from imctl import input as input_module
+    from imctl.input import FocusLost, _VK_A, _VK_V, type_text
+
+    # _cmd_chord itself: activate=False never calls ensure_frontmost and refuses without focus
+    calls = []
+    saved = (input_module.ensure_frontmost, input_module._focus_check, input_module._layout_check,
+             input_module.CGEventPost)
+    input_module.ensure_frontmost = lambda: calls.append("activate")
+    input_module._focus_check = lambda: False
+    input_module._layout_check = lambda k: {9: "v", 0: "a"}.get(k)
+    input_module.CGEventPost = lambda *a: calls.append("post")
+    try:
+        try:
+            input_module._cmd_chord(_VK_V, activate=False)
+            assert False, "no focus must raise FocusLost"
+        except FocusLost:
+            pass
+        assert calls == [], calls
+    finally:
+        (input_module.ensure_frontmost, input_module._focus_check, input_module._layout_check,
+         input_module.CGEventPost) = saved
+
+    # type_text's default chords: Cmd+A activates, Cmd+V does not; focus lost → clipboard restored
+    class PB:
+        def __init__(self):
+            self.data, self.count = b"user", 5
+
+        def dataForType_(self, _t):
+            return self.data
+
+        def changeCount(self):
+            return self.count
+
+        def clearContents(self):
+            self.count += 1
+
+        def setString_forType_(self, s, _t):
+            self.data = s.encode()
+
+        def setData_forType_(self, d, _t):
+            self.data = d
+
+    seen = []
+
+    def fake_chord(keycode, before_key=None, activate=True):
+        seen.append((keycode, activate))
+        if keycode == _VK_V and not activate:
+            raise FocusLost("iPhone Mirroring is not the frontmost app")
+        if before_key is not None:
+            before_key()
+
+    real_chord, real_front, real_focus = (input_module._cmd_chord, input_module.ensure_frontmost,
+                                          input_module._focus_check)
+    # the check right after the wait sees the mirror in front; it is lost by the time of Cmd+V
+    input_module._cmd_chord, input_module.ensure_frontmost = fake_chord, (lambda: None)
+    input_module._focus_check = lambda: True
+    try:
+        pb = PB()
+        try:
+            type_text("hello world", replace=True, pasteboard=pb,
+                      before_check=lambda: (lambda: True), ocr_check=lambda: True,
+                      hud_check=lambda: False, sleep=lambda s: None, clock=lambda: 0.0)
+            assert False, "focus lost before Cmd+V must raise"
+        except FocusLost as exc:
+            assert isinstance(exc, input_module.PasteFocusLost)  # the CLI says the paste was called off
+    finally:
+        input_module._cmd_chord, input_module.ensure_frontmost = real_chord, real_front
+        input_module._focus_check = real_focus
+    assert seen == [(_VK_A, True), (_VK_V, False)], seen
+    assert pb.data == b"user"  # nothing pasted: the user's clipboard is back
+
+
+def test_paste_called_off_is_reported_as_such():
+    """0.2.7: when type_text calls ⌘V off because another app came to the front
+    (PasteFocusLost), phone_type says nothing was sent (the server maps that to not_delivered,
+    retry=safe) — or, with replace, that the select-all went out but nothing was pasted; and
+    open_app reports focus_lost WITHOUT a trip Home (that would pull the mirror forward again),
+    while a clipboard change before ⌘V tidies up as usual."""
+    import argparse
+    import contextlib
+    import io
+
+    from imctl import cli
+    from imctl import input as input_module
+    from imctl.gestures import open_app
+    from imctl.input import ClipboardChanged, PasteFocusLost
+
+    real = (cli._require_live, cli._require_expect, input_module.type_text)
+    cli._require_live = lambda: None
+    cli._require_expect = lambda args: None
+
+    def boom(*a, **kw):
+        raise PasteFocusLost("iPhone Mirroring is not the frontmost app")
+
+    input_module.type_text = boom
+    try:
+        for replace, phrase in ((False, "nothing was sent;"),
+                                (True, "the select-all (⌘A) for replace was sent, but nothing was pasted")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = cli._cmd_type(argparse.Namespace(text="hello world", replace=replace, expect=None))
+            assert rc == 6 and err.getvalue().startswith("focus_lost: another app came to the front before ⌘V")
+            assert phrase in err.getvalue(), err.getvalue()
+            assert ("nothing was sent" in err.getvalue()) is (not replace)
+    finally:
+        cli._require_live, cli._require_expect, input_module.type_text = real
+
+    homes = []
+
+    def run(exc):
+        def typer(_name):
+            raise exc
+        return open_app("Notes", spotlight_open=True, read_screen=lambda **k: [], luma=lambda: b"\x00",
+                        sleep=lambda s: None, tap=lambda x, y: (_ for _ in ()).throw(AssertionError("no tap")),
+                        home=lambda: homes.append(1) or True, clear_text=lambda: None, type_text=typer)
+
+    real_focus = input_module._focus_check
+    try:
+        input_module._focus_check = lambda: True
+        assert run(PasteFocusLost("x")) == "focus_lost" and homes == []  # no trip Home
+        assert run(ClipboardChanged("x")) == "clipboard_changed" and homes == [1]
+        # the clipboard changed AND the user moved away: no trip Home either (cross-verification B)
+        input_module._focus_check = lambda: False
+        assert run(ClipboardChanged("x")) == "focus_lost" and homes == [1]
+    finally:
+        input_module._focus_check = real_focus
+
+
+def test_paste_hud_split_across_hits():
+    """0.2.7: OCR can split the "Pasting from …" box into two hits; joined, it still
+    counts as the box (fail-closed: it only ever blocks a restore). One hit as before."""
+    from imctl.verify import shows_paste_hud
+    from imctl.vision import OCRHit
+
+    def hit(t, y):
+        return OCRHit(text=t, nx=0.5, ny=y, confidence=0.9)
+
+    assert shows_paste_hud([hit("Pasting from M5pro…", 0.5)])
+    assert shows_paste_hud([hit("Pasting", 0.5), hit("from M5pro…", 0.53)])
+    assert not shows_paste_hud([hit("Pasting", 0.2), hit("Notes", 0.3), hit("from home", 0.6)])
+    assert not shows_paste_hud([hit("Search", 0.1), hit("Notes", 0.3)])
+
+
+def test_open_app_top_field_layout():
+    """2026-11-08 device run (iOS 27, "Search or Ask"): Spotlight drew its search field at the TOP,
+    showed the query completed as "Calculator — Open" (OCR: "Calculator -Open") and NO "Top Hit"
+    header; the app's label sat under the field at ny 0.28, a Settings row of the same name at 0.49.
+    phone_open (0.2.6 too) reported the name as never typed. The hits below are that device read.
+    Only a field that completes the EXACT name with "Open" makes the block under it a candidate;
+    the field line itself, other completions and lower rows never are."""
+    from imctl.gestures import (_field_echo, _spotlight_up, _tap_and_confirm_open, choose_app_hit,
+                                find_app_hit, open_app, open_spotlight_checked, OPEN_MIN_DIFF)
+    from imctl.vision import OCRHit
+
+    def H(nx, ny, t):
+        return OCRHit(text=t, nx=nx, ny=ny, confidence=0.9)
+
+    after_paste = [H(0.32, 0.12, "Calculator -Open"), H(0.19, 0.18, "SUNDAY"), H(0.19, 0.28, "Calculator"),
+                   H(0.17, 0.32, "Chrome"), H(0.54, 0.36, "3.1 GPA is a B Letter Grade or 83-8..."),
+                   H(0.17, 0.45, "Settings"), H(0.33, 0.49, "Calculator"), H(0.28, 0.51, "Apps"),
+                   H(0.14, 0.57, "Tips"), H(0.56, 0.68, "Get started with Calculator on iPhone")]
+    empty = [H(0.27, 0.12, "Search or Ask"), H(0.19, 0.18, "SUNDAY"), H(0.28, 0.33, "Calendar")]
+
+    hit = choose_app_hit(after_paste, "Calculator")
+    assert hit is not None and (hit.nx, hit.ny) == (0.19, 0.28)  # the block under the field, not Settings
+    assert _field_echo(after_paste, "Calculator") and not _field_echo(empty, "Calculator")
+    assert _spotlight_up(after_paste) and _spotlight_up(empty)
+    assert not _spotlight_up([H(0.5, 0.5, "0"), H(0.2, 0.9, "AC")])  # an app's own screen
+    # the field split by OCR into the query and the completion: still read, still not a candidate
+    split = [H(0.2, 0.12, "Calculator"), H(0.45, 0.121, "— Open")] + after_paste[1:]
+    hit = choose_app_hit(split, "Calculator")
+    assert hit is not None and hit.ny == 0.28
+    # OCR's other spacing of the completion (seen on the device as "zq7pdcan- Ask Siri") and an
+    # en dash read the same; a hyphen inside a name is not a completion
+    for field in ("Calculator- Open", "Calculator – Open", "Calculator—Open "):
+        hit = choose_app_hit([H(0.32, 0.12, field)] + after_paste[1:], "Calculator")
+        assert (hit is not None) is (field != "Calculator—Open "), field
+    assert _field_echo([H(0.3, 0.12, "Wi-Fi")], "Wi-Fi")
+    # another completion, no completion, or another query: nothing is chosen
+    for field in ("Calculator — Website", "Calculator", "Calc -Open", "Calculators -Open"):
+        assert choose_app_hit([H(0.32, 0.12, field)] + after_paste[1:], "Calculator") is None, field
+    # no field at all (and no Top Hit header): nothing, as before
+    assert choose_app_hit(after_paste[1:], "Calculator") is None
+    # two labels of the name at different spots in the block: none is tapped (Y6)
+    amb = []
+    two = after_paste[:3] + [H(0.42, 0.28, "Calculator")] + after_paste[3:]
+    assert choose_app_hit(two, "Calculator", amb) is None and amb == [True]
+    # the label just below the block (a section row) is outside it
+    assert choose_app_hit([after_paste[0], H(0.2, 0.36, "Calculator")], "Calculator") is None
+    # a first section header that carries the app's own name (Chrome's results under "Chrome", at
+    # field + 0.20 as measured) is never a candidate, with or without the app's label above it
+    chrome = [H(0.3, 0.12, "Chrome -Open"), H(0.19, 0.28, "Chrome"), H(0.17, 0.32, "Chrome"),
+              H(0.5, 0.36, "Chrome result row")]
+    hit = choose_app_hit(chrome, "Chrome")
+    assert hit is not None and hit.ny == 0.28
+    assert choose_app_hit([chrome[0], chrome[2], chrome[3]], "Chrome") is None
+    # the Home Screen showing through above the label band (the widget's "SUNDAY" at field + 0.06)
+    assert choose_app_hit([H(0.3, 0.12, "SUNDAY -Open"), H(0.19, 0.18, "SUNDAY")], "SUNDAY") is None
+    # only "Search or Ask" or an "Open" completion (of this name, when given) says Spotlight is up:
+    # a notification banner in the top strip that reads "X - Y" is no evidence
+    banner = [H(0.4, 0.05, "Mail - New message from Alice"), H(0.5, 0.5, "0")]
+    assert not _spotlight_up(banner)
+    # without a name (the F43 check) an "Open" completion needs that query's label under it:
+    # a banner reading "Calendar - Open" alone is not Spotlight; the field + label structure is
+    assert not _spotlight_up([H(0.4, 0.06, "Calendar - Open"), H(0.3, 0.5, "Notes")])
+    assert _spotlight_up([H(0.3, 0.12, "Clock -Open"), H(0.19, 0.28, "Clock")])
+    assert not _spotlight_up([H(0.3, 0.12, "Clock -Open"), H(0.19, 0.33, "Clock")])
+    assert _spotlight_up(after_paste, "Calculator") and not _spotlight_up(after_paste, "Clock")
+    assert find_app_hit(lambda **kw: after_paste, "Calculator", sleep=lambda s: None).ny == 0.28
+
+    # a tap that left Spotlight up (the field still completes the name) did not open the app
+    lumas = iter([b"\x00" * 10, bytes([int(OPEN_MIN_DIFF) + 1] * 10)])
+    opened, _ = _tap_and_confirm_open(0.19, 0.23, luma=lambda: next(lumas), sleep=lambda s: None,
+                                      tap=lambda x, y: None, read_screen=lambda: after_paste)
+    assert opened is False
+
+    # F43 in this layout: Home landed back in Spotlight (the field with its completion) — reported
+    # open, no Spotlight toggle sent (it would close it and the paste would go to the Home Screen)
+    reads = iter([[H(0.5, 0.5, "0")], after_paste])
+    toggles = []
+    assert open_spotlight_checked(luma=lambda: b"\x00", sleep=lambda s: None,
+                                  opener=lambda: toggles.append(1) or True, home=lambda: True,
+                                  read_screen=lambda: next(reads)) is True
+    assert toggles == []
+
+    # end to end with injected screens: typed, chosen, tapped, opened
+    # find_app_hit's read, the re-read before the tap, then the app's own screen after it
+    screens = [after_paste, after_paste, [H(0.5, 0.5, "0"), H(0.2, 0.9, "AC")]]
+    lumas = iter([b"\x00" * 10, bytes([int(OPEN_MIN_DIFF) + 1] * 10)])
+    taps = []
+    res = open_app("Calculator", spotlight_open=True, read_screen=lambda **kw: screens.pop(0),
+                   luma=lambda: next(lumas), sleep=lambda s: None, tap=lambda x, y: taps.append((x, y)),
+                   home=lambda: True, clear_text=lambda: None, type_text=lambda t: True)
+    assert res == "opened" and taps == [(0.19, 0.28)] and screens == []
+
+
+def test_type_text_checks_right_after_the_wait():
+    """0.2.7 (cross-verification round A): right after the clipboard wait, before any screen read,
+    a clipboard change raises ClipboardChanged and a lost focus raises PasteFocusLost (default
+    chord) — no reads, no Cmd+V; and a capture failure of the "before" frame while the mirror is no
+    longer in front (another Space came forward) is PasteFocusLost too, not a window error."""
+    from imctl import input as input_module, verify
+    from imctl.input import ClipboardChanged, PasteFocusLost, type_text
+    from imctl.vision import CaptureError
+
+    class PB:
+        def __init__(self):
+            self.data, self.count = b"user", 5
+
+        def dataForType_(self, _t):
+            return self.data
+
+        def changeCount(self):
+            return self.count
+
+        def clearContents(self):
+            self.count += 1
+
+        def setString_forType_(self, s, _t):
+            self.data = s.encode()
+
+        def setData_forType_(self, d, _t):
+            self.data = d
+
+    calls = []
+    real = (input_module._cmd_chord, input_module.ensure_frontmost, input_module._focus_check)
+    input_module.ensure_frontmost = lambda: None
+    input_module._cmd_chord = lambda k, before_key=None, activate=True: calls.append(("chord", k))
+
+    def run(*, focus_after_wait, copy_in_wait=False, before_check=None):
+        pb = PB()
+        focus = iter(focus_after_wait)
+        input_module._focus_check = lambda: next(focus)
+
+        def sleep(s):
+            if s >= 1.0 and copy_in_wait:
+                pb.count += 1
+
+        before = before_check or (lambda: (calls.append("before"), (lambda: True))[1])
+        return pb, (lambda: type_text("hello world", pasteboard=pb, before_check=before,
+                                      ocr_check=lambda: (calls.append("ocr"), True)[1],
+                                      hud_check=lambda: False, sleep=sleep, clock=lambda: 0.0))
+    try:
+        # both a copy and a lost focus: PasteFocusLost wins (the user moved away)
+        for copy, focus, exc in ((True, [True], ClipboardChanged), (False, [False], PasteFocusLost),
+                                 (True, [False], PasteFocusLost)):
+            calls.clear()
+            pb, go = run(focus_after_wait=focus, copy_in_wait=copy)
+            try:
+                go()
+                assert False, "must raise"
+            except exc:
+                pass
+            assert calls == [], calls  # no frame, no read, no chord
+            assert pb.data == (b"hello world" if copy else b"user")  # their copy kept / ours undone
+            if copy and exc is PasteFocusLost:
+                pass  # the other app's copy is never overwritten by a restore
+
+        def lost_window():
+            raise CaptureError("the mirroring window is not on screen")
+        calls.clear()
+        pb, go = run(focus_after_wait=[True, False], before_check=lost_window)
+        try:
+            go()
+            assert False, "must raise"
+        except PasteFocusLost:
+            pass
+        assert calls == [] and pb.data == b"user"
+        # the same capture failure with the mirror still in front stays a capture error
+        pb, go = run(focus_after_wait=[True, True], before_check=lost_window)
+        try:
+            go()
+            assert False, "must raise"
+        except PasteFocusLost:
+            assert False, "not a focus loss"
+        except Exception as e:
+            assert verify.is_capture_error(e)
+    finally:
+        input_module._cmd_chord, input_module.ensure_frontmost, input_module._focus_check = real
+
+
 def test_resume_never_clicks_window_controls():
     """F29: resume() moves the pointer off first and clicks only a lone overlay button;
     launch() / phone_launch never report ready while the overlay is up."""
@@ -2397,8 +2952,9 @@ def test_open_app_short_rows_and_deferred_restore():
 def test_clipboard_race_and_late_paste():
     """F35: nothing is pasted when something else wrote the pasteboard after
     type_text's own write (another app, Universal Clipboard), and their
-    content is left alone; the one-character pre-read runs before that
-    write. F33: open_app gives a paste type_text did not see a third pass."""
+    content is left alone; the pre-paste read runs after that write and
+    the wait (0.2.7). F33: open_app gives a paste type_text did not
+    see a third pass."""
     import imctl.input as input_module
     from imctl import verify, vision
     from imctl.gestures import OPEN_MIN_DIFF, open_app
@@ -2459,9 +3015,10 @@ def test_clipboard_race_and_late_paste():
             except ClipboardChanged:
                 pass
             assert chords == [] and pb.data == b"from another device"
-            # the pre-paste read (a sweep for "X"; F41: a plain count for "hello")
-            # happened before our write
-            assert log.index("sweep") < log.index("write")
+            # 0.2.7: the copy that landed during the wait is caught right after it, before
+            # any screen read (the pre-paste reads come after the wait); last_check would
+            # stop the paste too
+            assert "write" in log and "sweep" not in log
     finally:
         for (mod, name), value in saved.items():
             setattr(mod, name, value)
@@ -3193,7 +3750,8 @@ def test_type_text_restore_needs_a_rise():
 
 def test_paste_hud_probe():
     """F44: the phone's "Pasting from …" progress box is recognized in one OCR hit
-    (any case, spacing or quotes around the Mac's name); nothing else counts."""
+    (any case, spacing or quotes around the Mac's name), or (0.2.7) split over
+    two consecutive hits; nothing else counts."""
     from imctl import verify
     from imctl.vision import OCRHit
 
@@ -3204,7 +3762,10 @@ def test_paste_hud_probe():
     assert verify.shows_paste_hud(hits("Suggestions", "PASTING  FROM M5pro…", "Cancel"))
     assert verify.shows_paste_hud(["Pasting from x"])  # plain strings work too
     assert not verify.shows_paste_hud(hits("Cut", "Copy", "Paste", "noracu test 123"))
-    assert not verify.shows_paste_hud(hits("Pasting", "from M5pro"))  # never joined across hits
+    # 0.2.7: a box OCR split over two consecutive hits still counts (fail-closed);
+    # hits further apart are never joined
+    assert verify.shows_paste_hud(hits("Pasting", "from M5pro"))
+    assert not verify.shows_paste_hud(hits("Pasting", "Cancel", "from M5pro"))
     assert not verify.shows_paste_hud([])
 
 
@@ -4028,6 +4589,81 @@ def test_keyboard_layout_guard():
     finally:
         for (mod, name), value in saved.items():
             setattr(mod, name, value)
+
+def test_pointer_goes_back_after_a_gesture():
+    """0.2.7 (a shared Mac): the CLI puts the pointer back where it was after a command that moved it —
+    only while it is still where noracu's last event left it — and NORACU_USER_IDLE_S=0 turns it off."""
+    import contextlib
+    import io
+    import os
+    import time as time_module
+
+    from imctl import cli, pointer
+
+    saved_env = os.environ.get("NORACU_USER_IDLE_S")
+    real = (pointer._where, pointer._warp, time_module.sleep)
+    at = [(10.0, 20.0)]
+    warps = []
+    try:
+        pointer._where = lambda: at[0]
+        pointer._warp = warps.append
+        time_module.sleep = lambda s: None
+
+        for raw, on in [(None, True), ("", True), ("2", True), ("0.5", True), ("abc", True), ("-1", True),
+                        ("0", False), ("0.0", False), ("00", False)]:
+            if raw is None:
+                os.environ.pop("NORACU_USER_IDLE_S", None)
+            else:
+                os.environ["NORACU_USER_IDLE_S"] = raw
+            assert pointer.enabled() is on, (raw, on)
+        os.environ.pop("NORACU_USER_IDLE_S", None)
+
+        # a tap: the pointer went to the mirror and is still there -> back home
+        pointer.remember(); at[0] = (500.0, 600.0); pointer.moved_to(500, 600)
+        assert pointer.restore() is True and warps == [(10.0, 20.0)], warps
+        # someone moved the mouse after noracu's last event -> left where they put it
+        warps.clear(); at[0] = (10.0, 20.0)
+        pointer.remember(); pointer.moved_to(500, 600); at[0] = (800.0, 90.0)
+        assert pointer.restore() is False and warps == []
+        # moved during the 0.1 s wait before the warp -> left where they put it
+        at[0] = (10.0, 20.0)
+        pointer.remember(); at[0] = (500.0, 600.0); pointer.moved_to(500, 600)
+        time_module.sleep = lambda s: at.__setitem__(0, (650.0, 70.0))
+        assert pointer.restore() is False and warps == []
+        time_module.sleep = lambda s: None
+        # a command that posted no mouse event (type, key, ocr) -> nothing to put back
+        pointer.remember()
+        assert pointer.restore() is False and warps == []
+        # turned off -> never warps
+        os.environ["NORACU_USER_IDLE_S"] = "0"
+        pointer.remember(); at[0] = (500.0, 600.0); pointer.moved_to(500, 600)
+        assert pointer.restore() is False and warps == []
+        os.environ.pop("NORACU_USER_IDLE_S", None)
+
+        # cli.main restores even when the command fails part way (focus lost mid-gesture)
+        at[0] = (10.0, 20.0)
+
+        def gesture_then_focus_lost(args):
+            at[0] = (300.0, 300.0)
+            pointer.moved_to(300, 300)
+            from imctl import input as input_module
+            raise input_module.FocusLost("iPhone Mirroring is not the frontmost app")
+
+        status = cli._cmd_status
+        try:
+            cli._cmd_status = gesture_then_focus_lost  # build_parser() looks the handler up when main runs
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                rc = cli.main(["status"])
+        finally:
+            cli._cmd_status = status
+        assert rc == 6 and warps == [(10.0, 20.0)], (rc, warps)
+    finally:
+        pointer._where, pointer._warp, time_module.sleep = real
+        if saved_env is None:
+            os.environ.pop("NORACU_USER_IDLE_S", None)
+        else:
+            os.environ["NORACU_USER_IDLE_S"] = saved_env
+
 
 if __name__ == "__main__":
     # every test_* function in this file, in file order (before 0.2.4 a hand-kept list ran 28 of 47)

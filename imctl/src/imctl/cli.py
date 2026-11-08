@@ -28,7 +28,7 @@ import sys
 import tempfile
 import time
 
-from . import gestures, input, verify, vision
+from . import gestures, input, pointer, verify, vision
 from .vision import CaptureError
 import subprocess
 
@@ -324,22 +324,33 @@ def _cmd_type(args) -> int:
     if guard is not None:
         return guard
     report = {}
-    if input.type_text(args.text, replace=args.replace, report=report):
+    try:
+        typed_ok = input.type_text(args.text, replace=args.replace, report=report)
+    except input.PasteFocusLost:
+        # 0.2.7: another app came to the front during the wait after the clipboard write;
+        # ⌘V was called off rather than pulling iPhone Mirroring back to the front
+        sent = ("the select-all (⌘A) for replace was sent, but nothing was pasted" if args.replace
+                else "nothing was sent")
+        print("focus_lost: another app came to the front before ⌘V, so iPhone Mirroring was not "
+              f"brought back and the paste was called off — {sent}; the clipboard was put back "
+              "unless something else had copied meanwhile", file=sys.stderr)
+        return 6
+    if typed_ok:
         if report.get("seen", True):
             if _late_paste_probe(args.text) is None:
                 # 0.2.5 (review Y6): one character that OCR saw appear is no proof of where it went,
                 # and (review R38) no license to put the clipboard back
                 print(f"typed {len(args.text)} chars (one character: OCR saw it appear, which is no "
-                      "proof of where it landed — check the field; the clipboard still holds the "
-                      "typed text)")
+                      "proof of where it landed — check the field, which may hold the phone's own older "
+                      "clipboard instead; the clipboard still holds the typed text)")
                 return 0
             print(f"typed {len(args.text)} chars")
             return 0
         if _late_paste_probe(args.text) is None:
             # one character: OCR cannot read it back, only the picture changed
             print(f"typed {len(args.text)} chars (the screen changed after the paste, but "
-                  "OCR cannot read this text back — check the field; the clipboard still "
-                  "holds the typed text)")
+                  "OCR cannot read this text back — check the field, which may hold the phone's own "
+                  "older clipboard instead; the clipboard still holds the typed text)")
             return 0
         # review 0.2.6 #7: the screen changed and OCR could not confirm the text for a reason
         # known now — say that one, instead of watching for a late paste that would only
@@ -348,12 +359,14 @@ def _cmd_type(args) -> int:
         if cause == "too_short":
             print(f"typed {len(args.text)} chars (the screen changed after the paste, but a text "
                   "of fewer than four characters, spaces and case aside, is never confirmed by "
-                  "OCR — check the field; the clipboard still holds the typed text)")
+                  "OCR — check the field, which may hold the phone's own older clipboard instead; the "
+                  "clipboard still holds the typed text)")
             return 0
         if cause == "strip_only":
             print(f"typed {len(args.text)} chars (OCR saw the text appear only in the strip at the "
                   "top of the screen, where a field cannot be told from a notification banner — "
-                  "check the field; the clipboard still holds the typed text)")
+                  "check the field, which may hold the phone's own older clipboard instead; the "
+                  "clipboard still holds the typed text)")
             return 0
         # device run 2026-11-06: only the picture changed (a selection highlight, a
         # results list redraw) and OCR never saw the text — watch for it like an
@@ -387,8 +400,11 @@ def _cmd_type(args) -> int:
                   "(phone_ocr / phone_screenshot): if the field shows the text, it "
                   "holds it")
     else:
-        advice = ("it may still land: read the screen (phone_ocr / phone_screenshot) "
-                  "before typing again, or retype with replace=true")
+        # device run 2026-11-07/08: the phone can paste its own older clipboard when the Mac's
+        # new clipboard has not reached it yet — the field may hold other text, not nothing
+        advice = ("it may still land, or the phone may have pasted its own older clipboard "
+                  "instead: read the screen (phone_ocr / phone_screenshot) before typing "
+                  "again, or retype with replace=true")
     print(
         "type_not_confirmed: the paste did not show on screen within the 2.5s "
         f"confirmation window{watched} — {advice}; the clipboard still holds the "
@@ -564,9 +580,14 @@ def _open_and_report(args) -> int:
                   f"{', '.join(repr(x) for x in gestures.TOP_HIT_LABELS)} — no app by that "
                   f"name, or NORACU_TOPHIT_LABELS does not match your iPhone's label){stuck}")
         else:
-            print(f"app not found: {args.app!r} (Spotlight showed no Top Hit — no app by that "
-                  "name, or the iPhone is not set to English: phone_open reads Spotlight's "
-                  f"\"Top Hit\" label; set NORACU_TOPHIT_LABELS to the label your iPhone shows){stuck}")
+            # 2026-11-08: the top-field Spotlight shows no Top Hit header at all; there the
+            # evidence is the field completing the name with "— Open"
+            print(f"app not found: {args.app!r} (Spotlight showed no Top Hit, and its search "
+                  "field did not complete the name with \"— Open\" — no app by that name, or "
+                  "the iPhone is not set to English: phone_open reads Spotlight's \"Top Hit\" "
+                  "label and \"Open\" completion; NORACU_TOPHIT_LABELS sets the Top Hit label for "
+                  "another language, the \"Open\" completion is read in English only)"
+                  f"{stuck}")
         return 1
     if result == "deadline":
         print(f"open_not_confirmed: ran out of time opening {args.app!r} (the Mac may be "
@@ -584,10 +605,27 @@ def _open_and_report(args) -> int:
               "its Home Screen icon instead (phone_screenshot, then phone_tap)", file=sys.stderr)
         return 4
     if result == "not_typed":
-        print(f"open_not_confirmed: the name {args.app!r} was pasted into Spotlight but never "
+        # 0.2.7: the paste may have put the phone's own older clipboard into the field
+        # instead of the name — never claim the name was pasted
+        print(f"open_not_confirmed: ⌘V was sent to Spotlight but the name {args.app!r} never "
               "showed up on the phone (a paste can take several seconds to reach the iPhone, "
-              "or be lost; an iPhone not set to English also needs NORACU_TOPHIT_LABELS) — "
-              f"nothing was tapped; {home_note}; retry phone_open", file=sys.stderr)
+              "or be lost, and the phone may have pasted its own older clipboard into the "
+              "search field instead; an iPhone not set to English also needs "
+              f"NORACU_TOPHIT_LABELS) — nothing was tapped; {home_note}; retry phone_open, "
+              "which clears the search field first", file=sys.stderr)
+        return 4
+    if result == "focus_lost":
+        # 0.2.7: the paste was called off because another app came to the front; no trip
+        # Home either — that would pull iPhone Mirroring forward again
+        print(f"focus_lost: another app came to the front before ⌘V, so iPhone Mirroring was not "
+              f"brought back and {args.app!r} was not pasted or tapped — Spotlight was opened and "
+              "cleared on the phone and may still be open; the clipboard was put back unless "
+              "something else had copied meanwhile; retry phone_open", file=sys.stderr)
+        return 6
+    if result == "clipboard_changed":
+        print(f"open_not_confirmed: another app or device changed the clipboard before ⌘V, so "
+              f"{args.app!r} was not pasted or tapped and the new clipboard was left as it is; "
+              f"{home_note}; retry phone_open", file=sys.stderr)
         return 4
     if result == "spotlight_unavailable":
         print("spotlight unavailable (could not reach the Home Screen, the menu command failed, or the screen did not change)")
@@ -773,6 +811,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _stdin_values(args)
+    pointer.remember()  # 0.2.7: a gesture's pointer goes back where it was (see pointer.py)
+    try:
+        return _run(args)
+    finally:
+        pointer.restore()
+
+
+def _run(args) -> int:
     try:
         return args.func(args)
     except input.KeyboardLayoutMismatch as exc:

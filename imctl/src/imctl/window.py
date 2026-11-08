@@ -43,13 +43,34 @@ class WindowBounds:
         )
 
 
+# Device run 2026-11-07: while the phone's keyboard is composing (a Pinyin "x" with its underline),
+# iPhone Mirroring adds a 397x28 AXDialog window — the candidate bar — and System Events lists it as
+# window 1, ahead of the phone (AXStandardWindow). Every script that reads the mirror window starts
+# with this static block: mi is the index of the first AXStandardWindow, else 1 as before. Fixed text
+# joined into the scripts below — no runtime value is interpolated (invariant 1).
+# Device run 2026-11-08 03:44: the first version kept `contents of cand`, which System Events turns
+# into a reference BY NAME (window "iPhone Mirroring"); during a connection blip that name did not
+# resolve and `position of` failed with -1728. The index is re-read on every call, like window 1 was.
+_PICK_WINDOW = '''
+        set mi to 1
+        repeat with i from 1 to (count of windows)
+            try
+                if ((subrole of window i) as text) is "AXStandardWindow" then
+                    set mi to i
+                    exit repeat
+                end if
+            end try
+        end repeat
+'''
+
 _GET_BOUNDS_SCRIPT = '''
 tell application "System Events"
     tell process "iPhone Mirroring"
         set winCount to count of windows
         if winCount is 0 then return "NO_WINDOW"
-        set {x, y} to position of window 1
-        set {w, h} to size of window 1
+''' + _PICK_WINDOW + '''
+        set {x, y} to position of window mi
+        set {w, h} to size of window mi
         return (x as text) & "," & (y as text) & "," & (w as text) & "," & (h as text)
     end tell
 end tell
@@ -155,7 +176,15 @@ def get_bounds() -> WindowBounds:
     Raises WindowError if the app is not running or has no window
     (e.g. the window was closed but the process lives on).
     """
-    out = _run_osascript(_GET_BOUNDS_SCRIPT)
+    try:
+        out = _run_osascript(_GET_BOUNDS_SCRIPT)
+    except WindowError:
+        # device run 2026-11-08 03:44: System Events lost the window for a moment during a
+        # connection blip (-1728). A read sends nothing to the phone, so one retry is safe.
+        import time
+
+        time.sleep(0.3)
+        out = _run_osascript(_GET_BOUNDS_SCRIPT)
     if out == "NO_WINDOW":
         # Window closed but process alive: re-activate to restore it.
         subprocess.run(
@@ -180,7 +209,7 @@ def get_bounds() -> WindowBounds:
     return WindowBounds(x=x, y=y, width=w, height=h)
 
 
-# Language-independent mirror-state probe. When the mirroring session is live, window 1 contains a
+# Language-independent mirror-state probe. When the mirroring session is live, the mirror window (window mi, see _PICK_WINDOW) contains a
 # single group (the AXHostingView) with no children; when an overlay is shown (paused, connecting,
 # "iPhone in use", …) that group gains child elements (image / static text / button). Overlay text
 # is localized, so the decision never matches on text — only on structure (child count, classes).
@@ -212,7 +241,8 @@ tell application "System Events"
     tell process "iPhone Mirroring"
         set winCount to count of windows
         if winCount is 0 then return "NO_WINDOW"
-        tell window 1
+''' + _PICK_WINDOW + '''
+        tell window mi
             if not (exists group 1) then return "NO_GROUP"
             set els to UI elements of group 1
             if (count of els) is 0 then return ""
@@ -259,7 +289,8 @@ end tell
 _CLICK_RESUME_SCRIPT = '''
 tell application "System Events"
     tell process "iPhone Mirroring"
-        tell window 1
+''' + _PICK_WINDOW + '''
+        tell window mi
             set target to missing value
             set n to 0
             repeat with b in (buttons of group 1)
@@ -513,6 +544,8 @@ def _move_pointer_off_window() -> bool:
                         None, Quartz.kCGEventMouseMoved, (x, y), Quartz.kCGMouseButtonLeft
                     )
                     Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+                    from . import pointer
+                    pointer.moved_to(x, y)  # 0.2.7: the CLI puts the pointer back after the command
                     return True
     except Exception:
         return False

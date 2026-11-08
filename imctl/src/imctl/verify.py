@@ -263,10 +263,18 @@ def _is_paste_hud(hit) -> bool:
 
 
 def shows_paste_hud(hits) -> bool:
-    """True when one OCR hit reads like the phone's "Pasting from …" progress
-    box (compared like probes: NFKC, lowercase, whitespace removed). While it
-    shows, a paste is still on its way to the phone."""
-    return any(_is_paste_hud(hit) for hit in hits)
+    """True when the OCR read shows the phone's "Pasting from …" progress box
+    (compared like probes: NFKC, lowercase, whitespace removed). While it
+    shows, a paste is still on its way to the phone.
+
+    0.2.7: one hit, or two consecutive hits read together — OCR can
+    split "Pasting" and "from" into two hits. Only neighbours are joined
+    (not the whole screen), and a false match can only block a restore or a
+    confirmation (fail-closed), never license one."""
+    texts = [str(getattr(hit, "text", hit)) for hit in hits]
+    if any(PASTE_HUD_PROBE in _compact(t) for t in texts):
+        return True
+    return any(PASTE_HUD_PROBE in _compact(a + b) for a, b in zip(texts, texts[1:]))
 
 
 def screen_shows_text(text: str, read_screen) -> bool:
