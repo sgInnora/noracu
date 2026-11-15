@@ -2,11 +2,30 @@
 // noracu MCP 端到端测试
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
+import { mkdtempSync as suiteMkdtemp, writeFileSync as suiteWrite, rmSync as suiteRm } from "node:fs";
+import { tmpdir as suiteTmpdir } from "node:os";
+
+// The fakes this suite writes are extensionless CommonJS scripts. A package.json with "type": "module" in a parent of
+// the system temp directory (another tool left one in /tmp on 2026-11-14) makes Node load them as ES modules, and every
+// fake fails with "require is not defined". All temp files of the suite go under a directory of its own that says
+// CommonJS (the servers it starts inherit TMPDIR, so their temp files go there too).
+const SUITE_TMP = suiteMkdtemp(`${suiteTmpdir()}/noracu-suite-`.replace(/\/\/+/g, "/"));
+suiteWrite(`${SUITE_TMP}/package.json`, '{ "type": "commonjs" }\n');
+process.env.TMPDIR = `${SUITE_TMP}/`;
+process.on("exit", () => { try { suiteRm(SUITE_TMP, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 // 0.2.7: every server of this suite runs with the person-goes-first guard off (NORACU_USER_IDLE_S=0) unless
 // the developer set it: several servers act in turn here, and each would take the others' input for a
 // person's. The guard has its own block below, which turns it on for one server.
 if (process.env.NORACU_USER_IDLE_S === undefined) process.env.NORACU_USER_IDLE_S = "0";
+// 0.3.0: a NORACU_LAYERS left in the developer's shell would narrow every server of this suite; the
+// suite sets it itself where it tests it. S1 (next-steps R4): unset now means mac,browser, so every server
+// here runs with all three layers unless a block says otherwise; the layers block checks the default.
+process.env.NORACU_LAYERS = "mac,browser,iphone";
+// S1 (next-steps R3): browser_evaluate is off unless NORACU_ENABLE_EVAL=1. The browser blocks of this suite
+// set up and read their pages with it, so every server here runs with it on; one block below checks that
+// it is off by default.
+process.env.NORACU_ENABLE_EVAL = "1";
 
 const proc = spawn("node", [new URL("../src/server.mjs", import.meta.url).pathname], {
   stdio: ["pipe", "pipe", "inherit"],
@@ -72,8 +91,8 @@ async function call(name, args = {}) {
 }
 
 // G1：起第二个 server 进程（自定义 env）验证行为关门；用完 finally kill
-async function spawnServer(env = {}) {
-  const p = spawn("node", [new URL("../src/server.mjs", import.meta.url).pathname], {
+async function spawnServer(env = {}, serverPath = new URL("../src/server.mjs", import.meta.url).pathname) {
+  const p = spawn("node", [serverPath], {
     stdio: ["pipe", "pipe", "inherit"],
     env: { ...process.env, ...env },
   });
@@ -109,13 +128,17 @@ check("B4：initialize 带使用说明 instructions", typeof init.result?.instru
 // 2. tools/list
 const tl = await rpc("tools/list", {});
 const tools = tl.result?.tools || [];
-const EXPECT_TOOLS = { mac: 20, browser: 12, phone: 14 };
+const EXPECT_TOOLS = { mac: 20, browser: 13, phone: 14 };
 const EXPECT_TOTAL = EXPECT_TOOLS.mac + EXPECT_TOOLS.browser + EXPECT_TOOLS.phone;
+// 0.3.0：ios_*（XCUITest backend）有 9 个，定义在同一张表里，但默认后端（mirror）不列出它们；
+// NORACU_PHONE_BACKEND=xcuitest 时列出 mac 20 + browser 12 + ios 9 = 41（test/ios-e2e.mjs 覆盖）
+const EXPECT_IOS_DEFINED = 9;
 check(`tools/list ${EXPECT_TOTAL} 个`, tools.length === EXPECT_TOTAL, `got ${tools.length}`);
+check("默认后端（mirror）不列出任何 ios_* 工具", tools.every((t) => !t.name.startsWith("ios_")));
 const byLayer = { mac: 0, browser: 0, phone: 0 };
 for (const t of tools) { if (t.name.startsWith("mac_")) byLayer.mac++; else if (t.name.startsWith("browser_")) byLayer.browser++; else if (t.name.startsWith("phone_")) byLayer.phone++; }
 check("三层分布", byLayer.mac === EXPECT_TOOLS.mac && byLayer.browser === EXPECT_TOOLS.browser && byLayer.phone === EXPECT_TOOLS.phone, JSON.stringify(byLayer));
-// 0.2.5 hints（Y5，P2-annotations.md）：46 × 4 全部锁死 —— readOnly / destructive / idempotent / openWorld，1 = true
+// 0.2.5 hints（Y5，P2-annotations.md）：47 × 4 全部锁死 —— readOnly / destructive / idempotent / openWorld，1 = true
 const EXPECT_HINTS = {
   mac_status: "1010",
   mac_apps: "1010",
@@ -148,6 +171,7 @@ const EXPECT_HINTS = {
   browser_scroll: "0001",
   browser_fill: "0001",
   browser_evaluate: "0101",
+  browser_tabs: "0101",
   browser_close: "0010",
   phone_status: "1010",
   phone_screenshot: "1011",
@@ -172,7 +196,7 @@ for (const t of tools) {
   const extra = Object.keys(a).filter((k) => !HINT_KEYS.includes(k));
   if (got !== EXPECT_HINTS[t.name] || extra.length) hintBad.push(`${t.name}:${got}${extra.length ? "+" + extra.join("+") : ""}`);
 }
-check("0.2.5 hints：46 个工具的 4 个 annotation 与规格表逐一相同", tools.length === Object.keys(EXPECT_HINTS).length && hintBad.length === 0, hintBad.join(" ") || "46 × 4 ok");
+check("0.2.5 hints：47 个工具的 4 个 annotation 与规格表逐一相同", tools.length === Object.keys(EXPECT_HINTS).length && hintBad.length === 0, hintBad.join(" ") || "47 × 4 ok");
 console.log(`   hints got: ${tools.map((t) => `${t.name}=${HINT_KEYS.map((k) => (t.annotations?.[k] === true ? 1 : t.annotations?.[k] === false ? 0 : "?")).join("")}`).join(" ")}`);
 // R32 反例抽查：四键齐全（false 也要写出）、按行为标而不是按 READ_ONLY_TOOLS、待测项保持 false
 const ann = (n) => tools.find((t) => t.name === n)?.annotations || {};
@@ -195,6 +219,81 @@ check("0.2.5 hints：反例抽查（R32）",
   const line = String(r.stderr || "").split("\n").find((l) => l.startsWith("Error: TOOL_HINTS")) || `status ${r.status}`;
   check("0.2.5 hints：TOOL_HINTS 少一个工具名 → server 启动即失败", cut !== src && r.status !== 0 && /TOOL_HINTS out of sync with TOOLS: missing mac_status/.test(r.stderr), line.trim().slice(0, 90));
 }
+// 0.3.0 NORACU_LAYERS：只列点名的层；没点名的层的工具不列出、也调不到；使用说明只提列出的工具；
+// 层名写错 → server 不启动（拼错不能变成三层全开）。全程只有 initialize / tools/list / 调一个没列出的工具，不碰桌面
+{
+  const INIT = { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "layers" } };
+  const ask = async (layers, probe) => {
+    const s = await spawnServer({ NORACU_LAYERS: layers });
+    try {
+      const ins = String((await s.rpc("initialize", INIT)).result?.instructions);
+      const names = ((await s.rpc("tools/list", {})).result?.tools || []).map((t) => t.name);
+      const r = await s.call(probe);
+      return { ins, names, probe: r?.isError === true ? String(r?.content?.[0]?.text) : "(answered)" };
+    } finally { s.proc.kill(); }
+  };
+  const n = (names, p) => names.filter((k) => k.startsWith(p)).length;
+  const ph = await ask("iphone", "mac_status");
+  check("NORACU_LAYERS=iphone：只列出 phone_*", ph.names.length === EXPECT_TOOLS.phone && n(ph.names, "phone_") === EXPECT_TOOLS.phone, `got ${ph.names.length}`);
+  check("NORACU_LAYERS=iphone：没列出的 mac_status 调不到（unknown tool，并说明 mac 层没开、怎么开）", ph.probe.startsWith("unknown tool: mac_status — the mac layer is off on this server") && ph.probe.includes("NORACU_LAYERS=mac,iphone"), ph.probe.slice(0, 120));
+  check("NORACU_LAYERS=iphone：使用说明只提 phone_*，不提 mac_* / browser_* / ios_*", /phone_\*/.test(ph.ins) && /phone_ocr/.test(ph.ins) && ph.ins.includes("retry=safe") && !/mac_|browser_|ios_/.test(ph.ins), ph.ins.slice(0, 80));
+  const mb = await ask(" Mac , BROWSER ", "phone_status");
+  check("NORACU_LAYERS=\" Mac , BROWSER \"（大小写、空格不计）：mac + browser，phone_status 调不到，说明不提 phone_* / ios_*",
+    mb.names.length === EXPECT_TOOLS.mac + EXPECT_TOOLS.browser && n(mb.names, "mac_") === EXPECT_TOOLS.mac && n(mb.names, "browser_") === EXPECT_TOOLS.browser
+      && mb.probe.startsWith("unknown tool: phone_status — the iphone layer is off") && /mac_ax_state/.test(mb.ins) && !/phone_|ios_/.test(mb.ins), `got ${mb.names.length} | ${mb.probe.slice(0, 40)}`);
+  const br = await ask("browser", "mac_status");
+  check("NORACU_LAYERS=browser：只列出 browser_*，说明不提 mac_* / phone_* / ios_*", br.names.length === EXPECT_TOOLS.browser && n(br.names, "browser_") === EXPECT_TOOLS.browser && br.probe.startsWith("unknown tool: mac_status — the mac layer is off") && /browser_snapshot/.test(br.ins) && !/mac_|phone_|ios_/.test(br.ins), `got ${br.names.length}`);
+  const iosOff = await ask("  ", "ios_tap");
+  check("S1：默认（镜像后端、iPhone 层关）调 ios_tap → 只说 unknown tool，不提示开 iPhone 层（那是另一个后端的工具）", iosOff.probe === "unknown tool: ios_tap", iosOff.probe.slice(0, 120));
+  const blank = await ask("  ", "phone_status");
+  check("S1：NORACU_LAYERS 没设 / 空白 = 默认 mac,browser —— iPhone 层不列出，调 phone_status 说明怎么打开，使用说明不提 phone_* / ios_*",
+    blank.names.length === EXPECT_TOOLS.mac + EXPECT_TOOLS.browser && n(blank.names, "phone_") === 0
+      && blank.probe.startsWith("unknown tool: phone_status — the iphone layer is off on this server (NORACU_LAYERS is unset: mac,browser); add iphone, e.g. NORACU_LAYERS=mac,browser,iphone")
+      && blank.ins === mb.ins && !/phone_|ios_/.test(blank.ins),
+    `got ${blank.names.length} | ${blank.probe.slice(0, 100)}`);
+  const all3 = await ask("mac,browser,iphone", "no_such_tool");
+  check("S1：NORACU_LAYERS=mac,browser,iphone 列出三层，使用说明与本套件的主 server 相同", all3.names.length === EXPECT_TOTAL && all3.ins === init.result?.instructions && all3.probe === "unknown tool: no_such_tool", `got ${all3.names.length}`);
+  const server = new URL("../src/server.mjs", import.meta.url).pathname;
+  const bad = ["ipone", "mac,phone", ",", "all"].map((v) => spawnSync("node", [server], { input: "", encoding: "utf8", timeout: 15000, env: { ...process.env, NORACU_LAYERS: v } }));
+  check("NORACU_LAYERS 层名写错（ipone / mac,phone / , / all）→ 不启动：exit 2、stderr 说明可用的三个名字、stdout 无输出",
+    bad.every((r) => r.status === 2 && /NORACU_LAYERS="[^"]*" is not valid: use a comma-separated list of mac, browser, iphone/.test(r.stderr) && /not starting/.test(r.stderr) && r.stdout === ""),
+    bad.map((r) => r.status).join(","));
+}
+// F23（0.3.0 起看整个 src/）：进程启动后 src/ 里任何一个源文件在磁盘上变了（不只 server.mjs / mac-ax.js），
+// 下一个工具结果的第一行提示重启并点名文件；内容改回原样（只有修改时间变）不算；多出一个文件也算。
+// 源码复制到临时目录里跑，探针是一个不存在的工具名（unknown tool 也走统一出口），不碰桌面
+{
+  const { mkdtempSync, cpSync, writeFileSync: wfs, rmSync } = await import("node:fs");
+  const dir = mkdtempSync(`${process.env.TMPDIR || "/tmp/"}noracu-stale-`.replace(/\/\/+/g, "/"));
+  cpSync(new URL("../src", import.meta.url), `${dir}/src`, { recursive: true });
+  cpSync(new URL("../package.json", import.meta.url), `${dir}/package.json`);
+  // a stand-in engine (outside src/) so mac_status answers JSON without touching the desktop
+  wfs(`${dir}/fake-ax-engine`, `#!/usr/bin/env node\nlet d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", () => process.stdout.write(JSON.stringify({ ok: true, accessibility: true })));\n`, { mode: 0o700 });
+  const s = await spawnServer({ NORACU_LAYERS: "mac,browser", NORACU_AX_ENGINE: `${dir}/fake-ax-engine` }, `${dir}/src/server.mjs`);
+  const probe = async () => String((await s.call("no_such_tool"))?.content?.[0]?.text);
+  let clean, changed, back, added, jsonStale = null;
+  try {
+    clean = await probe();
+    const f = `${dir}/src/approval.js`, was = readFileSync(f, "utf8");
+    wfs(f, `${was}\n// changed on disk\n`);
+    changed = await probe();
+    // a result whose first text block is JSON: the note is a block of its own after it (audit S5A-s8-G-2)
+    const st = (await s.call("mac_status", {}))?.content || [];
+    jsonStale = { n: st.length, first: st[0]?.text, last: st[st.length - 1]?.text };
+    wfs(f, was);
+    back = await probe();
+    wfs(`${dir}/src/extra.js`, "export {};\n");
+    added = await probe();
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+  check("F23：刚启动、磁盘没变 → 没有提示", clean === "unknown tool: no_such_tool", String(clean).slice(0, 80));
+  check("F23：src/approval.js 在磁盘上变了 → 结果第一行提示重启并点名这个文件",
+    /^noracu: this server process is stale: it loaded \S+ at \S+, but the files on disk are \S+ \(changed: src\/approval\.js\)\. Restart the MCP client to load them\.\nunknown tool: no_such_tool$/.test(changed), String(changed).slice(0, 90));
+  check("审计 S5A：第一个 text 块是 JSON 时，重启提示单独放在结尾一个块里，JSON 块原样可解析",
+    (() => { try { JSON.parse(jsonStale.first); return jsonStale.n >= 2 && /^noracu: this server process is stale: /.test(jsonStale.last); } catch { return false; } })(),
+    JSON.stringify(jsonStale).slice(0, 160));
+  check("F23：内容改回原样（只有修改时间变了）→ 不再提示", back === "unknown tool: no_such_tool", String(back).slice(0, 80));
+  check("F23：src/ 里多出一个文件 → 同样提示", /\(changed: src\/extra\.js\)\. Restart the MCP client/.test(added), String(added).slice(0, 90));
+}
 // schema lint（G4 + t10 §4）：GLM-safe schema — properties 每个值必须含字符串 type；每个非 `?` 参数都在 required 中且一致
 const schemaBad = [];
 const serverSrcForSchema = readFileSync(new URL("../src/server.mjs", import.meta.url), "utf8");
@@ -208,7 +307,7 @@ for (const line of serverSrcForSchema.split("\n")) {
   }
   expectedReqByTool.set(m[1], reqKeys);
 }
-if (expectedReqByTool.size !== EXPECT_TOTAL) schemaBad.push(`parsed ${expectedReqByTool.size}/${EXPECT_TOTAL} tool arg specs`);
+if (expectedReqByTool.size !== EXPECT_TOTAL + EXPECT_IOS_DEFINED) schemaBad.push(`parsed ${expectedReqByTool.size}/${EXPECT_TOTAL + EXPECT_IOS_DEFINED} tool arg specs`);
 for (const t of tools) {
   const props = t.inputSchema?.properties || {};
   for (const [k, v] of Object.entries(props)) if (typeof v?.type !== "string") schemaBad.push(`${t.name}.${k}: no type`);
@@ -235,6 +334,9 @@ const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 if (!CI) {
   spawnSync("/usr/bin/open", ["-a", "TextEdit"], { timeout: 10000 });
   await sleepMs(1500);
+  // a test document left open by an earlier run that stopped early (same name) would make the window lookups
+  // below ambiguous: close it, unsaved, first (P17 triage). Only documents named for this suite are touched.
+  spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to close (every document whose name contains "${TE_DOC}") saving no`], { timeout: 10000 });
   spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to make new document with properties {name:"${TE_DOC}", text:"${TE_TEXT}"}`, "-e", 'tell application "TextEdit" to activate'], { timeout: 10000 });
   await sleepMs(1000);
 }
@@ -565,12 +667,18 @@ if (LOCAL && TE_READY()) {
           && next?.isError && /focus_lost/.test(say(next)) && !scr?.isError,
         `${say(clk).slice(0, 50)} | pointer ${p1} → ${p2} → ${p3} | ${say(next).slice(0, 30)} | ${say(scr).slice(0, 40)}`);
       const ta0 = jsonOf(await s0.call("mac_find", { app: "TextEdit", window: YIELD_DOC, role: "textarea" })).matches?.[0]?.i;
+      // the pointer starts away from where the click lands (P17 triage): when it already sat there, "stays where
+      // it clicked" could not be told from "went back". A point on the menu bar — never a screen corner, which
+      // can be a hot corner — and it is put back afterwards.
+      const q0 = pointerAt();
+      spawnSync(cc, ["m:300,12"], { timeout: 5000 });
+      await sleepMs(300);
       const q1 = pointerAt();
       const clk0 = Number.isInteger(ta0) ? await s0.call("mac_click", { element_index: ta0, mechanism: "physical" }) : null;
       const q2 = pointerAt();
       check("0.2.7：NORACU_USER_IDLE_S=0 时光标留在点击处", Number.isInteger(ta0) && !clk0?.isError && q2.length === 2 && !near(q1, q2), `pointer ${q1} → ${q2}`);
       // put the developer's pointer back where it was before the =0 click
-      if (q1.length === 2) spawnSync(cc, [`m:${Math.round(q1[0])},${Math.round(q1[1])}`], { timeout: 5000 });
+      if (q0.length === 2) spawnSync(cc, [`m:${Math.round(q0[0])},${Math.round(q0[1])}`], { timeout: 5000 });
     } finally {
       s.proc.kill(); s0.proc.kill();
       spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to close (every document whose name contains "${YIELD_DOC}") saving no`], { timeout: 10000 });
@@ -585,22 +693,29 @@ const FAKE_AX = `#!/usr/bin/env node
 const fs = require("fs");
 let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", () => {
   const req = JSON.parse(d); const say = (o) => process.stdout.write(JSON.stringify(o));
+  // 0.3.0 gate tests: every op the server asked for, one per line (a refused input must ask for no action op)
+  if (process.env.NORACU_TEST_OPS) fs.appendFileSync(process.env.NORACU_TEST_OPS, req.op + "\\n");
   const node = (name, i) => ({ d: 1, role: "AXButton", path: [i], fp: { role: "AXButton", subrole: "", id: "", name }, title: name, frame: [10 * i, 0, 10, 10], interactive: true });
-  const base = { ok: true, app: "Fake", bundle_id: "test.fake", pid: 4242, surface: "window", complete: true, visited: 2, ms: 1, container: { kind: "window", wid: 1, title: "W", subrole: "", frame: [0, 0, 100, 100], n: 0 } };
+  // "Ghost" is an app whose pid the frontmost op cannot name; "Term" is Terminal (bundle com.apple.Terminal);
+  // "Neg" has a pid the bgpost script refuses before it creates any event (bad-pid: nothing posted)
+  const base = { ok: true, app: "Fake", bundle_id: "test.fake", pid: req.app === "Ghost" ? 31337 : req.app === "Term" ? 555 : req.app === "Neg" ? -7 : req.app === "Plain" ? 556 : 4242, surface: "window", complete: true, visited: 2, ms: 1, container: { kind: "window", wid: 1, title: "W", subrole: "", frame: [0, 0, 100, 100], n: 0 } };
   const webAx = req.app === "ChromeNoWeb" ? { web_accessibility: "unsupported" } : req.app === "ChromeWeb" ? { web_accessibility: "exposed" } : req.app === "NoIdApp" ? { window_identity: "unverifiable" } : {};
   if (req.op === "snapshot") return say({ ...base, ...webAx, nodes: [node("One", 0), node("Two", 1)] });
   if (req.op === "find") return say({ ...base, ...webAx, nodes: [node("Three", 0), node("Four", 1)] });
   if (req.op === "act") return say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["value"], surfaces: [], mechanism: "semantic", action: "AXPress", how: "path", role: "AXButton", title: req.target.fp.name });
   if (req.op === "physical_prep") return req.target.fp.name === "Two" ? say({ ok: false, code: "OCCLUDED", message: "a window of Other is on top", delivery: "not_delivered", retry: "safe" })
     : req.target.fp.name === "Four" ? say({ ok: true, point: [700, 70], hit: "reaches", pid: 4242, wid: 1, before: {} })
-    : say({ ok: true, point: [5, 5], hit: "reaches", pid: 4242, wid: 1, before: {} });
+    : req.target.pid === -7 ? say({ ok: true, point: [6, 6], hit: "reaches", pid: -7, wid: 1, before: {} })
+    : say({ ok: true, point: [5, 5], hit: "reaches", pid: req.target.pid ?? 4242, wid: 1, before: {} });
   if (req.op === "observe_after") return say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["focus"], surfaces: [], ...(req.physical === true ? { note: "physical-flag-seen point=" + JSON.stringify(req.point) + " wid=" + req.wid } : {}) });
   if (req.op === "frontmost") {
-    const o = req.app === "Other"
-      ? { ok: true, front: { pid: 777, name: "Other", bundle: "x.other" }, target: { pid: 777, name: "Other", bundle: "x.other" }, match: true }
-      : { ok: true, front: { pid: 777, name: "Other", bundle: "x.other" }, target: { pid: 4242, name: "Fake", bundle: "test.fake" }, match: false };
+    // the engine's own shape: { pid, name, bundle } (not bundle_id); a pid is looked up, an unknown one has no app
+    const APPS = { 777: { pid: 777, name: "Other", bundle: "x.other" }, 4242: { pid: 4242, name: "Fake", bundle: "test.fake" }, 999: { pid: 999, name: "NotificationCenter", bundle: "com.apple.notificationcenterui" }, 555: { pid: 555, name: "Terminal", bundle: "com.apple.Terminal" }, "-7": { pid: -7, name: "Neg", bundle: "test.neg" }, 556: { pid: 556, name: "Plain" }, 301: { pid: 301, name: "Finder", bundle: "com.apple.finder" } };
+    const t = req.pid !== undefined ? APPS[req.pid] || null : req.app === "Other" ? APPS[777] : req.app === "com.apple.finder" ? APPS[301] : req.app === "NotRunning" ? null : APPS[4242];
+    const o = { ok: true, front: APPS[777], target: t, match: Boolean(t && t.pid === 777) };
     // at: x >= 500 is under a notification banner, y < 30 is the menu bar, anything else is the frontmost app's window
-    if (req.at) o.top = req.at[0] === 5 && req.at[1] === 5 ? { pid: 4242, owner: "Fake", layer: 0, wid: 1 } : req.at[0] >= 500 ? { pid: 999, owner: "NotificationCenter", layer: 23, wid: 9 } : req.at[1] < 30 ? { pid: 640, owner: "Window Server", layer: 24, wid: 1 } : { pid: 777, owner: "Other", layer: 0, wid: 5 };
+    // 300,300 is the bare desktop (no window); 410,110 is a second window of "Other" (wid 6) over window 5
+    if (req.at) o.top = req.at[0] === 300 && req.at[1] === 300 ? null : req.at[0] === 410 && req.at[1] === 110 ? { pid: 777, owner: "Other", layer: 0, wid: 6 } : req.at[0] === 6 && req.at[1] === 6 ? { pid: -7, owner: "Neg", layer: 0, wid: 1 } : req.at[0] === 5 && req.at[1] === 5 ? { pid: 4242, owner: "Fake", layer: 0, wid: 1 } : req.at[0] >= 500 ? { pid: 999, owner: "NotificationCenter", layer: 23, wid: 9 } : req.at[1] < 30 ? { pid: 640, owner: "Window Server", layer: 24, wid: 1 } : { pid: 777, owner: "Other", layer: 0, wid: 5 };
     return say(o);
   }
   // the frontmost app ("Other") has one window whose center (600,200) lies under the banner (x >= 500)
@@ -651,6 +766,7 @@ if [ "$3" = "type" ] && [ "$IN" = "STRIPtext" ]; then echo "typed 9 chars (OCR s
 if [ "$3" = "type" ] && [ "$IN" = "AZERTY" ]; then echo "keyboard_layout: the Mac keyboard layout types \\"q\\" on the key that ⌘A is sent from (key code 0), so iPhone Mirroring would get ⌘Q — nothing was sent; switch the Mac to a QWERTY-style input source (U.S., ABC, Pinyin) and retry" >&2; exit 2; fi
 if [ "$3" = "scroll" ]; then echo "scrolled down 0.5"; exit 0; fi
 if [ "$3" = "open" ] && [ "$IN" = "NoSuchApp" ]; then echo "app not found: 'NoSuchApp' (Spotlight showed no Top Hit)"; exit 1; fi
+if [ "$3" = "tap" ] && [ "$5" = "0.03" ]; then echo "out_of_screen: (0.5,0.03) is on the iPhone Mirroring window's margin, not on the phone screen (x 0.029-0.971, y 0.061-0.987): a click there goes to the window's own controls or nowhere; nothing was sent" >&2; exit 2; fi
 if [[ "$*" == *"--expect=CapFail"* ]]; then echo "capture_failed: could not capture the iPhone Mirroring window to check --expect; no image was returned, so nothing was sent" >&2; exit 7; fi
 if [ "$3" = "status" ]; then
   printf 'Traceback (most recent call last):\\n  File "cli.py", line 1, in <module>\\nRuntimeError: synthetic boom\\n' >&2
@@ -671,6 +787,7 @@ echo "home gesture sent"
   const keyReqLog = join(dir, "key-req.jsonl");
   const s = await spawnServer({
     NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_AX_TIMEOUT_MS: "1500",
+    NORACU_NO_BGPOST: "1",  // 0.3.0: the fake engine's "Other" (pid 777) is a bgpost candidate — keep this section on the cliclick path it asserts
     NORACU_PYTHON: fakePy, NORACU_IMCTL_DIR: dir,
     NORACU_TEST_MENU_REPLY: menuReply, NORACU_TEST_MENU_REQ: menuReqLog, NORACU_TEST_KEY_REQ: keyReqLog,
   });
@@ -817,6 +934,11 @@ echo "home gesture sent"
     // R19: phone_open had already gone Home and searched Spotlight; a capture failure while checking --expect sent nothing
     const nf = await s.call("phone_open", { app: "NoSuchApp" });
     const cf = await s.call("phone_tap", { x: 0.5, y: 0.5, expect: "CapFail" });
+    // device run 2026-11-10: a tap aimed at the mirror window's margin is refused by imctl; the line passes through as it is
+    const oos = await s.call("phone_tap", { x: 0.5, y: 0.03 });
+    check("0.3.0（device run 2026-11-10）：phone_tap 落在镜像窗口边框上 → out_of_screen 原样透传，not_delivered / retry=safe",
+      oos?.isError && /^ERROR: out_of_screen: \(0\.5,0\.03\) is on the iPhone Mirroring window's margin/.test(say(oos)) && /delivery=not_delivered, retry=safe/.test(say(oos)),
+      say(oos).slice(0, 200));
     // device run 2026-11-06: a paste only the frame diff saw is reported unverified
     const tu = await s.call("phone_type", { text: "X" });
     check("B5/device：phone_type 只有画面变化、OCR 读不回 → delivered_unverified",
@@ -847,6 +969,207 @@ echo "home gesture sent"
     check("B5/t06：menu_item_absent 回退 imctl；find/open 文本经 stdin（argv 只有 `-- -`）；key 带 `--`；非导入异常报 imctl_error",
       !mhFb?.isError && /-m imctl\.cli home/.test(logAfter) && /find -- -\n/.test(logAfter) && /stdin:--exact/.test(logAfter) && /open -- -\n/.test(logAfter) && /stdin:-Settings/.test(logAfter) && !/cli (find|open) -- (--exact|-Settings)/.test(logAfter) && /key --expect=Home -- return/.test(logAfter) && /key --expect=--replace -- return/.test(logAfter) && psBoom?.isError && /imctl_error: RuntimeError: synthetic boom/.test(say(psBoom)) && !/imctl unavailable/.test(say(psBoom)),
       `${say(psBoom).slice(0, 60)} | log=${JSON.stringify(logAfter.trim())}`);
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 0.3.0 输入门（review CR1/CR2 + device run 2026-11-09，CI 安全）：
+//   stop file 在输入队列入口拦下所有 mac/phone 输入（含不发事件的语义路径）；
+//   审批按收到输入的 app 判（元素的 pid / 指定的 app / 点上最上层窗口的 app），不按前台；
+//   识别不出 app → 拒发；默认拒绝列表按 bundle id 生效（引擎给的是 bundle，不是 bundle_id）
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-gate-"));
+  const fake = join(dir, "fake-ax-engine");
+  writeFileSync(fake, FAKE_AX, { mode: 0o700 });
+  const clickLog = join(dir, "cliclick.log");
+  const fakeClick = join(dir, "cliclick");
+  writeFileSync(fakeClick, `#!/bin/bash\necho "$@" >> "${clickLog}"\n`, { mode: 0o700 });
+  const imctlLog = join(dir, "imctl.log");
+  const fakePy = join(dir, "python3");
+  writeFileSync(fakePy, `#!/bin/bash\nif [ "$1" = "-c" ]; then exit 0; fi\necho "$@" >> "${imctlLog}"\necho "tapped"\n`, { mode: 0o700 });
+  try { execFileSync(fake, [], { input: '{"op":"warm"}', timeout: 30000 }); } catch {}
+  try { execFileSync(fakeClick, ["warm"], { timeout: 30000 }); } catch {}
+  const opsLog = join(dir, "ops.log");
+  const stopFile = join(dir, "STOP");
+  const read = (f) => { try { return readFileSync(f, "utf8"); } catch { return ""; } };
+  const clear = () => { for (const f of [opsLog, clickLog, imctlLog]) writeFileSync(f, ""); };
+  const say = (r) => String(r?.content?.[0]?.text);
+  const ACTION_OPS = /^(act|set_value|insert_text|menu|key|paste|scroll_prep)$/m;
+  const env = { NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_AX_TIMEOUT_MS: "1500", NORACU_PYTHON: fakePy, NORACU_IMCTL_DIR: dir, NORACU_TEST_OPS: opsLog, NORACU_USER_IDLE_S: "0" };
+  const s = await spawnServer({ ...env, NORACU_STOP_FILE: stopFile, NORACU_NO_BGPOST: "1" });
+  try {
+    const idx = async (app) => jsonOf(await s.call("mac_ax_state", { app })).elements?.find((e) => e.title === "One")?.i;
+    const one = await idx("Fake");
+    writeFileSync(stopFile, "");
+    clear();
+    const calls = [
+      ["mac_click", { element_index: one }],                        // semantic AXPress: sends no event
+      ["mac_click", { element_index: one, mechanism: "physical" }],  // physical with bgpost off
+      ["mac_set_value", { element_index: one, value: "x" }],
+      ["mac_drag", { from_index: one, to_index: one }],
+      ["mac_type", { element_index: one, text: "hi" }],
+      ["mac_key", { key: "return" }],
+      ["mac_scroll", { element_index: one }],
+      ["phone_tap", { x: 0.5, y: 0.5 }],
+    ];
+    const rs = [];
+    for (const [n, a] of calls) rs.push([n, await s.call(n, a)]);
+    const stopped = rs.every(([, r]) => r?.isError && /^ERROR: user_stopped: /.test(say(r)) && /delivery=not_delivered, retry=safe/.test(say(r)));
+    check("0.3.0（CR1/CR2 T1）：stop file 存在时语义点击、物理点击（bgpost 关）、set_value、drag、type、key、scroll、phone_tap 全部 user_stopped；引擎、cliclick、imctl 一次都没被调用",
+      Number.isInteger(one) && stopped && read(opsLog) === "" && read(clickLog) === "" && read(imctlLog) === "",
+      rs.filter(([, r]) => !/user_stopped/.test(say(r))).map(([n, r]) => `${n}: ${say(r).slice(0, 80)}`).join(" | ") + ` | ops=${JSON.stringify(read(opsLog))} click=${JSON.stringify(read(clickLog))} imctl=${JSON.stringify(read(imctlLog))}`);
+    const obs = await s.call("mac_ax_state", { app: "Fake" });
+    check("0.3.0（T1）：stop file 不挡观察类工具", !obs?.isError && /snapshot_id/.test(say(obs)), say(obs).slice(0, 80));
+    // S4A-s14-grok-1: the browser's input tools stop too; its observation tools do not
+    const bs = [];
+    for (const [n, a] of [["browser_navigate", { url: "https://example.com" }], ["browser_click", { selector: "a" }], ["browser_type", { text: "x" }], ["browser_tabs", { action: "new" }]]) bs.push([n, await s.call(n, a)]);
+    const bList = await s.call("browser_tabs", { action: "list" });
+    check("S4A：stop file 存在时 browser 输入工具（navigate/click/type/tabs new）也 user_stopped；browser_tabs list 不受影响",
+      bs.every(([, r]) => r?.isError && /^ERROR: user_stopped: /.test(say(r))) && !/user_stopped/.test(say(bList)),
+      bs.map(([n, r]) => `${n}: ${say(r).slice(0, 50)}`).join(" | ") + ` | list: ${say(bList).slice(0, 50)}`);
+    rmSync(stopFile, { force: true });
+    // default deny list, by bundle id: Terminal is in the background (the frontmost app is "Other")
+    const tOne = await idx("Term");
+    const gOne = await idx("Ghost");
+    const pOne = await idx("Plain");
+    clear();
+    const nb = await s.call("mac_click", { element_index: pOne });
+    check("0.3.0（A0 Grok-2）：只有名字、读不到 bundle id 的 app（\"Plain\"）在默认拒绝列表生效时 → input_denied，不发",
+      nb?.isError && /^ERROR: input_denied: "Plain" has no readable bundle id/.test(say(nb)) && !ACTION_OPS.test(read(opsLog)), say(nb).slice(0, 120));
+    const d1 = await s.call("mac_click", { element_index: tOne });
+    const d2 = await s.call("mac_set_value", { element_index: tOne, value: "x" });
+    const g1 = await s.call("mac_click", { element_index: gOne });
+    const nr = await s.call("mac_menu_command", { app: "NotRunning", command: "File > Close" });
+    const ok1 = await s.call("mac_click", { x: 100, y: 100 });
+    check("0.3.0（device run 2026-11-09）：默认拒绝列表按 bundle id 生效 —— 后台的 Terminal（com.apple.Terminal）的语义点击、set_value 都 input_denied；识别不出 app → input_denied（fail closed）；没在运行的 app → app_not_found；点在前台 Other 窗口上的 x,y 照常发送",
+      d1?.isError && /^ERROR: input_denied: "Terminal" — denied by .*com\.apple\.Terminal/.test(say(d1)) && d2?.isError && /input_denied: "Terminal"/.test(say(d2))
+        && g1?.isError && /^ERROR: input_denied: could not identify the app of pid 31337/.test(say(g1)) && /fail closed/.test(say(g1))
+        && nr?.isError && /^ERROR: app_not_found: "NotRunning" is not running/.test(say(nr))
+        && !ok1?.isError && /c:100,100/.test(read(clickLog)) && !ACTION_OPS.test(read(opsLog)),
+      [d1, d2, g1, nr, ok1].map((r) => say(r).slice(0, 90)).join(" | ") + ` | ops=${JSON.stringify(read(opsLog).trim().split("\n").join(","))}`);
+  } finally { s.proc.kill(); }
+  // an explicit deny list: the target app is judged, not the frontmost one
+  const s2 = await spawnServer({ ...env, NORACU_DENY_APPS: "test.fake,com.apple.finder", NORACU_NO_BGPOST: "1" });
+  try {
+    const one = jsonOf(await s2.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
+    clear();
+    const rs = [
+      await s2.call("mac_set_value", { element_index: one, value: "x" }),
+      await s2.call("mac_click", { element_index: one }),
+      await s2.call("mac_drag", { from_index: one, to_index: one }),
+      await s2.call("mac_menu_command", { app: "Fake", command: "File > Close" }),
+      await s2.call("mac_type", { element_index: one, text: "hello" }),
+    ];
+    const ok1 = await s2.call("mac_click", { x: 100, y: 100 });
+    const ok2 = await s2.call("mac_key", { key: "shift-z" });
+    const dk = await s2.call("mac_click", { x: 300, y: 300, force: true });
+    check("0.3.0（A0 Grok-1）：force 点在空桌面上 → 按 Finder 判（这里 Finder 被拒）→ input_denied，不按前台 app 放行",
+      dk?.isError && /^ERROR: input_denied: "Finder" — denied by NORACU_DENY_APPS \("com\.apple\.finder"\)/.test(say(dk)) && !/c:300,300/.test(read(clickLog)), say(dk).slice(0, 140));
+    check("0.3.0（CR1/CR2 T1）：审批按目标 app 判 —— 前台 Other 允许，后台被拒的 Fake（test.fake）的 set_value、语义点击、drag、菜单命令、type 都 input_denied 且没有动作请求；Other 上的 x,y 点击与按键照常",
+      rs.every((r) => r?.isError && /^ERROR: input_denied: "Fake" — denied by NORACU_DENY_APPS \("test\.fake"\)/.test(say(r))) && !ACTION_OPS.test(read(opsLog))
+        && !ok1?.isError && !ok2?.isError && /c:100,100/.test(read(clickLog)) && /kd:shift t:z ku:shift/.test(read(clickLog)),
+      [...rs, ok1, ok2].map((r) => say(r).slice(0, 80)).join(" | ") + ` | ops=${JSON.stringify(read(opsLog).trim().split("\n").join(","))} click=${JSON.stringify(read(clickLog))}`);
+  } finally { s2.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 0.3.0 screenshot_id（review CR1/CR2 T2，CI 安全）：截图像素 → 窗口原点 + 像素 ÷ 窗口所在屏的 scale；越界 invalid_args；
+// 缓存满了只淘汰最旧的。假引擎的窗口 5 属于 Other（pid 777），bounds [400,100,400,200]；假 screencapture 写出 800×400 的 PNG 头
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-shot-"));
+  const fake = join(dir, "fake-ax-engine");
+  writeFileSync(fake, FAKE_AX, { mode: 0o700 });
+  const clickLog = join(dir, "cliclick.log");
+  const fakeClick = join(dir, "cliclick");
+  writeFileSync(fakeClick, `#!/bin/bash\necho "$@" >> "${clickLog}"\n`, { mode: 0o700 });
+  const fakeCap = join(dir, "screencapture");
+  writeFileSync(fakeCap, `#!/usr/bin/env node
+const b = Buffer.alloc(33); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(b, 0); b.writeUInt32BE(13, 8); b.write("IHDR", 12, "ascii");
+b.writeUInt32BE(800, 16); b.writeUInt32BE(400, 20);
+require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
+`, { mode: 0o700 });
+  for (const f of [fake, fakeClick, fakeCap]) { try { execFileSync(f, f === fake ? [] : [join(dir, "warm.png")], { input: '{"op":"warm"}', timeout: 30000 }); } catch {} }
+  const read = (f) => { try { return readFileSync(f, "utf8"); } catch { return ""; } };
+  const say = (r) => String(r?.content?.[0]?.text);
+  const metaOf = (r) => { try { return JSON.parse(r?.content?.find((c) => c.type === "text")?.text || "{}"); } catch { return {}; } };
+  const s = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_SCREENCAPTURE: fakeCap, NORACU_AX_TIMEOUT_MS: "1500", NORACU_USER_IDLE_S: "0", NORACU_NO_BGPOST: "1" });
+  try {
+    const shots = [];
+    for (let i = 0; i < 34; i++) shots.push(metaOf(await s.call("mac_screenshot", { window_id: 5 })));
+    const m = shots[shots.length - 1];
+    writeFileSync(clickLog, "");
+    const c1 = await s.call("mac_click", { screenshot_id: m.screenshot_id, x: 100, y: 100 });
+    const c2 = await s.call("mac_click", { screenshot_id: m.screenshot_id, x: 2000, y: 100 });
+    const c3 = await s.call("mac_click", { screenshot_id: shots[2].screenshot_id, x: 10, y: 20 });
+    const c4 = await s.call("mac_click", { screenshot_id: shots[0].screenshot_id, x: 10, y: 20 });
+    const c5 = await s.call("mac_click", { screenshot_id: m.screenshot_id, x: 20, y: 20 });
+    const c6 = await s.call("mac_click", { screenshot_id: m.screenshot_id, x: 799, y: 399, force: true });
+    check("0.3.0（A0 Gemini-1/5）：截图窗口被同一 app 的另一个窗口盖住 → occluded，不发；最右下的像素 799,399 → 落在窗口内 799,299（不四舍五入出界）",
+      c5?.isError && /^ERROR: occluded: 410,110 is covered by another window of "Other" \(window 6\), not the screenshot's window 5/.test(say(c5)) && !/c:410,110/.test(read(clickLog))
+        && !c6?.isError && /c:799,299/.test(read(clickLog)),
+      `${say(c5).slice(0, 130)} | ${say(c6).slice(0, 80)} | click=${JSON.stringify(read(clickLog))}`);
+    check("0.3.0（CR1/CR2 T2）：screenshot_id 点击加上窗口原点（像素 100,100 @2x → 点 450,150）；超出截图 → invalid_args 不发；scale 按窗口算；缓存满了只淘汰最旧的（第 3 张仍有效，第 1 张失效）",
+      m.scale === 2 && JSON.stringify(m.logical_size) === "[400,200]" && !c1?.isError && /@ 450,150/.test(say(c1)) && /c:450,150/.test(read(clickLog))
+        && c2?.isError && /^ERROR: invalid_args: 2000,100 is outside the screenshot \(800×400 pixels\)/.test(say(c2)) && !/c:1400/.test(read(clickLog))
+        && !c3?.isError && /c:405,110/.test(read(clickLog)) && c4?.isError && /^ERROR: stale: screenshot_id/.test(say(c4)),
+      [JSON.stringify({ scale: m.scale, ls: m.logical_size, id: m.screenshot_id }), say(c1).slice(0, 90), say(c2).slice(0, 90), say(c3).slice(0, 60), say(c4).slice(0, 60), `click=${JSON.stringify(read(clickLog))}`].join(" | "));
+    // review CR1/CR2 T4/T5: the new arguments are validated; a drag whose waits exceed 10 s sends nothing
+    const one = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
+    const four = jsonOf(await s.call("mac_find", { app: "Fake", role: "button" })).matches?.find((e) => e.title === "Four")?.i;
+    writeFileSync(clickLog, "");
+    const v = [
+      await s.call("mac_click", { screenshot_id: 12345, x: 1, y: 1 }),
+      await s.call("mac_click", { element_index: one, screenshot_id: m.screenshot_id }),
+      await s.call("mac_click", { screenshot_id: m.screenshot_id, x: 1, y: 1, app: "Other" }),
+      await s.call("mac_drag", { from_index: one, to_index: four, hold_ms: 2500 }),
+      await s.call("mac_drag", { from_index: one, to_index: four, step_ms: 0 }),
+      await s.call("mac_drag", { from_index: one, to_index: four, hold_ms: 1.5 }),
+    ];
+    const long = await s.call("mac_drag", { from_index: one, to_index: four, step_ms: 500 });
+    check("0.3.0（CR1/CR2 T4/T5）：screenshot_id 类型、与 element_index / app 同传、hold_ms / step_ms 越界或非整数 → 参数错误；holds + steps 超过 10 s 的拖动 → invalid_args，一个事件都不发",
+      /screenshot_id must be the id string/.test(say(v[0])) && /cannot be combined with element_index/.test(say(v[1])) && /leave app out/.test(say(v[2]))
+        && /hold_ms must be an integer 0-2000/.test(say(v[3])) && /step_ms must be an integer 1-500/.test(say(v[4])) && /hold_ms must be an integer 0-2000/.test(say(v[5]))
+        && v.every((r) => r?.isError && /delivery=not_delivered, retry=safe/.test(say(r)))
+        && long?.isError && /^ERROR: invalid_args: this drag would wait 17000 ms \(hold 0 ms \+ 34 steps of 500 ms/.test(say(long)) && read(clickLog) === "",
+      [...v, long].map((r) => say(r).slice(0, 70)).join(" | ") + ` | click=${JSON.stringify(read(clickLog))}`);
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 0.3.0 bgpost（review CR1/CR2 T3，CI 安全）：只有确定什么都没发出（脚本在建事件前就拒绝：bad-pid）才改走真实指针，
+// 结果写明 route；mechanism physical 一律走真实指针（不试 bgpost）。"Neg" 的 pid 是 -7：真 osascript 跑 bgpost 脚本，返回 bad-pid，不发任何事件
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-bg-"));
+  const fake = join(dir, "fake-ax-engine");
+  writeFileSync(fake, FAKE_AX, { mode: 0o700 });
+  const clickLog = join(dir, "cliclick.log");
+  const fakeClick = join(dir, "cliclick");
+  writeFileSync(fakeClick, `#!/bin/bash\necho "$@" >> "${clickLog}"\n`, { mode: 0o700 });
+  for (const f of [fake, fakeClick]) { try { execFileSync(f, [], { input: '{"op":"warm"}', timeout: 30000 }); } catch {} }
+  const read = (f) => { try { return readFileSync(f, "utf8"); } catch { return ""; } };
+  const say = (r) => String(r?.content?.[0]?.text);
+  const env = { ...process.env, NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "0" };
+  delete env.NORACU_NO_BGPOST;
+  const s = await spawnServer({ ...env, NORACU_NO_BGPOST: "" });
+  try {
+    const one = jsonOf(await s.call("mac_ax_state", { app: "Neg" })).elements?.find((e) => e.title === "One")?.i;
+    writeFileSync(clickLog, "");
+    const b1 = await s.call("mac_click", { element_index: one, count: 2 });
+    const after1 = read(clickLog);
+    const b2 = await s.call("mac_click", { element_index: one, count: 2, mechanism: "physical" });
+    check("0.3.0（CR1/CR2 T3）：bgpost 确定没发出（bad-pid）→ 改走真实指针，route 写明；mechanism physical 直接走真实指针",
+      !b1?.isError && /\(route: cliclick \(bgpost not posted\)\)/.test(say(b1)) && /^dc:6,6$/m.test(after1)
+        && !b2?.isError && /\(route: cliclick\)/.test(say(b2)) && !/bgpost not posted/.test(say(b2)),
+      `${say(b1).slice(-120)} | ${say(b2).slice(-80)} | click=${JSON.stringify(read(clickLog))}`);
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
@@ -891,16 +1214,22 @@ echo "home gesture sent"
   }
   // SIGTERM with a browser open: the browser is closed (profile unlocked) and the server exits in time
   {
+    const { homedir } = await import("node:os");
+    const { readlinkSync } = await import("node:fs");
+    const lock = new URL(`file://${homedir()}/.noracu/browser-profile/SingletonLock`).pathname;
+    // a lock left by a browser that is gone (a crash, another noracu killed) is not this test's: only a lock that
+    // was not there before the launch, or now names another process, counts (2026-11-14: a stale lock from 05:20)
+    const lockTarget = () => { try { return readlinkSync(lock); } catch { return null; } };
+    const before = lockTarget();
     const s = await spawnServer();
     const bl = await s.call("browser_launch", { headless: true });
     const t0 = Date.now();
     s.proc.kill("SIGTERM");
     const done = await Promise.race([exited(s.proc), sleepMs(6000).then(() => false)]);
-    const { homedir } = await import("node:os");
-    const lock = new URL(`file://${homedir()}/.noracu/browser-profile/SingletonLock`).pathname;
-    let locked = false; try { (await import("node:fs")).lstatSync(lock); locked = true; } catch { /* no lock */ }
+    const after = lockTarget();
+    const locked = after !== null && after !== before;
     check("B6：开着浏览器收到 SIGTERM → 关闭浏览器（profile 解锁）并在 3 s 内退出",
-      /browser_id/.test(String(bl?.content?.[0]?.text)) && done === true && Date.now() - t0 < 4000 && !locked, `exit after ${Date.now() - t0} ms, lock=${locked}, launch=${String(bl?.content?.[0]?.text).slice(0, 40)}`);
+      /browser_id/.test(String(bl?.content?.[0]?.text)) && done === true && Date.now() - t0 < 4000 && !locked, `exit after ${Date.now() - t0} ms, lock=${locked}${before ? ` (a lock was there before: ${before})` : ""}, launch=${String(bl?.content?.[0]?.text).slice(0, 40)}`);
     if (!done) s.proc.kill("SIGKILL");
   }
   // an observation waits for the input queued before it, and ping is answered while that input runs
@@ -919,6 +1248,8 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
   const base = { ok: true, app: "Fake", bundle_id: "test.fake", pid: 4242, surface: "window", complete: true, visited: 1, ms: 1, container: { kind: "window", wid: 1, title: "W", subrole: "", frame: [0, 0, 100, 100], n: 0 } };
   const note = (x) => fs.appendFileSync(${JSON.stringify(log)}, x + "\\n");
   if (req.op === "snapshot") { note("snapshot"); return say({ ...base, nodes: [node] }); }
+  // 0.3.0: every input first asks which app receives it (the approval check)
+  if (req.op === "frontmost") return say({ ok: true, front: { pid: 4242, name: "Fake", bundle: "test.fake" }, target: { pid: 4242, name: "Fake", bundle: "test.fake" }, match: true });
   if (req.op === "find") { const quick = req.text === "quick"; setTimeout(() => { note("find"); say({ ...base, nodes: [{ ...node, fp: { ...node.fp, name: "Fast" }, title: "Fast" }] }); }, quick ? 0 : 2500); return; }
   if (req.op === "act") { const fast = req.target.fp.name === "Fast"; setTimeout(() => { note(fast ? "act-fast" : "act"); say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["value"], surfaces: [], mechanism: "semantic", action: "AXPress", how: "path", role: "AXButton", title: req.target.fp.name }); }, fast ? 0 : 1200); return; }
   say({ ok: false, code: "INVALID_ARGS", message: "fake: " + req.op });
@@ -954,6 +1285,20 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
 // 7. browser_launch + navigate + snapshot + read（Browser 层）
 const bl = await call("browser_launch", { headless: true });
 check("browser_launch", bl?.content?.[0]?.text?.includes("browser_id"), bl?.content?.[0]?.text?.slice(0, 50));
+{
+  // pre-review P7: the blank tab browser_launch started with may be the active page — it takes over again when
+  // the active tab is closed (a blank tab that a page opened may not; see 7a)
+  const T = (r) => String(r?.content?.[0]?.text);
+  // pre-review P12: the first tab is not judged from inside — noracu sends it to about:blank itself at launch
+  const r0 = await call("browser_read");
+  check("the session's first tab, sent to about:blank by noracu at launch, is the blank page the session was opened on: it is read", !r0?.isError, T(r0).slice(0, 80));
+  const t0 = JSON.parse(T(await call("browser_tabs"))).tabs;
+  const n0 = await call("browser_tabs", { action: "new", url: "https://example.com" });
+  const own0 = JSON.parse(T(await call("browser_tabs"))).tabs.find((t) => t.opened_by_browser_tabs);
+  const c0 = await call("browser_tabs", { action: "close", tab_id: own0?.tab_id });
+  check("browser_tabs: the blank tab the browser started with takes over when the active tab is closed",
+    t0.length === 1 && t0[0].url === "about:blank" && !n0?.isError && !c0?.isError && T(c0).includes(`the active page is tab ${t0[0].tab_id} (about:blank)`), T(c0).slice(0, 110));
+}
 const bn = await call("browser_navigate", { url: "https://example.com" });
 check("browser_navigate", bn?.content?.[0]?.text?.includes("example.com") && /HTTP \d+/.test(String(bn?.content?.[0]?.text)) && /delivery=/.test(String(bn?.content?.[0]?.text)), bn?.content?.[0]?.text?.slice(0, 80));
 const bs = await call("browser_snapshot");
@@ -972,6 +1317,330 @@ if (mIdx) {
 }
 const badIdx2 = await call("browser_click", { element_index: 99999 });
 check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx2?.content?.[0]?.text).includes("invalid_element_index") || String(badIdx2?.content?.[0]?.text).includes("element_no_longer_valid")), badIdx2?.content?.[0]?.text?.slice(0, 70));
+// 7a. browser_tabs (0.3.0): list / new / select / close; a tab the page opens is listed, not followed, not closed
+{
+  const T = (r) => String(r?.content?.[0]?.text);
+  const tabs = async () => JSON.parse(T(await call("browser_tabs"))).tabs;
+  const waitTab = async (pred) => { for (let i = 0; i < 40; i++) { const t = (await tabs()).find(pred); if (t) return t; await new Promise((r) => setTimeout(r, 250)); } return null; };
+  const t1 = await tabs();
+  const first = t1[0];
+  check("browser_tabs list: one tab, active, not opened by browser_tabs", t1.length === 1 && first.active === true && first.opened_by_browser_tabs === false && /^t\d+$/.test(first.tab_id), JSON.stringify(t1).slice(0, 160));
+  const tn = await call("browser_tabs", { action: "new", url: "https://example.com" });
+  const t2 = await tabs();
+  const mine = t2.find((t) => t.opened_by_browser_tabs);
+  check("browser_tabs new: the tab opens, loads the url and is the active page", !tn?.isError && /^opened tab t\d+: https:\/\/example\.com/.test(T(tn)) && T(tn).includes("delivery=delivered_verified") && t2.length === 2 && mine?.active === true && t2.find((t) => t.tab_id === first.tab_id)?.active === false, T(tn).slice(0, 120));
+  await call("browser_snapshot");
+  const tsel = await call("browser_tabs", { action: "select", tab_id: first.tab_id });
+  const stale = await call("browser_click", { element_index: 0 });
+  check("browser_tabs select: the first tab is the active page again; an element_index from before no longer applies", !tsel?.isError && T(tsel).includes(`tab ${first.tab_id} is the active page now`) && stale?.isError && T(stale).includes("element_no_longer_valid"), `${T(tsel).slice(0, 70)} | ${T(stale).slice(0, 70)}`);
+  await call("browser_evaluate", { js: "window.open('about:blank'); 1" });
+  const t3 = await tabs();
+  const popup = t3.find((t) => t.tab_id !== first.tab_id && t.tab_id !== mine?.tab_id);
+  const notOwned = popup ? await call("browser_tabs", { action: "close", tab_id: popup.tab_id }) : null;
+  check("a tab the page opened: listed, not followed, not closed (tab_not_owned)", t3.length === 3 && t3.find((t) => t.active)?.tab_id === first.tab_id && popup?.opened_by_browser_tabs === false && notOwned?.isError === true && T(notOwned).includes("tab_not_owned") && T(notOwned).includes("delivery=not_delivered"), T(notOwned).slice(0, 120));
+  const tclose = await call("browser_tabs", { action: "close", tab_id: mine?.tab_id });
+  const t4 = await tabs();
+  check("browser_tabs close: a tab it opened is closed; the active page stays", !tclose?.isError && T(tclose).includes(`closed tab ${mine?.tab_id}`) && t4.length === 2 && t4.find((t) => t.active)?.tab_id === first.tab_id, T(tclose).slice(0, 120));
+  // pre-review P6 — the active tab is the one closed: the first open tab takes its place and the result names it
+  await call("browser_tabs", { action: "new" });
+  const own2 = (await tabs()).find((t) => t.opened_by_browser_tabs);
+  await call("browser_snapshot");
+  const cl2 = await call("browser_tabs", { action: "close", tab_id: own2?.tab_id });
+  const stale2 = await call("browser_click", { element_index: 0 });
+  check("browser_tabs close on the active tab: the first open tab is the active page, the result says so, and an element_index read on the closed tab is refused",
+    own2?.active === true && !cl2?.isError && T(cl2).includes(`the active page is tab ${first.tab_id} (`) && (await tabs()).find((t) => t.active)?.tab_id === first.tab_id && stale2?.isError === true && T(stale2).includes("element_no_longer_valid"), `${T(cl2).slice(0, 110)} | ${T(stale2).slice(0, 50)}`);
+  // the active page closes itself (a tab the page opened may), then another tab is closed: the active page is
+  // the first open tab — never "none" while a tab is open
+  // (pre-review P7) a blank tab that the page opened shares that page's origin and can read it: listed, never
+  // selected. A web page the page opened can be selected — and, opened by a script, it can close itself
+  const selBlank = await call("browser_tabs", { action: "select", tab_id: popup?.tab_id });
+  check("browser_tabs select: a blank tab that the page opened is not made the active page (tab_not_selectable)",
+    popup?.url === "about:blank" && selBlank?.isError === true && T(selBlank).includes("tab_not_selectable") && T(selBlank).includes("delivery=not_delivered") && (await tabs()).find((t) => t.active)?.tab_id === first.tab_id, T(selBlank).slice(0, 130));
+  await call("browser_evaluate", { js: "window.open(location.href); 1" });
+  const twin = await waitTab((t) => t.tab_id !== first.tab_id && t.tab_id !== popup?.tab_id && !t.opened_by_browser_tabs && /^https?:/.test(String(t.url)));
+  await call("browser_tabs", { action: "new" });
+  const own3 = (await tabs()).find((t) => t.opened_by_browser_tabs);
+  const selPopup = await call("browser_tabs", { action: "select", tab_id: twin?.tab_id });
+  await call("browser_snapshot");
+  await call("browser_evaluate", { js: "window.close(); 1" });
+  await new Promise((r) => setTimeout(r, 500));
+  const cl3 = await call("browser_tabs", { action: "close", tab_id: own3?.tab_id });
+  const left = await tabs();
+  const stale3 = await call("browser_click", { element_index: 0 });
+  check("the active page closed itself and another tab is closed after it: the result names the first open tab as the active page, and an element_index read on the tab that is gone is refused",
+    Boolean(twin) && !selPopup?.isError && !cl3?.isError && T(cl3).includes(`the active page is tab ${first.tab_id} (`) && left.length === 2 && !left.some((t) => t.tab_id === twin?.tab_id) && left.find((t) => t.active)?.tab_id === first.tab_id && stale3?.isError === true && T(stale3).includes("element_no_longer_valid"), `${T(cl3).slice(0, 110)} | ${JSON.stringify(left).slice(0, 90)}`);
+  // select takes only a tab on an http(s) page or about:blank: a blob: tab the page opened is listed, not read
+  await call("browser_evaluate", { js: "window.open(URL.createObjectURL(new Blob(['<title>b</title><p>blob</p>'], { type: 'text/html' }))); 1" });
+  const blob = await waitTab((t) => String(t.url).startsWith("blob:"));
+  const selBlob = blob ? await call("browser_tabs", { action: "select", tab_id: blob.tab_id }) : null;
+  check("browser_tabs select: a tab that shows neither an http(s) page nor about:blank is listed and not made the active page (tab_not_selectable)",
+    Boolean(blob) && selBlob?.isError === true && T(selBlob).includes("tab_not_selectable") && T(selBlob).includes("delivery=not_delivered") && (await tabs()).find((t) => t.active)?.tab_id === first.tab_id, T(selBlob).slice(0, 130));
+  // list: a page that does not answer has title null — not the empty title of a page that has none
+  await call("browser_tabs", { action: "new" });
+  const own4 = (await tabs()).find((t) => t.opened_by_browser_tabs);
+  await call("browser_evaluate", { js: "setTimeout(() => { for (;;) {} }, 50); 1" });
+  await new Promise((r) => setTimeout(r, 400));
+  const withHung = await tabs();
+  const cl4 = await call("browser_tabs", { action: "close", tab_id: own4?.tab_id });
+  check("browser_tabs list: a tab whose page does not answer has title null, the others keep theirs, and it can still be closed",
+    withHung.find((t) => t.tab_id === own4?.tab_id)?.title === null && typeof withHung.find((t) => t.tab_id === first.tab_id)?.title === "string" && !cl4?.isError && T(cl4).includes(`closed tab ${own4?.tab_id}`) && T(cl4).includes(`the active page is tab ${first.tab_id} (`), `${JSON.stringify(withHung).slice(0, 150)} | ${T(cl4).slice(0, 80)}`);
+  // pre-review P7 — the tab that takes over when the active tab goes is never one select would refuse. With the
+  // first tab on a blob: page (beside the blank popup and the blob popup), closing the active tab leaves no
+  // active page: the page tools say so and read nothing, and browser_tabs still lists, refuses, and opens a tab
+  await call("browser_evaluate", { js: "location.href = URL.createObjectURL(new Blob(['<title>t1b</title><p>FIRST-TAB-BLOB</p>'], { type: 'text/html' })); 1" });
+  const firstBlob = await waitTab((t) => t.tab_id === first.tab_id && String(t.url).startsWith("blob:"));
+  await call("browser_tabs", { action: "new" });
+  const own5 = (await tabs()).find((t) => t.opened_by_browser_tabs);
+  const cl5 = await call("browser_tabs", { action: "close", tab_id: own5?.tab_id });
+  const read5 = await call("browser_read");
+  const snap5 = await call("browser_snapshot");
+  const list5 = await tabs();
+  const sel5 = await call("browser_tabs", { action: "select", tab_id: first.tab_id });
+  check("the active tab is closed and every tab left is one select would refuse: there is no active page — the result says none, browser_read and browser_snapshot return no_active_page and none of the page, the tabs are still listed and still not selectable",
+    Boolean(firstBlob) && own5?.active === true && !cl5?.isError && T(cl5).includes("the active page is none") && read5?.isError === true && T(read5).includes("no_active_page") && !T(read5).includes("FIRST-TAB-BLOB")
+    && snap5?.isError === true && T(snap5).includes("no_active_page") && list5.length === 3 && list5.every((t) => t.active === false) && sel5?.isError === true && T(sel5).includes("tab_not_selectable"), `${T(cl5).slice(0, 80)} | ${T(read5).slice(0, 80)} | ${JSON.stringify(list5.map((t) => [t.tab_id, String(t.url).slice(0, 12), t.active]))}`);
+  const new5 = await call("browser_tabs", { action: "new", url: "https://example.com" });
+  const read6 = await call("browser_read");
+  check("… and browser_tabs new gives the session an active page again", !new5?.isError && T(new5).includes("it is the active page now") && !read6?.isError && T(read6).toLowerCase().includes("example"), `${T(new5).slice(0, 80)} | ${T(read6).slice(0, 40)}`);
+  // pre-review P8 — what a tab must show to become the active page it must show to be read: the active tab takes
+  // itself to a blob it made (a page can; a local file or chrome:// it cannot reach — measured). It stays the
+  // active page, every page tool but browser_navigate refuses with nothing read and nothing sent (the blob page
+  // would retitle itself on any input), and browser_navigate takes the tab back to a page
+  await call("browser_snapshot");
+  await call("browser_evaluate", { js: "location.href = URL.createObjectURL(new Blob(['<title>quiet</title><p>ACTIVE-TAB-BLOB</p><script>for (const e of [`click`, `keydown`, `wheel`, `mousemove`]) addEventListener(e, () => { document.title = `GOT-INPUT`; });</script>'], { type: 'text/html' })); 1" });
+  const own6 = await waitTab((t) => t.active && String(t.url).startsWith("blob:"));
+  const refused = [await call("browser_read"), await call("browser_snapshot"), await call("browser_screenshot"), await call("browser_click", { xy: [20, 20] }), await call("browser_click", { element_index: 0 }), await call("browser_evaluate", { js: "document.body.innerText" }),
+    await call("browser_type", { text: "x" }), await call("browser_press_key", { key: "Tab" }), await call("browser_fill", { selector: "input", value: "x" }), await call("browser_scroll", {})];
+  const after6 = (await tabs()).find((t) => t.active);
+  check("the active tab took itself to a blob: it stays the active page and every page tool but browser_navigate returns active_page_not_allowed — nothing of the page read, nothing sent to it",
+    Boolean(own6) && refused.every((r) => r?.isError === true && T(r).startsWith(`ERROR: active_page_not_allowed: the active tab ${own6?.tab_id} shows blob:`) && T(r).endsWith("(delivery=not_delivered, retry=safe)") && !T(r).includes("ACTIVE-TAB-BLOB")) && after6?.tab_id === own6?.tab_id && after6?.title === "quiet",
+    `${T(refused[0]).slice(0, 150)} | ${refused.map((r) => (r?.isError ? "E" : "ok")).join("")} | ${JSON.stringify(after6).slice(0, 100)}`);
+  const nav6 = await call("browser_navigate", { url: "https://example.com" });
+  const read7 = await call("browser_read");
+  check("… and browser_navigate takes that tab to an http(s) page, where the page tools work again", !nav6?.isError && T(nav6).includes("navigated: https://example.com") && !read7?.isError && T(read7).toLowerCase().includes("example"), `${T(nav6).slice(0, 80)} | ${T(read7).slice(0, 40)}`);
+  // … the same after a load that fails (a port nothing listens on): Chromium's own page for that is not a page
+  // the tools read — the result says a load failed — and browser_navigate still works on the tab
+  const deadPort = await new Promise((r) => { import("node:net").then(({ createServer }) => { const sv = createServer(); sv.listen(0, "127.0.0.1", () => { const p = sv.address().port; sv.close(() => r(p)); }); }); });
+  const navDead = await call("browser_navigate", { url: `http://127.0.0.1:${deadPort}/` });
+  const snapDead = await call("browser_snapshot");   // with no pause: see the check after this one
+  // the tab's address turns to chrome-error:// a moment after the navigation is reported as failed (measured:
+  // up to ~30 ms, during which the tab is still listed at its old address): wait for it, then read
+  const errTab = await waitTab((t) => t.active && String(t.url).startsWith("chrome-error:"));
+  const readDead = await call("browser_read");
+  const navBack = await call("browser_navigate", { url: "https://example.com" });
+  check("a load that failed: browser_navigate says navigate_failed, the page tools return active_page_not_allowed and name a load that failed, and browser_navigate works on the tab again",
+    navDead?.isError === true && T(navDead).includes("navigate_failed") && Boolean(errTab) && readDead?.isError === true && T(readDead).startsWith(`ERROR: active_page_not_allowed: the active tab ${own6?.tab_id} shows chrome-error://chromewebdata/ (a load that failed) — `) && T(readDead).endsWith("(delivery=not_delivered, retry=safe)") && !navBack?.isError && T(navBack).includes("navigated: https://example.com"),
+    `${T(navDead).slice(0, 70)} | ${T(readDead).slice(0, 110)} | ${T(navBack).slice(0, 40)}`);
+  // pre-review P10 — in the moment after the failed load the tab's address still reads as the old one, and a
+  // snapshot or a screenshot taken then would be of the page that is arriving (measured: the check at the start
+  // of the call passed 60 times out of 60). Each is asked for with no pause, and neither is handed over
+  const navDead2 = await call("browser_navigate", { url: `http://127.0.0.1:${deadPort}/` });
+  const shotDead = await call("browser_screenshot");
+  await waitTab((t) => t.active && String(t.url).startsWith("chrome-error:"));
+  const navBack2 = await call("browser_navigate", { url: "https://example.com" });
+  check("right after a load that failed, with no pause: browser_snapshot and browser_screenshot are not answered from the page that is arriving",
+    snapDead?.isError === true && !T(snapDead).includes("[clickable elements") && navDead2?.isError === true && shotDead?.isError === true && shotDead?.content?.[0]?.type === "text" && !navBack2?.isError && T(navBack2).includes("navigated: https://example.com"),
+    `${T(snapDead).slice(0, 120)} | ${T(shotDead).slice(0, 120)}`);
+  // pre-review P8 — the active tab closes itself and the very next call is a click by element_index (no
+  // browser_tabs call in between): the index is refused, and the tab that took over — the same page, the same
+  // element in the same place — is not clicked
+  await call("browser_evaluate", { js: "window.open(location.href); 1" });
+  const twin2 = await waitTab((t) => t.tab_id !== own6?.tab_id && t.tab_id !== first.tab_id && !t.opened_by_browser_tabs && /^https?:/.test(String(t.url)));
+  const sel7 = await call("browser_tabs", { action: "select", tab_id: twin2?.tab_id });
+  // the twin's address is set the moment window.open returns, before its page has loaded: snapshot until the link
+  // is there (seen twice on 2026-11-14 — a snapshot of the half-loaded twin had no link, and the check failed on that)
+  let link7 = null;
+  for (let i = 0; i < 20 && !link7; i++) { link7 = T(await call("browser_snapshot")).match(/\[(\d+)\] a "/); if (!link7) await new Promise((r) => setTimeout(r, 250)); }
+  await call("browser_evaluate", { js: "window.close(); 1" });
+  await new Promise((r) => setTimeout(r, 800));
+  const stale7 = await call("browser_click", { element_index: link7 ? parseInt(link7[1]) : 0 });
+  await new Promise((r) => setTimeout(r, 500));
+  const now7 = await tabs();
+  check("the active tab closed itself and the next call is browser_click with an element_index read on it: refused (element_no_longer_valid), and the tab that took over — on the same page — was not clicked",
+    Boolean(twin2) && !sel7?.isError && Boolean(link7) && stale7?.isError === true && T(stale7).includes("element_no_longer_valid") && T(stale7).includes("delivery=not_delivered") && !now7.some((t) => t.tab_id === twin2?.tab_id)
+    && now7.find((t) => t.active)?.tab_id === own6?.tab_id && /^https:\/\/example\.com\/?$/.test(String(now7.find((t) => t.active)?.url)), `${T(stale7).slice(0, 110)} | ${JSON.stringify(now7.map((t) => [t.tab_id, String(t.url).slice(0, 24), t.active]))}`);
+  // pre-review P10 — what a read returns is handed over only if the active page still passes when the read is
+  // done: the page goes to a blob it made half a second after a read that waits for a selector has started, and
+  // the selector exists only on the blob — the read is answered by the blob page and must not be returned
+  await call("browser_evaluate", { js: "setTimeout(() => { location.href = URL.createObjectURL(new Blob(['<title>late</title><p id=late>LATE-BLOB-TEXT</p>'], { type: 'text/html' })); }, 500); 1" });
+  const late10 = await call("browser_read", { selector: "#late" });
+  const nav10 = await call("browser_navigate", { url: "https://example.com" });
+  check("a read that was answered by a page the tools refuse (the tab changed while it waited for a selector) is not handed over: active_page_not_allowed, none of that page's text",
+    late10?.isError === true && T(late10).startsWith(`ERROR: active_page_not_allowed: the active tab ${own6?.tab_id} shows blob:`) && T(late10).includes("it changed while the page was being read, and what came back is not handed over") && !T(late10).includes("LATE-BLOB-TEXT") && !nav10?.isError,
+    `${T(late10).slice(0, 200)} | ${T(nav10).slice(0, 40)}`);
+  // pre-review P11 — the second look also asks where the tab has been, not only what it shows at the end: while a
+  // read waits for a selector the page goes to a blob and from there back to an http page that has the element.
+  // The tab ends on a page the tools read, and which page answered is not known — the read is not handed over
+  await call("browser_evaluate", { js: "document.querySelectorAll('a').forEach((x) => x.remove()); setTimeout(() => { location.href = URL.createObjectURL(new Blob(['<title>via</title><script>setTimeout(() => { location.href = `https://example.com/`; }, 60);</script>'], { type: 'text/html' })); }, 400); 1" });
+  const via11 = await call("browser_read", { selector: "a" });
+  const back11 = await waitTab((t) => t.active && /^https:\/\/example\.com\/?$/.test(String(t.url)));
+  const read11 = await call("browser_read", { selector: "a" });
+  check("the tab went through a page the tools refuse and came back while a read waited: the read is not handed over (active_page_not_allowed), and the same read asked again is answered",
+    via11?.isError === true && T(via11).startsWith(`ERROR: active_page_not_allowed: the active tab ${own6?.tab_id} went through a page the tools do not read while the page was being read`) && T(via11).endsWith("(delivery=not_delivered, retry=safe)") && !T(via11).includes("Learn more") && Boolean(back11) && !read11?.isError && T(read11).includes("Learn more"),
+    `${T(via11).slice(0, 220)} | ${T(read11).slice(0, 30)}`);
+  // … and what a script returns or throws, and a read without a selector, are held to the same second look. On a
+  // tab still on its first blank page, a fragment put on the address ends its standing without ending the page
+  const fresh = async () => { await call("browser_tabs", { action: "new" }); return (await tabs()).find((t) => t.active); };
+  const fa = await fresh();
+  const ev11 = await call("browser_evaluate", { js: "location.hash = 'x'; 'HASH-RESULT'" });
+  const fb = await fresh();
+  const th11 = await call("browser_evaluate", { js: "location.hash = 'y'; throw new Error('THROWN-PAYLOAD')" });
+  const fc = await fresh();
+  await call("browser_evaluate", { js: "Object.defineProperty(document.body, 'innerText', { get() { location.hash = 'z'; return 'GETTER-PAYLOAD'; } }); 1" });
+  const rd11 = await call("browser_read");
+  const closed11 = [await call("browser_tabs", { action: "close", tab_id: fc?.tab_id }), await call("browser_tabs", { action: "close", tab_id: fb?.tab_id }), await call("browser_tabs", { action: "close", tab_id: fa?.tab_id })];
+  check("the page stopped passing while a script ran, while a script threw, and while browser_read read it: none of the three is handed over — not the result, not the thrown text, not the page text",
+    [ev11, th11, rd11].every((r) => r?.isError === true && T(r).includes("active_page_not_allowed") && T(r).includes("is not handed over")) && !T(ev11).includes("HASH-RESULT") && T(ev11).includes("while the script ran") && T(ev11).endsWith("(delivery=delivered_unverified, retry=unsafe)")
+    && !T(th11).includes("THROWN-PAYLOAD") && T(th11).endsWith("(delivery=unknown, retry=unsafe)") && !T(rd11).includes("GETTER-PAYLOAD") && T(rd11).endsWith("(delivery=not_delivered, retry=safe)") && closed11.every((r) => !r?.isError) && (await tabs()).find((t) => t.active)?.tab_id === own6?.tab_id,
+    `${T(ev11).slice(0, 150)} | ${T(th11).slice(0, 150)} | ${T(rd11).slice(0, 150)}`);
+  // pre-reviews P12, P13 — a snapshot's tree, element list and address are read one after the other. When the page
+  // navigates in between — here it puts a fragment on its address, then calls history.pushState, while its
+  // elements are being listed — the parts may be of two pages, and nothing is returned
+  await call("browser_evaluate", { js: "(() => { const a = document.querySelector('a'); a.getAttribute = function (n) { const go = window.__go; window.__go = null; if (go) go(); return Element.prototype.getAttribute.call(this, n); }; })(); window.__go = () => { location.hash = 'frag'; }; 1" });
+  const frag12 = await call("browser_snapshot");
+  await call("browser_evaluate", { js: "window.__go = () => { history.pushState({}, '', '/moved'); }; 1" });
+  const moved12 = await call("browser_snapshot");
+  const stale12 = await call("browser_click", { element_index: 0 });
+  // … and when listing the elements is cut short by a move to another document — Playwright's error for that,
+  // thrown here by the page's hook — the snapshot says page_changed, not "elements unavailable" (pre-review P14)
+  await call("browser_evaluate", { js: "window.__go = () => { throw new Error('Execution context was destroyed, most likely because of a navigation'); }; 1" });
+  const gone14 = await call("browser_snapshot");
+  const again12 = await call("browser_snapshot");
+  // pre-review P15 — a snapshot whose element list could not be read (here the page's hook throws) says so, and
+  // leaves no list from the snapshot before it to click by
+  await call("browser_evaluate", { js: "window.__go = () => { throw new Error('WALK-FAILED-15'); }; 1" });
+  const walk15 = await call("browser_snapshot");
+  const staleWalk15 = await call("browser_click", { element_index: 0 });
+  check("browser_snapshot whose element list could not be read: the tree with 'clickable elements unavailable', and an element_index from the snapshot before it is refused (no fresh snapshot)",
+    !again12?.isError && /\[0\] /.test(T(again12)) && !walk15?.isError && T(walk15).includes("[clickable elements unavailable: ") && staleWalk15?.isError === true && T(staleWalk15).includes("element_no_longer_valid: no fresh snapshot"),
+    `${T(walk15).slice(-150)} | ${T(staleWalk15).slice(0, 80)}`);
+  // … a read that waits for a selector is handed over — going on across the page's own move is what "click, then
+  // read" relies on — under a first line that says the page navigated and gives both addresses; a read of the
+  // whole page is not (here the page calls history.replaceState as its text is read)
+  await call("browser_evaluate", { js: "setTimeout(() => { history.pushState({}, '', '/later'); const p = document.createElement('p'); p.id = 'late12'; p.textContent = 'LATE12-TEXT'; document.body.appendChild(p); }, 600); 1" });
+  const movedRead12 = await call("browser_read", { selector: "#late12" });
+  const plainRead12 = await call("browser_read", { selector: "#late12" });
+  await call("browser_evaluate", { js: "setTimeout(() => { history.pushState({}, '', '/mid14'); const p = document.createElement('p'); p.id = 'late14'; p.textContent = 'LATE14-TEXT'; document.body.appendChild(p); history.pushState({}, '', '/end14'); }, 600); 1" });
+  const twiceRead14 = await call("browser_read", { selector: "#late14" });
+  await call("browser_evaluate", { js: "Object.defineProperty(document.body, 'innerText', { configurable: true, get() { delete document.body.innerText; history.replaceState({}, '', '/later2'); return 'WHOLE13-TEXT'; } }); 1" });
+  const whole13 = await call("browser_read");
+  const wholeAgain13 = await call("browser_read");
+  // pre-review P14 — a read of the whole page that ends in an error because the page navigated says page_changed
+  // as well: by the count (the page calls history.replaceState, then throws), and by Playwright's message for a
+  // read that a move to another document cut short — thrown here by the page; measured: such a read is rejected
+  // before the navigation is reported. An error with no navigation behind it is handed over as it is
+  const getter14 = (body) => `Object.defineProperty(document.body, 'innerText', { configurable: true, get() { delete document.body.innerText; ${body} } }); 1`;
+  await call("browser_evaluate", { js: getter14("history.replaceState({}, '', '/thrown14'); throw new Error('GETTER-THROWN-14');") });
+  const thrownNav14 = await call("browser_read");
+  await call("browser_evaluate", { js: getter14("throw new Error('Execution context was destroyed, most likely because of a navigation');") });
+  const thrownGone14 = await call("browser_read");
+  await call("browser_evaluate", { js: getter14("throw new Error('PLAIN-THROWN-14');") });
+  const thrownPlain14 = await call("browser_read");
+  check("browser_read of the whole page that ends in an error: page_changed when the page navigated (seen in the count, or told by Playwright's 'execution context was destroyed'), and none of what the page threw; an error with no navigation is handed over",
+    thrownNav14?.isError === true && T(thrownNav14) === "ERROR: page_changed: the page navigated while it was being read (it shows https://example.com/thrown14 now), so the read was not finished — call browser_read again (delivery=not_delivered, retry=safe)"
+    && thrownGone14?.isError === true && T(thrownGone14) === "ERROR: page_changed: the page navigated while it was being read, so the read was not finished — call browser_read again (delivery=not_delivered, retry=safe)"
+    && thrownPlain14?.isError === true && T(thrownPlain14).includes("PLAIN-THROWN-14") && !T(thrownPlain14).includes("page_changed"),
+    `${T(thrownNav14).slice(0, 120)} | ${T(thrownGone14).slice(0, 90)} | ${T(thrownPlain14).slice(0, 90)}`);
+  // pre-review P15 — a script's result and a screenshot name no page: they are handed over when the page navigated
+  // between pages the tools read while they were made, with a note that says so (for the screenshot the page
+  // changes its address every 15 ms for a second and a half)
+  const ev15 = await call("browser_evaluate", { js: "history.pushState({}, '', '/ev15'); 'EV15-VALUE'" });
+  const evPlain15 = await call("browser_evaluate", { js: "'EV15-PLAIN'" });
+  // pre-review P16 — the note says so when the page navigated more than once, and a script that threw carries it too
+  const evTwice16 = await call("browser_evaluate", { js: "history.pushState({}, '', '/a16'); history.pushState({}, '', '/b16'); 'EV16-VALUE'" });
+  const evThrew16 = await call("browser_evaluate", { js: "history.pushState({}, '', '/c16'); throw new Error('BOOM-16')" });
+  await call("browser_evaluate", { js: "(() => { const end = Date.now() + 1500; const t = setInterval(() => { if (Date.now() > end) { clearInterval(t); return; } history.replaceState({}, '', '/tick' + (Date.now() % 1000)); }, 15); })(); 1" });
+  const shot15 = await call("browser_screenshot");
+  await new Promise((r) => setTimeout(r, 1900));
+  const shotPlain15 = await call("browser_screenshot");
+  const meta15 = (r) => { try { return JSON.parse(String(r?.content?.[1]?.text)); } catch { return null; } };
+  check("browser_evaluate and browser_screenshot while the page navigated between pages the tools read: handed over, with a note that says so; no note when nothing happened",
+    T(ev15) === "\"EV15-VALUE\"\n[the page navigated while the script ran: it showed https://example.com/thrown14 when the call began and shows https://example.com/ev15 now]\n(delivery=delivered_unverified, retry=unsafe)"
+    && T(evPlain15) === "\"EV15-PLAIN\"\n(delivery=delivered_unverified, retry=unsafe)"
+    && T(evTwice16) === "\"EV16-VALUE\"\n[the page navigated 2 times while the script ran: it showed https://example.com/ev15 when the call began and shows https://example.com/b16 now, by way of at least one page in between]\n(delivery=delivered_unverified, retry=unsafe)"
+    && evThrew16?.isError === true && T(evThrew16).startsWith("ERROR: action_failed: evaluate failed: ") && T(evThrew16).includes("BOOM-16") && T(evThrew16).endsWith(" [the page navigated while the script ran: it showed https://example.com/b16 when the call began and shows https://example.com/c16 now] (delivery=unknown, retry=unsafe)")
+    && shot15?.content?.[0]?.type === "image" && /^the page navigated (\d+ times )?while the screenshot was being taken: it showed https:\/\/example\.com\/(c16|tick\d+) when the call began and shows https:\/\/example\.com\/tick\d+ now(, by way of at least one page in between)?; the picture is of one moment in between$/.test(String(meta15(shot15)?.navigated))
+    && shotPlain15?.content?.[0]?.type === "image" && meta15(shotPlain15) !== null && !("navigated" in meta15(shotPlain15)),
+    `${T(ev15).slice(0, 150)} | ${String(meta15(shot15)?.navigated).slice(0, 170)} | ${JSON.stringify(meta15(shotPlain15)).slice(0, 80)}`);
+  const nav12 = await call("browser_navigate", { url: "https://example.com" });
+  check("browser_snapshot: the page navigated while the snapshot was taken (a fragment, then history.pushState) — page_changed both times, nothing of the page, no element_index left to click; the next snapshot is answered",
+    [[frag12, "https://example.com/#frag"], [moved12, "https://example.com/moved"]].every(([r, url]) => r?.isError === true && T(r).startsWith(`ERROR: page_changed: the page navigated while the snapshot was being taken (it shows ${url} now)`) && T(r).endsWith("(delivery=not_delivered, retry=safe)") && !T(r).includes("Learn more"))
+    && stale12?.isError === true && T(stale12).includes("element_no_longer_valid") && !again12?.isError && T(again12).startsWith("URL: https://example.com/moved\n") && !nav12?.isError
+    && gone14?.isError === true && T(gone14) === "ERROR: page_changed: the page navigated while the snapshot was being taken, so it was not finished — call browser_snapshot again (delivery=not_delivered, retry=safe)",
+    `${T(frag12).slice(0, 110)} | ${T(moved12).slice(0, 110)} | ${T(stale12).slice(0, 60)} | ${T(gone14).slice(0, 110)} | ${T(again12).slice(0, 40)}`);
+  check("browser_read: the page navigated while a read waited for a selector — the text is handed over under a line that gives both addresses, and a read during which nothing happened has no such line; a read of the whole page is not returned (page_changed), and is when asked again",
+    !movedRead12?.isError && T(movedRead12).startsWith("[the page navigated while this was read: it showed https://example.com/moved when the read began and shows https://example.com/later now — the text may be of either]\n") && T(movedRead12).includes("LATE12-TEXT") && !plainRead12?.isError && T(plainRead12).startsWith("LATE12-TEXT")
+    && !twiceRead14?.isError && T(twiceRead14).startsWith("[the page navigated 2 times while this was read: it showed https://example.com/later when the read began and shows https://example.com/end14 now — the text may be of either, or of a page in between]\n") && T(twiceRead14).includes("LATE14-TEXT")
+    && whole13?.isError === true && T(whole13).startsWith("ERROR: page_changed: the page navigated while it was being read (it shows https://example.com/later2 now)") && T(whole13).endsWith("(delivery=not_delivered, retry=safe)") && !T(whole13).includes("WHOLE13-TEXT") && !wholeAgain13?.isError && T(wholeAgain13).includes("LATE12-TEXT") && !T(wholeAgain13).startsWith("["),
+    `${T(movedRead12).slice(0, 150)} | ${T(plainRead12).slice(0, 30)} | ${T(whole13).slice(0, 120)} | ${T(wholeAgain13).slice(0, 30)}`);
+  // pre-review P13 — an element_index is not used after any navigation of the page: a reload leaves the address
+  // as it was, and the link in the same place
+  const link13 = T(await call("browser_snapshot")).match(/\[(\d+)\] a "/);
+  await call("browser_evaluate", { js: "window.__old = 1; location.reload(); 1" });
+  let reloaded13 = false;
+  for (let i = 0; i < 40 && !reloaded13; i++) {
+    reloaded13 = T(await call("browser_evaluate", { js: "window.__old === undefined && document.readyState === 'complete'" })).startsWith("true");
+    if (!reloaded13) await new Promise((r) => setTimeout(r, 250));
+  }
+  const stale13 = await call("browser_click", { element_index: link13 ? parseInt(link13[1]) : 0 });
+  await new Promise((r) => setTimeout(r, 400));
+  const after13 = (await tabs()).find((t) => t.active);
+  check("an element_index read before a reload of the same address is not used after it: element_no_longer_valid (page navigated since snapshot), nothing clicked",
+    Boolean(link13) && reloaded13 && stale13?.isError === true && T(stale13).includes("element_no_longer_valid: page navigated since snapshot") && /^https:\/\/example\.com\/?$/.test(String(after13?.url)), `${T(stale13).slice(0, 110)} | ${String(after13?.url).slice(0, 40)}`);
+  // pre-review P12 — a refusal that a tool throws reaches the client whole, delivery marker included (the address is
+  // shown up to 60 characters), and a read that fails once the page stopped passing is answered with the refusal —
+  // not with the error the page threw
+  const fd = await fresh();
+  const hash12 = await call("browser_evaluate", { js: "location.hash = 'h'.repeat(80); 1" });
+  const long12 = await call("browser_read");
+  const fe = await fresh();
+  await call("browser_evaluate", { js: "Object.defineProperty(document.body, 'innerText', { get() { location.hash = 'q'; throw new Error('GETTER-THROWN'); } }); 1" });
+  const thrown12 = await call("browser_read");
+  const closed12 = [await call("browser_tabs", { action: "close", tab_id: fe?.tab_id }), await call("browser_tabs", { action: "close", tab_id: fd?.tab_id })];
+  check("a refusal that is thrown arrives whole, and a read that fails once the page stopped passing gives the refusal — none of the page's own error",
+    hash12?.isError === true && long12?.isError === true && T(long12).startsWith(`ERROR: active_page_not_allowed: the active tab ${fd?.tab_id} shows about:blank#${"h".repeat(48)} — only an http(s) page`) && T(long12).endsWith("(delivery=not_delivered, retry=safe)")
+    && thrown12?.isError === true && T(thrown12).startsWith(`ERROR: active_page_not_allowed: the active tab ${fe?.tab_id} shows about:blank#q now — it changed while the page was being read`) && !T(thrown12).includes("GETTER-THROWN") && T(thrown12).endsWith("(delivery=not_delivered, retry=safe)")
+    && closed12.every((r) => !r?.isError) && (await tabs()).find((t) => t.active)?.tab_id === own6?.tab_id,
+    `${T(long12).slice(0, 130)} | ${T(thrown12).slice(0, 170)}`);
+  // pre-review P13 — any navigation that a tab on its first blank page reports ends its standing, also one whose
+  // address is about:blank again (measured: history.back() to a blank page a local file had reached is one)
+  const ff = await fresh();
+  const push13 = await call("browser_evaluate", { js: "history.pushState(null, '', 'about:blank'); 'PUSH-RESULT'" });
+  const read13 = await call("browser_read");
+  const closed13 = await call("browser_tabs", { action: "close", tab_id: ff?.tab_id });
+  check("a tab on its first blank page that reports a navigation to about:blank again is no longer that page: the script's result is not handed over and the tab is not read",
+    push13?.isError === true && T(push13).startsWith(`ERROR: active_page_not_allowed: the active tab ${ff?.tab_id} shows about:blank (not the blank page noracu opened the tab on) now — it changed while the script ran`) && !T(push13).includes("PUSH-RESULT")
+    && read13?.isError === true && T(read13).startsWith(`ERROR: active_page_not_allowed: the active tab ${ff?.tab_id} shows about:blank (not the blank page noracu opened the tab on) — `) && !closed13?.isError && (await tabs()).find((t) => t.active)?.tab_id === own6?.tab_id,
+    `${T(push13).slice(0, 150)} | ${T(read13).slice(0, 110)}`);
+  // pre-review P9 — an element_index read before the active tab went to a page the tools refuse is not used once
+  // the tab is back, even when only browser_tabs was called in between (the blob page goes back by itself)
+  const link9 = T(await call("browser_snapshot")).match(/\[(\d+)\] a "/);
+  await call("browser_evaluate", { js: "location.href = URL.createObjectURL(new Blob(['<title>back</title><script>setTimeout(() => history.back(), 1500);</script>'], { type: 'text/html' })); 1" });
+  const away9 = await waitTab((t) => t.active && String(t.url).startsWith("blob:"));
+  const back9 = await waitTab((t) => t.active && /^https:\/\/example\.com\/?$/.test(String(t.url)));
+  const stale9 = await call("browser_click", { element_index: link9 ? parseInt(link9[1]) : 0 });
+  await new Promise((r) => setTimeout(r, 500));
+  const after9 = (await tabs()).find((t) => t.active);
+  check("an element_index read before the active tab went to a page the tools refuse is not used once the tab is back: element_no_longer_valid, nothing clicked",
+    Boolean(link9) && Boolean(away9) && Boolean(back9) && stale9?.isError === true && T(stale9).includes("element_no_longer_valid") && /^https:\/\/example\.com\/?$/.test(String(after9?.url)), `${T(stale9).slice(0, 100)} | ${String(after9?.url).slice(0, 40)}`);
+  // pre-review P9 — a blank page counts only while it is the one noracu opened the tab on. The active tab (opened
+  // with browser_tabs, has loaded a page) takes itself to about:blank: refused like any page the tools do not
+  // read, not selectable, and not the tab that takes over — while a tab still on its first blank page is read
+  await call("browser_evaluate", { js: "location.href = 'about:blank'; 1" });
+  const blank8 = await waitTab((t) => t.active && t.url === "about:blank");
+  const read8 = await call("browser_read");
+  await call("browser_tabs", { action: "new" });
+  const fresh8 = (await tabs()).find((t) => t.active);
+  const readFresh = await call("browser_read");
+  const sel8 = await call("browser_tabs", { action: "select", tab_id: own6?.tab_id });
+  const cl8 = await call("browser_tabs", { action: "close", tab_id: fresh8?.tab_id });
+  check("a tab that has loaded a page and then shows about:blank: active_page_not_allowed, tab_not_selectable, and it does not take over when the active tab closes; a tab still on the blank page browser_tabs opened it on is read",
+    blank8?.tab_id === own6?.tab_id && read8?.isError === true && T(read8).startsWith(`ERROR: active_page_not_allowed: the active tab ${own6?.tab_id} shows about:blank (not the blank page noracu opened the tab on) — `) && T(read8).endsWith("(delivery=not_delivered, retry=safe)")
+    && fresh8?.url === "about:blank" && fresh8?.tab_id !== own6?.tab_id && fresh8?.opened_by_browser_tabs === true && !readFresh?.isError && sel8?.isError === true && T(sel8).includes("tab_not_selectable") && !cl8?.isError && T(cl8).includes("the active page is none"),
+    `${T(read8).slice(0, 120)} | ${T(sel8).slice(0, 60)} | ${T(cl8).slice(0, 80)}`);
+  const bad = [await call("browser_tabs", { action: "close", tab_id: "t999" }), await call("browser_tabs", { action: "frobnicate" }), await call("browser_tabs", { action: "select" }), await call("browser_tabs", { action: "new", url: "javascript:alert(1)" }), await call("browser_tabs", { action: "list", tab_id: first.tab_id })];
+  check("browser_tabs: an unknown tab_id, an unknown action, a missing tab_id, a url that is not http(s), a tab_id with list — all refused", bad.every((r) => r?.isError === true) && T(bad[0]).includes("tab_not_found"), bad.map((r) => T(r).slice(0, 44)).join(" | "));
+}
 const bc = await call("browser_close");
 check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.[0]?.text);
 
@@ -1088,6 +1757,225 @@ if (LOCAL) {
   );
 }
 
+// 7b2. first_tab（pre-review P16 的提示补测试；Andy 11-12 R16/R17）：第一个标签页不算干净空白页时，browser_launch 当场说明。
+// 测试开关 NORACU_TEST_FIRST_TAB_UNCOUNTED 只在 NORACU_CI=1 下生效，只会让第一个标签页不算数
+{
+  const say = (r) => String(r?.content?.[0]?.text || "");
+  const launchWith = async (env) => {
+    const s = await spawnServer(env);
+    try {
+      const l = say(await s.call("browser_launch", { headless: true }));
+      const snap = await s.call("browser_snapshot", {});
+      return { l, snap };
+    } finally {
+      await s.call("browser_close").catch(() => {});
+      const exited = new Promise((r) => s.proc.once("exit", r));
+      s.proc.kill();
+      await Promise.race([exited, sleepMs(3000)]);
+    }
+  };
+  const on = await launchWith({ NORACU_CI: "1", NORACU_TEST_FIRST_TAB_UNCOUNTED: "1" });
+  const off = await launchWith({ NORACU_CI: "", NORACU_TEST_FIRST_TAB_UNCOUNTED: "1" });
+  check("first_tab：第一个标签页不算数时 browser_launch 当场写明 first_tab，页面工具拒（active_page_not_allowed）；没有 NORACU_CI=1 时测试开关不生效",
+    on.l.includes('"first_tab":"not counted as a fresh blank page') && on.snap?.isError === true && say(on.snap).startsWith("ERROR: active_page_not_allowed:")
+      && !off.l.includes("first_tab") && off.l.includes('"browser_id"'),
+    `${on.l.slice(0, 160)} | ${say(on.snap).slice(0, 60)} | ${off.l.slice(0, 80)}`);
+}
+
+// 7b3. browser_launch chrome:true（Andy 11-13）：在"你自己的 Chrome"里干活，只碰 noracu 自己开的标签。
+// 用一个带调试端口的 Chromium 扮演你的 Chrome（它同样写 DevToolsActivePort），里面先开着"你的"两个标签：一个 http 页、一个 chrome://version
+{
+  const { mkdtempSync, rmSync, existsSync: fexists, writeFileSync: wf } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { createServer } = await import("node:http");
+  const { createRequire } = await import("node:module");
+  const say = (r) => String(r?.content?.[0]?.text || "");
+  const { chromium } = createRequire(import.meta.url)("playwright");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-fakechrome-"));
+  const srv = createServer((q, r) => { r.setHeader("content-type", "text/html; charset=utf-8"); r.end(q.url.startsWith("/b") ? "<title>B page</title><p>b</p>" : q.url.startsWith("/user") ? "<title>Your own tab</title><p>private</p>" : "<title>A page</title><a id='l' href='/b' target='_blank'>open b</a>"); });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  const proc = spawn(chromium.executablePath(), ["--headless=new", `--user-data-dir=${dir}`, "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", `${base}/user?mine=1`], { stdio: "ignore" });
+  // up to 30 s: on a loaded Mac a headless start has taken longer than 10 s (2026-11-14, load average ~40)
+  for (let i = 0; i < 300 && !fexists(join(dir, "DevToolsActivePort")); i++) await sleepMs(100);
+  const { readFileSync: rf } = await import("node:fs");
+  const port = rf(join(dir, "DevToolsActivePort"), "utf8").split("\n")[0].trim();
+  const list = async () => { try { return await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(); } catch { return null; } };
+  const pages = async () => ((await list()) || []).filter((t) => t.type === "page");
+  // chrome://version on the command line holds headless start-up (measured), so that tab is opened afterwards
+  await fetch(`http://127.0.0.1:${port}/json/new?chrome://version`, { method: "PUT" }).catch(() => {});
+  await fetch(`http://127.0.0.1:${port}/json/new?${base}/user2`, { method: "PUT" }).catch(() => {});
+  wf(join(dir, "secret.html"), "<title>Your local file</title><p>local secret</p>");
+  await fetch(`http://127.0.0.1:${port}/json/new?file://${join(dir, "secret.html")}`, { method: "PUT" }).catch(() => {});
+  let yoursAtStart = [];
+  for (let i = 0; i < 30 && (yoursAtStart = await pages()).length < 4; i++) await sleepMs(100);
+  const stop = async (x) => { const exited = new Promise((r) => x.proc.once("exit", r)); x.proc.kill(); await Promise.race([exited, sleepMs(3000)]); };
+  // DevToolsActivePort that is not Chrome's, and one whose port nobody answers on any more (Chrome quit)
+  const badDir = mkdtempSync(join(tmpdir(), "noracu-badport-"));
+  wf(join(badDir, "DevToolsActivePort"), "nope\n");
+  const staleDir = mkdtempSync(join(tmpdir(), "noracu-staleport-"));
+  const freePort = await new Promise((r) => { const t = createServer(); t.listen(0, "127.0.0.1", () => { const p = t.address().port; t.close(() => r(p)); }); });
+  wf(join(staleDir, "DevToolsActivePort"), `${freePort}\n/devtools/browser/0000-stale\n`);
+  try {
+    const g1 = await spawnServer({ NORACU_ALLOW_CHROME: "", NORACU_CHROME_DIR: dir });
+    const denied = say(await g1.call("browser_launch", { chrome: true }));
+    await stop(g1);
+    const g2 = await spawnServer({ NORACU_ALLOW_CHROME: "1", NORACU_CHROME_DIR: dir, NORACU_READ_ONLY: "1" });
+    const ro = say(await g2.call("browser_launch", { chrome: true }));
+    await stop(g2);
+    const g3 = await spawnServer({ NORACU_ALLOW_CHROME: "1", NORACU_CHROME_DIR: join(dir, "no-such-dir") });
+    const off = say(await g3.call("browser_launch", { chrome: true }));
+    const bad = say(await g3.call("browser_launch", { chrome: true, headless: true }));
+    await stop(g3);
+    const g4 = await spawnServer({ NORACU_ALLOW_CHROME: "1", NORACU_CHROME_DIR: badDir });
+    const malformed = say(await g4.call("browser_launch", { chrome: true }));
+    await stop(g4);
+    const g5 = await spawnServer({ NORACU_ALLOW_CHROME: "1", NORACU_CHROME_DIR: staleDir });
+    const stale = say(await g5.call("browser_launch", { chrome: true }));
+    await stop(g5);
+    check("chrome:true 的门槛：没设 NORACU_ALLOW_CHROME=1 → policy_denied；只读模式 → 拒；Chrome 没开远程调试 → chrome_not_reachable 并指向 chrome://inspect；文件格式不对、端口没人应（Chrome 已退）各报各的；和 headless 同传 → 校验层拒",
+      denied.includes("policy_denied") && denied.includes("NORACU_ALLOW_CHROME=1") && ro.includes("NORACU_READ_ONLY=1")
+        && off.includes("chrome_not_reachable") && off.includes("chrome://inspect/#remote-debugging") && off.includes("delivery=not_delivered, retry=safe")
+        && malformed.includes("not in the form Chrome writes") && stale.includes("chrome_not_reachable: nothing answers on the port")
+        && bad.includes("chrome:true takes neither cdp_port nor headless"),
+      `${denied.slice(0, 50)} | ${ro.slice(0, 40)} | ${off.slice(0, 50)} | ${malformed.slice(0, 70)} | ${stale.slice(0, 70)} | ${bad.slice(0, 40)}`);
+
+    const s = await spawnServer({ NORACU_ALLOW_CHROME: "1", NORACU_CHROME_DIR: dir });
+    try {
+      const l = say(await s.call("browser_launch", { chrome: true }));
+      const t0 = JSON.parse(say(await s.call("browser_tabs", { action: "list" })) || "{}").tabs || [];
+      const nav = say(await s.call("browser_navigate", { url: `${base}/a` }));
+      const snap = say(await s.call("browser_snapshot", {}));
+      await s.call("browser_click", { selector: "#l" });
+      await sleepMs(800);
+      const t1 = JSON.parse(say(await s.call("browser_tabs", { action: "list" })) || "{}").tabs || [];
+      const nt = say(await s.call("browser_tabs", { action: "new", url: `${base}/b2` }));
+      const t2 = JSON.parse(say(await s.call("browser_tabs", { action: "list" })) || "{}").tabs || [];
+      check("chrome:true：在你的 Chrome 里开自己的窗口；只列出、只读 noracu 自己的标签（你原来的标签不出现）；它的链接新开的标签和 browser_tabs new 开的标签都算它的",
+        l.includes('"chrome":true') && l.includes('"attached":true')
+          && t0.length === 1 && t0[0].url === "about:blank" && nav.includes(`${base}/a`) && snap.includes("open b")
+          && t1.length === 2 && t1.some((t) => /\/b$/.test(t.url)) && nt.startsWith("opened tab") && t2.length === 3
+          && [...t0, ...t1, ...t2].every((t) => !String(t.url).includes("/user") && !String(t.url).startsWith("chrome://")),
+        `${l.slice(0, 60)} | t0=${t0.length} t1=${t1.length} t2=${t2.length} | ${nt.slice(0, 50)}`);
+      // pre-review P22: a blank tab from browser_tabs new is quick, readable and selectable again, and leaves no stray tab;
+      // the window browser_launch opened is not closed with browser_tabs close
+      const t5 = Date.now();
+      const nb = say(await s.call("browser_tabs", { action: "new" }));
+      const dt = Date.now() - t5;
+      const nbId = (nb.match(/opened tab (\S+)/) || [])[1];
+      const snapBlank = await s.call("browser_snapshot", {});
+      const back = say(await s.call("browser_tabs", { action: "select", tab_id: t0[0].tab_id }));
+      const again = say(await s.call("browser_tabs", { action: "select", tab_id: nbId }));
+      const firstClose = say(await s.call("browser_tabs", { action: "close", tab_id: t0[0].tab_id }));
+      const during = await pages();
+      check("chrome:true（P22）：browser_tabs new 不带网址 —— 很快开好、能读、切走再切回能选中；不多出别的标签；browser_launch 开的那个窗口不能用 browser_tabs close 关",
+        nb.startsWith("opened tab") && dt < 5000 && !snapBlank?.isError && back.includes("is the active page now") && again.includes("is the active page now")
+          && firstClose.includes("tab_not_owned") && during.length === yoursAtStart.length + 4,
+        `${nb.slice(0, 40)} ${dt}ms | ${say(snapBlank).slice(0, 40)} | ${again.slice(0, 40)} | ${firstClose.slice(0, 30)} | pages=${during.length} (yours ${yoursAtStart.length})`);
+      const [closeR, againR] = await Promise.all([s.call("browser_close", {}), s.call("browser_launch", { chrome: true })]);
+      const close = say(closeR), againL = say(againR);
+      await sleepMs(500);
+      const after = await pages();
+      check("chrome:true：browser_close 只关 noracu 的 4 个标签并断开（关的同时再 attach 被拒）；你的标签还在原地，Chrome 还在跑",
+        close.startsWith("closed 4 of noracu's 4 open tab(s) in your Chrome and disconnected") && close.includes("noracu did not quit Chrome")
+          && againL.includes("a browser session is already open")
+          && after.length === yoursAtStart.length && after.some((t) => String(t.url).includes("/user?mine=1")),
+        `${close.slice(0, 110)} | ${againL.slice(0, 50)} | pages after: ${after.map((t) => t.url.replace(base, "")).join(",")}`);
+    } finally { await stop(s); }
+    // the person quits Chrome while noracu is attached: browser_close (no browser_id) says the connection ended and
+    // that noracu's tabs may still be open — not "no such browser", not a clean close (pre-review P25)
+    {
+      const dir2 = mkdtempSync(join(tmpdir(), "noracu-fakechrome2-"));
+      const proc2 = spawn(chromium.executablePath(), ["--headless=new", `--user-data-dir=${dir2}`, "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: "ignore" });
+      for (let i = 0; i < 100 && !fexists(join(dir2, "DevToolsActivePort")); i++) await sleepMs(100);
+      const q = await spawnServer({ NORACU_ALLOW_CHROME: "1", NORACU_CHROME_DIR: dir2 });
+      let attached = "", gone = "", again = "";
+      try {
+        attached = say(await q.call("browser_launch", { chrome: true }));
+        proc2.kill("SIGKILL");
+        await sleepMs(1500);
+        gone = say(await q.call("browser_close", {}));
+        again = say(await q.call("browser_launch", { chrome: true }));
+      } finally { await stop(q); try { proc2.kill("SIGKILL"); } catch {} try { rmSync(dir2, { recursive: true, force: true }); } catch {} }
+      const lostId = (attached.match(/"browser_id":"([^"]+)"/) || [])[1];
+      check("chrome:true（P25）：attach 后 Chrome 被退出 —— browser_close（不带 id）报 chrome_disconnected、点名那个会话、说标签可能还开着；之后可以重新 attach（这里 Chrome 已退，所以报 chrome_not_reachable）",
+        attached.includes('"attached":true') && gone.includes("chrome_disconnected") && lostId && gone.includes(lostId) && gone.includes("may still be open")
+          && (again.includes("chrome_not_reachable") || again.includes("chrome_attach_failed")) && !again.includes("already open"),
+        `${attached.slice(0, 40)} | ${gone.slice(0, 120)} | ${again.slice(0, 60)}`);
+    }
+    // NORACU_CHROME_TABS=all (Andy 11-13): your http(s) tabs are listed, selectable and read; still never closed by noracu
+    const a = await spawnServer({ NORACU_ALLOW_CHROME: "1", NORACU_CHROME_DIR: dir, NORACU_CHROME_TABS: "all", NORACU_ENABLE_EVAL: "1", NORACU_ALLOW_FILE_URL: "1" });
+    try {
+      // two attaches at once: one session (pre-review P22)
+      const both = (await Promise.all([a.call("browser_launch", { chrome: true }), a.call("browser_launch", { chrome: true })])).map(say);
+      const la = both.find((x) => x.includes('"attached":true')) || "";
+      const ta = JSON.parse(say(await a.call("browser_tabs", { action: "list" })) || "{}").tabs || [];
+      const yours = ta.find((x) => String(x.url).includes("/user?mine=1"));
+      const sel = say(await a.call("browser_tabs", { action: "select", tab_id: yours?.tab_id }));
+      const rd = say(await a.call("browser_snapshot", {}));
+      const ev = say(await a.call("browser_evaluate", { js: "document.cookie" }));
+      const cl = say(await a.call("browser_tabs", { action: "close", tab_id: yours?.tab_id }));
+      const navFile = say(await a.call("browser_navigate", { url: `file://${join(dir, "secret.html")}` }));
+      check("chrome:true + NORACU_CHROME_TABS=all：同时两次 attach 只成一个会话；你的 http 标签也列出来（noracu_tab:false），chrome:// 和本地文件（即使 NORACU_ALLOW_FILE_URL=1）不列；能选中、能读、不会被导航到 file://；browser_evaluate 即使 NORACU_ENABLE_EVAL=1 也不跑；noracu 不关你的标签",
+        both.filter((x) => x.includes('"attached":true')).length === 1 && both.some((x) => x.includes("a browser session is already open"))
+          && la.includes("NORACU_CHROME_TABS=all") && ta.length === 3 && yours && yours.noracu_tab === false && ta.some((x) => x.noracu_tab === true)
+          && ta.every((x) => !String(x.url).startsWith("chrome://") && !String(x.url).startsWith("file:"))
+          && sel.includes("is the active page now") && rd.includes("private") && cl.includes("tab_not_owned")
+          && navFile.includes("your own tabs are only sent to http(s) pages")
+          && ev.includes("eval_disabled: browser_evaluate does not run in your own Chrome"),
+        `${both.map((x) => x.slice(0, 40)).join(" / ")} | tabs=${ta.length} | ${sel.slice(0, 40)} | ${ev.slice(0, 50)} | ${cl.slice(0, 30)}`);
+      // with your tab active, browser_tabs new is still opened by noracu's own tab (nothing runs in yours), and when
+      // that new tab closes the active page falls back to noracu's tab, not yours
+      const nn = say(await a.call("browser_tabs", { action: "new", url: `${base}/b3` }));
+      const nnId = (nn.match(/opened tab (\S+?):/) || [])[1];
+      let opUrl = "none";
+      try {
+        const cb = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+        // what Chrome itself records as the opener (Target.getTargets openerId), not this second client's guess
+        const bs = await cb.newBrowserCDPSession();
+        const { targetInfos } = await bs.send("Target.getTargets");
+        const nt3 = targetInfos.find((t) => t.type === "page" && String(t.url).includes("/b3"));
+        const op = nt3?.openerId ? targetInfos.find((t) => t.targetId === nt3.openerId) : null;
+        opUrl = op ? op.url : "none";
+        await cb.close();
+      } catch (e) { opUrl = `error ${String(e).slice(0, 60)}`; }
+      const nnClose = say(await a.call("browser_tabs", { action: "close", tab_id: nnId }));
+      const u2 = ta.find((x) => String(x.url).includes("/user2"));
+      const sel2 = say(await a.call("browser_tabs", { action: "select", tab_id: u2?.tab_id }));
+      let moved = "no";
+      try {
+        const cb2 = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+        const pg2 = cb2.contexts()[0].pages().find((p) => p.url().includes("/user2"));
+        const ps = await cb2.contexts()[0].newCDPSession(pg2);
+        await ps.send("Page.navigate", { url: "chrome://version" });
+        await sleepMs(600);
+        moved = pg2.url();
+        await cb2.close();
+      } catch (e) { moved = `error ${String(e).slice(0, 60)}`; }
+      await a.call("browser_tabs", { action: "list" });   // a call that only lists does not move the active page (P24)
+      const navAfter = say(await a.call("browser_navigate", { url: `${base}/x` }));
+      const ta2 = JSON.parse(say(await a.call("browser_tabs", { action: "list" })) || "{}").tabs || [];
+      const versions = (await pages()).filter((t) => String(t.url).startsWith("chrome://version")).length;
+      const bye = say(await a.call("browser_close", {}));
+      const byeAgain = say(await a.call("browser_close", {}));
+      await sleepMs(500);
+      const left = await pages();
+      check("chrome:true + all（P22）：选中你的标签时 browser_tabs new 也由 noracu 自己的标签打开（opener 不是你的标签）；关掉它后当前页回到 noracu 的标签而不是你的；你把选中的标签换到 chrome:// 后它不再是当前页、browser_navigate 不覆盖它；browser_close 后你的标签都还在",
+        nn.startsWith("opened tab") && opUrl === "about:blank" && nnClose.includes("closed tab") && !nnClose.includes("/user")
+          && sel2.includes("is the active page now") && moved.startsWith("chrome://version") && navAfter.includes("left http(s)") && navAfter.includes("nothing was done") && !navAfter.includes("version")
+          && versions === 2 && ta2.every((x) => !String(x.url).includes("/user2")) && ta2.find((x) => x.active)?.noracu_tab === true
+          && bye.startsWith("closed 1 of noracu's 1 open tab(s)") && byeAgain.includes("was already closed and disconnected") && left.length === yoursAtStart.length && left.some((x) => String(x.url).includes("/user?mine=1")),
+        `${nn.slice(0, 50)} | opener=${opUrl} | ${nnClose.slice(0, 60)} | moved=${moved} | ${navAfter.slice(0, 90)} | versions=${versions} | ${bye.slice(0, 50)} | left=${left.length}`);
+    } finally { await stop(a); }
+  } finally {
+    proc.kill();
+    srv.close();
+    await sleepMs(300);
+    for (const d of [dir, badDir, staleDir]) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
+  }
+}
+
 // 7. phone_ocr（iPhone OCR）
 const po = await call("phone_ocr");
 checkPhone("phone_ocr", po, !po?.isError, String(po?.content?.[0]?.text).slice(0, 70));
@@ -1133,6 +2021,20 @@ check("element_index：负数被校验层拒", badNeg?.isError && String(badNeg?
   try {
     const r = await s.call("browser_evaluate", { js: "1" });
     check("G1：DISABLE_EVAL 拒 browser_evaluate", r?.isError && String(r?.content?.[0]?.text).includes("NORACU_DISABLE_EVAL"), r?.content?.[0]?.text?.slice(0, 80));
+  } finally { s.proc.kill(); }
+}
+{
+  // S1 (next-steps R3): without NORACU_ENABLE_EVAL=1 browser_evaluate is refused before anything runs (no
+  // browser needed: the check comes first); the tool stays listed and mac_status says it is off
+  const s = await spawnServer({ NORACU_ENABLE_EVAL: "" });
+  try {
+    const r = await s.call("browser_evaluate", { js: "1" });
+    const t = String(r?.content?.[0]?.text || "");
+    await s.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "eval-off" } });
+    const listed = (await s.rpc("tools/list"))?.result?.tools?.some((x) => x.name === "browser_evaluate");
+    check("S1：browser_evaluate 默认关 —— 未设 NORACU_ENABLE_EVAL=1 时 eval_disabled，什么都不跑；工具仍列出",
+      r?.isError && t.startsWith("ERROR: eval_disabled: browser_evaluate is off by default") && t.includes("NORACU_ENABLE_EVAL=1") && t.includes("delivery=not_delivered, retry=safe") && listed === true,
+      t.slice(0, 110));
   } finally { s.proc.kill(); }
 }
 // 10b. t07 CI 安全门禁（各起独立 server 进程）：READ_ONLY 优先拒 cdp_port / 未记录端口需 ALLOW_CDP=any / browser_scroll direction 校验
@@ -1233,6 +2135,7 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
 let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", () => {
   const req = JSON.parse(d); const say = (o) => process.stdout.write(JSON.stringify(o));
   if (req.op === "snapshot") return say({ ok: true, app: "Auth", bundle_id: "test.auth", pid: 4242, surface: "window", complete: true, visited: 1, ms: 1, container: { kind: "window", wid: 1, title: "Sign In", subrole: "", frame: [0, 0, 200, 100], n: 0 }, nodes: [{ d: 1, role: "AXTextField", subrole: "AXSecureTextField", path: [0], fp: { role: "AXTextField", subrole: "AXSecureTextField", id: "pw", name: "Password" }, title: "Password", frame: [10, 10, 120, 22], interactive: true }] });
+  if (req.op === "frontmost") return say({ ok: true, front: { pid: 4242, name: "Auth", bundle: "test.auth" }, target: { pid: 4242, name: "Auth", bundle: "test.auth" }, match: true });
   if (req.op === "set_value") return say({ ok: true, mechanism: "semantic", role: "AXTextField", how: "path", delivery: "delivered_unverified", retry: "unsafe", secure: true, reason: "secure_field", via: "AXValue" });
   if (req.op === "notifications") return say({ ok: false, code: "NOTIFICATION_NOT_FOUND", message: "no notification with id gone-1 is on screen", delivery: "not_delivered", retry: "safe" });
   say({ ok: false, code: "INVALID_ARGS", message: "unexpected " + req.op });
@@ -1549,6 +2452,212 @@ if (LOCAL) {
   check("B2：元素已消失 → element_no_longer_valid（不误点）", r?.isError && /element_no_longer_valid/.test(String(r?.content?.[0]?.text)) && /delivery=not_delivered/.test(String(r?.content?.[0]?.text)),
     r ? String(r?.content?.[0]?.text).slice(0, 100) : `fixture: bold index missing (TextEdit windows titled ${TE_DOC}…: ${JSON.stringify(wids)})`);
 } else skipLocal("B2：元素已消失 → element_no_longer_valid（不误点）");
+
+// 0.3.0（RF-3 / GH-1，CI 安全）：电脑前的人优先。假的 ioreg（NORACU_IOREG）按顺序报出"上一次键鼠事件的时刻"，
+// AX 引擎和 cliclick 也是假的 —— 没有任何事件发到这台 Mac 上
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-idle-"));
+  const fake = join(dir, "fake-ax-engine"), fakeClick = join(dir, "cliclick"), fakeIoreg = join(dir, "ioreg"), clickLog = join(dir, "cliclick.log"), ctl = join(dir, "idle.json");
+  writeFileSync(fake, FAKE_AX, { mode: 0o700 });
+  writeFileSync(fakeClick, `#!/bin/bash\necho "$@" >> "${clickLog}"\n`, { mode: 0o700 });
+  // every run answers with the next time of the list (the last one repeats); a time in the future reads as "just now"
+  writeFileSync(fakeIoreg, `#!/usr/bin/env node
+const fs = require("fs");
+const c = JSON.parse(fs.readFileSync(${JSON.stringify(ctl)}, "utf8"));
+const at = c.at[Math.min(c.n, c.at.length - 1)];
+c.n++; fs.writeFileSync(${JSON.stringify(ctl)}, JSON.stringify(c));
+if (c.touch) fs.writeFileSync(c.touch, "");
+if (c.delay) { const end = Date.now() + c.delay; while (Date.now() < end) { /* a slow ioreg */ } }
+console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - at) * 1e6)));
+`, { mode: 0o700 });
+  const idle = (...at) => writeFileSync(ctl, JSON.stringify({ at, n: 0 }));
+  const idleTouching = (file, ...at) => writeFileSync(ctl, JSON.stringify({ at, n: 0, touch: file }));
+  const idleSlow = (delay, ...at) => writeFileSync(ctl, JSON.stringify({ at, n: 0, delay }));
+  const samples = () => JSON.parse(readFileSync(ctl, "utf8")).n;
+  const QUIET = () => Date.now() - 60000, NOW = () => Date.now() + 3600000;
+  idle(QUIET());
+  for (const f of [fake, fakeClick, fakeIoreg]) { try { execFileSync(f, [], { input: '{"op":"warm"}', timeout: 30000 }); } catch {} }
+  const read = (f) => { try { return readFileSync(f, "utf8"); } catch { return ""; } };
+  const say = (r) => String(r?.content?.[0]?.text);
+  const s = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_IOREG: fakeIoreg, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "2", NORACU_NO_BGPOST: "1" });
+  try {
+    // RF-3: a call that sent nothing must not make the person's event of that moment look like noracu's own
+    writeFileSync(clickLog, ""); idle(QUIET());
+    const t1 = Date.now();
+    const refused = await s.call("mac_click", { x: 600, y: 100 });   // occluded: refused, nothing sent
+    idle(t1);                                                         // the person used the mouse while that call ran
+    const after = await s.call("mac_click", { x: 100, y: 100 });
+    check("RF-3：一次什么都没发的调用（occluded）之后，那一刻有人动过键鼠 → 下一个输入返回 user_active、不发（那次事件不算 noracu 自己的）",
+      refused?.isError && /^ERROR: occluded: /.test(say(refused)) && after?.isError && /^ERROR: user_active: /.test(say(after)) && read(clickLog) === "",
+      `${say(refused).slice(0, 40)} | ${say(after).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
+    // …and a call that did send still counts: the event of that moment is noracu's own, the next call goes ahead
+    idle(QUIET()); writeFileSync(clickLog, "");
+    const t2 = Date.now();
+    const sent = await s.call("mac_click", { x: 100, y: 100 });
+    idle(t2 + 1);
+    const next = await s.call("mac_click", { x: 100, y: 10 });
+    check("RF-3：发出过输入的调用照旧算数 —— 那一刻的事件是 noracu 自己的，下一个输入照常发出",
+      !sent?.isError && !next?.isError && /c:100,100/.test(read(clickLog)) && /c:100,10\n/.test(read(clickLog)),
+      `${say(sent).slice(0, 50)} | ${say(next).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
+    // the same for input that does not go through cliclick (a named key through the engine's HID path)
+    idle(QUIET());
+    const t3 = Date.now();
+    const key1 = await s.call("mac_key", { key: "return" });
+    idle(t3 + 1);
+    const key2 = await s.call("mac_key", { key: "return" });
+    check("RF-3：不经 cliclick 发出的输入（引擎按键）同样算数 —— 下一个输入不被当成有人在用", !key1?.isError && /^pressed return/.test(say(key1)) && !key2?.isError && /^pressed return/.test(say(key2)),
+      `${say(key1).slice(0, 60)} | ${say(key2).slice(0, 60)}`);
+    // GH-1: quiet when the call left the queue, in use right before the pointer is taken → nothing is sent
+    idle(QUIET(), NOW()); writeFileSync(clickLog, "");
+    const taken = await s.call("mac_click", { x: 100, y: 100 });
+    check("GH-1：出队时没人用键鼠、动指针前一刻有人用了 → user_active，一个事件都不发；两次检查都做了；delivery 只写一遍",
+      taken?.isError && /^ERROR: user_active: /.test(say(taken)) && say(taken).split("delivery=not_delivered").length === 2 && read(clickLog) === "" && samples() === 2,
+      `${say(taken).slice(0, 70)} | samples=${samples()} | click=${JSON.stringify(read(clickLog))}`);
+    idle(QUIET()); writeFileSync(clickLog, "");
+    const calm = await s.call("mac_click", { x: 100, y: 100 });
+    check("GH-1：两次检查都安静 → 照常点击", !calm?.isError && /c:100,100/.test(read(clickLog)) && samples() === 2, `${say(calm).slice(0, 60)} | samples=${samples()}`);
+    // a drag is refused the same way, and no stray mouse-up follows
+    const one = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
+    idle(QUIET()); writeFileSync(clickLog, "");
+    const dragOk = await s.call("mac_drag", { from_index: one, to_index: one });
+    const dragSent = read(clickLog);
+    idle(QUIET(), NOW()); writeFileSync(clickLog, "");
+    const dragNo = await s.call("mac_drag", { from_index: one, to_index: one });
+    check("GH-1：拖动同理 —— 安静时发出（dd/du），动指针前有人用了键鼠 → user_active，不发、也不补发松开鼠标",
+      !dragOk?.isError && /dd:/.test(dragSent) && /du:/.test(dragSent) && dragNo?.isError && /^ERROR: user_active: /.test(say(dragNo)) && read(clickLog) === "",
+      `${say(dragOk).slice(0, 50)} | ${say(dragNo).slice(0, 50)} | click=${JSON.stringify(read(clickLog))}`);
+    // S4A-s1-me-1 / -reviewer-1: an input that posts no keyboard or mouse event (AXPress) does not make the
+    // person's event of that moment look like noracu's own
+    idle(QUIET()); writeFileSync(clickLog, "");
+    const t4 = Date.now();
+    const pressed = await s.call("mac_click", { element_index: one, mechanism: "semantic" });
+    idle(t4 + 1);                                                     // the person moved the mouse while it ran
+    const afterPress = await s.call("mac_click", { x: 100, y: 100 });
+    check("S4A：语义点击（AXPress，不发键鼠事件）之后，那一刻有人动过键鼠 → 下一个输入 user_active、不发",
+      !pressed?.isError && afterPress?.isError && /^ERROR: user_active: /.test(say(afterPress)) && read(clickLog) === "",
+      `${say(pressed).slice(0, 50)} | ${say(afterPress).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
+    // audit S5A-s2-D-2: a left double / triple click through cliclick is its dc: / tc: verb, not two or three c:
+    idle(QUIET()); writeFileSync(clickLog, "");
+    const dbl = await s.call("mac_click", { x: 100, y: 100, count: 2 });
+    const tri = await s.call("mac_click", { element_index: one, mechanism: "physical", count: 3 });
+    check("审计 S5A：cliclick 的双击 / 三击用 dc: / tc:（不是连发 c:，那样应用收到的是单击）",
+      !dbl?.isError && !tri?.isError && /^dc:100,100$/m.test(read(clickLog)) && /^tc:/m.test(read(clickLog)) && !/^c:/m.test(read(clickLog)),
+      `${say(dbl).slice(0, 40)} | ${say(tri).slice(0, 40)} | click=${JSON.stringify(read(clickLog))}`);
+    // audit S5A-s1-X-1: a stop file made while the idle time is read (ioreg) still stops the input
+    const stopFile = join(dir, "stop-now");
+    const s3 = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_IOREG: fakeIoreg, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "2", NORACU_NO_BGPOST: "1", NORACU_STOP_FILE: stopFile });
+    try {
+      idleTouching(stopFile, QUIET()); writeFileSync(clickLog, "");
+      const late = await s3.call("mac_click", { x: 100, y: 100 });
+      check("审计 S5A：读空闲时间（ioreg）期间建了停止文件 → 输入照样被停（user_stopped），一个事件都不发",
+        late?.isError && /^ERROR: user_stopped: /.test(say(late)) && read(clickLog) === "" && samples() === 1,
+        `${say(late).slice(0, 70)} | samples=${samples()} | click=${JSON.stringify(read(clickLog))}`);
+    } finally { s3.proc.kill(); rmSync(stopFile, { force: true }); }
+    // review S5C (X, D, G): a client cancel that arrives while the idle time is read still cancels the input — no
+    // event, no answer (MCP: a cancelled request is not answered)
+    idleSlow(1500, QUIET()); writeFileSync(clickLog, "");
+    const idCancel = 90101;
+    let cancelReplied = false;
+    const onOut = (d) => { for (const line of String(d).split("\n")) { try { if (JSON.parse(line).id === idCancel) cancelReplied = true; } catch {} } };
+    s.proc.stdout.on("data", onOut);
+    s.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: idCancel, method: "tools/call", params: { name: "mac_click", arguments: { x: 100, y: 100 } } }) + "\n");
+    for (let i = 0; i < 40 && samples() < 1; i++) await new Promise((r) => setTimeout(r, 50));   // the ioreg read has begun
+    s.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: idCancel, reason: "test" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 2500));
+    s.proc.stdout.off("data", onOut);
+    const pongC = await s.rpc("ping");
+    check("复审 S5C：读空闲时间（ioreg）期间客户端取消 → 输入不发、不应答，队列照常",
+      !cancelReplied && read(clickLog) === "" && samples() === 1 && pongC?.result !== undefined,
+      `replied=${cancelReplied} samples=${samples()} click=${JSON.stringify(read(clickLog))}`);
+    // S4B-s10-gemini-1: a phone input that imctl refused before sending anything does not stamp noracu's own input
+    const fakePy = join(dir, "python3");
+    writeFileSync(fakePy, `#!/bin/bash\nif [ "$1" = "-c" ]; then exit 0; fi\necho "out_of_screen: the point is on the iPhone Mirroring window's margin; nothing was sent" >&2\nexit 2\n`, { mode: 0o700 });
+    const s2 = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_IOREG: fakeIoreg, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "2", NORACU_NO_BGPOST: "1", NORACU_PYTHON: fakePy, NORACU_IMCTL_DIR: dir });
+    try {
+      idle(QUIET()); writeFileSync(clickLog, "");
+      const t5 = Date.now();
+      const phoneNo = await s2.call("phone_tap", { x: 0.5, y: 0.001 });
+      idle(t5 + 1);                                                   // the person moved the mouse while imctl ran
+      const afterPhone = await s2.call("mac_click", { x: 100, y: 100 });
+      check("S4B：手机输入被 imctl 先拒（什么都没发）之后，那一刻有人动过键鼠 → 下一个输入 user_active、不发",
+        phoneNo?.isError && /out_of_screen/.test(say(phoneNo)) && afterPhone?.isError && /^ERROR: user_active: /.test(say(afterPhone)) && read(clickLog) === "",
+        `${say(phoneNo).slice(0, 60)} | ${say(afterPhone).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
+    } finally { s2.proc.kill(); }
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// mac_screenshot display + region (device run 2026-11-14): region is in screen points as mac_windows reports them;
+// a region outside the display named is refused before anything is captured
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-region-"));
+  const fake = join(dir, "fake-ax-engine");
+  writeFileSync(fake, `#!/usr/bin/env node
+let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", () => {
+  const req = JSON.parse(d);
+  if (req.op === "status") return process.stdout.write(JSON.stringify({ ok: true, displays: [{ index: 0, name: "Main", frame: [0, 0, 2560, 1440], scale: 2, main: true }, { index: 1, name: "Side", frame: [-1728, 0, 1728, 1117], scale: 1, main: false }] }));
+  process.stdout.write(JSON.stringify({ ok: false, code: "INVALID_ARGS", message: "fake engine: op " + req.op + " not scripted" }));
+});
+`, { mode: 0o700 });
+  // screencapture stand-in: a PNG signature and IHDR saying 1728 x 1117 pixels (display 1 at scale 1)
+  const fakeCap = join(dir, "screencapture");
+  writeFileSync(fakeCap, `#!/usr/bin/env node
+const b = Buffer.alloc(33); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(b, 0); b.writeUInt32BE(13, 8); b.write("IHDR", 12);
+b.writeUInt32BE(1728, 16); b.writeUInt32BE(1117, 20); require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
+`, { mode: 0o700 });
+  const s = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_SCREENCAPTURE: fakeCap });
+  try {
+    const say = (r) => String(r?.content?.[0]?.text || "");
+    const shot = await s.call("mac_screenshot", { display: 1 });
+    const meta = (() => { try { return JSON.parse(shot?.content?.find((c) => c.type === "text")?.text || "{}"); } catch { return {}; } })();
+    check("审计 S5A：mac_screenshot 截副屏时按那块屏自己的 scale 算 logical_size（副屏 1x、主屏 2x）",
+      !shot?.isError && meta.scale === 1 && JSON.stringify(meta.logical_size) === "[1728,1117]", JSON.stringify(meta).slice(0, 160));
+    const local = await s.call("mac_screenshot", { display: 1, region: { x: 8, y: 60, w: 1000, h: 600 } });
+    const none = await s.call("mac_screenshot", { display: 5, region: { x: 0, y: 0, w: 10, h: 10 } });
+    check("mac_screenshot：display 加 region 时 region 按全局点坐标；落在该屏外 → invalid_args，什么都不截（说明不是屏内坐标）",
+      local?.isError && /^ERROR: invalid_args: region is in screen points as mac_windows reports them, not relative to the display; display 1 spans x -1728\.\.0, y 0\.\.1117/.test(say(local)) && /delivery=not_delivered/.test(say(local)),
+      say(local).slice(0, 160));
+    check("mac_screenshot：display 不存在 + region → display_unknown，什么都不截",
+      none?.isError && /^ERROR: display_unknown: there is no display 5/.test(say(none)), say(none).slice(0, 120));
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// audit S5A-s3-G-4: mac_app launch with cdp_port asks the app rules first — an IDE with a terminal on the default deny
+// list is not launched with a DevTools port (the browser tools that would drive it are not judged by app rules)
+{
+  const { mkdtempSync, writeFileSync, rmSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-cdpdeny-"));
+  const fake = join(dir, "fake-ax-engine");
+  // an installed, not running Cursor: the engine gives only its path; the bundle id is in its Info.plist
+  const appDir = join(dir, "Cursor.app");
+  mkdirSync(join(appDir, "Contents"), { recursive: true });
+  writeFileSync(join(appDir, "Contents", "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.todesktop.230313mzl4w4u92</string></dict></plist>
+`);
+  writeFileSync(fake, `#!/usr/bin/env node
+let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", () => {
+  const req = JSON.parse(d);
+  if (req.op === "app_info") return process.stdout.write(JSON.stringify({ ok: true, running: false, path: ${JSON.stringify(appDir)}, chromium: true, electron: true }));
+  process.stdout.write(JSON.stringify({ ok: false, code: "INVALID_ARGS", message: "fake engine: op " + req.op + " not scripted" }));
+});
+`, { mode: 0o700 });
+  const s = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_ALLOW_CDP: "1" });
+  try {
+    const r = await s.call("mac_app", { action: "launch", app: "Cursor", cdp_port: 0 });
+    const t = String(r?.content?.[0]?.text || "");
+    check("审计 S5A：mac_app 带 cdp_port 启动默认拒绝名单里的 App（Cursor）→ input_denied，不启动",
+      r?.isError && /^ERROR: input_denied: "Cursor" — /.test(t) && /delivery=not_delivered/.test(t), t.slice(0, 160));
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
 
 const failed = results.filter(r => !r.pass);
 console.log(`\n=== noracu MCP: ${results.length - failed.length}/${results.length} PASS ===`);

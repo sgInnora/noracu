@@ -1,0 +1,228 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objectVersion = 56;
+	classes = {
+	};
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1A600001 /* NoracuRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001 /* NoracuRunner.swift */; };
+		1A600002 /* RunnerServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000002 /* RunnerServer.swift */; };
+		1A600003 /* RunnerCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000003 /* RunnerCommands.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1A000001 /* NoracuRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoracuRunner.swift; sourceTree = "<group>"; };
+		1A000002 /* RunnerServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerServer.swift; sourceTree = "<group>"; };
+		1A000003 /* RunnerCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerCommands.swift; sourceTree = "<group>"; };
+		1A000004 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = README.md; sourceTree = "<group>"; };
+		1A000005 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = "<group>"; };
+		1A200000 /* NoracuRunnerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NoracuRunnerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		1A100000 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1A200000 /* NoracuRunnerUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		1A100001 /* NoracuRunnerUITests */ = {
+			isa = PBXGroup;
+			children = (
+				1A000001 /* NoracuRunner.swift */,
+				1A000002 /* RunnerServer.swift */,
+				1A000003 /* RunnerCommands.swift */,
+			);
+			path = NoracuRunnerUITests;
+			sourceTree = "<group>";
+		};
+		1A100002 /* main */ = {
+			isa = PBXGroup;
+			children = (
+				1A100001 /* NoracuRunnerUITests */,
+				1A000004 /* README.md */,
+				1A000005 /* LICENSE */,
+				1A100000 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1A300000 /* NoracuRunnerUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A400000 /* Build configuration list for PBXNativeTarget "NoracuRunnerUITests" */;
+			buildPhases = (
+				1A500000 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NoracuRunnerUITests;
+			packageProductDependencies = (
+			);
+			productName = NoracuRunnerUITests;
+			productReference = 1A200000 /* NoracuRunnerUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1A900000 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = {
+					1A300000 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+				};
+			};
+			buildConfigurationList = 1A800000 /* Build configuration list for PBXProject "NoracuRunner" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 1A100002 /* main */;
+			productRefGroup = 1A100000 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1A300000 /* NoracuRunnerUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1A500000 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A600001 /* NoracuRunner.swift in Sources */,
+				1A600002 /* RunnerServer.swift in Sources */,
+				1A600003 /* RunnerCommands.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		1A700001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				NORACU_BUNDLE_PREFIX = "dev.noracu.t$(DEVELOPMENT_TEAM)";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(NORACU_BUNDLE_PREFIX).runner";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		1A700002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				NORACU_BUNDLE_PREFIX = "dev.noracu.t$(DEVELOPMENT_TEAM)";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(NORACU_BUNDLE_PREFIX).runner";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		1A710001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		1A710002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = s;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1A400000 /* Build configuration list for PBXNativeTarget "NoracuRunnerUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A700001 /* Debug */,
+				1A700002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A800000 /* Build configuration list for PBXProject "NoracuRunner" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A710001 /* Debug */,
+				1A710002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1A900000 /* Project object */;
+}

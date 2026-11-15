@@ -152,6 +152,62 @@ def window_luma(size: tuple[int, int] = (36, 78)) -> bytes:
     raise WindowError("the mirroring window frame is blank (a window transition)")
 
 
+# Device run 2026-11-10 (iPhone Mirroring on macOS 27.2, window 280x620 pt): the phone screen does not
+# fill the mirror window. Above it is a transparent strip (where the window controls show on hover) and
+# around the other sides a thin transparent margin; the screen spans x 0.0286-0.9714, y 0.0613-0.9871 of
+# the window. iOS cancels a drag that ends on that margin: an App Switcher card swiped from y 0.55 to
+# y 0.03 stayed put (0 pixels changed) while the same swipe to y 0.12 closed it, and a share sheet dragged
+# down to y 0.995 never closed. imctl printed "swiped" every time.
+SCREEN_ALPHA_SIZE = (140, 310)
+
+
+def screen_rect_from_alpha(alpha: bytes, w: int, h: int, threshold: int = 128):
+    """Normalized (x0, y0, x1, y1) of the opaque phone screen in a w*h alpha map (row 0 = top).
+
+    Reads the middle row and the middle column only, so the rounded corners do not matter, and reads
+    alpha rather than colour, so a black app edge still counts as screen. Raises WindowError when
+    either line has no opaque pixel (a blank or transparent frame).
+    """
+    if len(alpha) != w * h:
+        raise ValueError(f"alpha map is {len(alpha)} bytes, expected {w * h}")
+    mid_row, mid_col = h // 2, w // 2
+    cols = [x for x in range(w) if alpha[mid_row * w + x] >= threshold]
+    rows = [y for y in range(h) if alpha[y * w + mid_col] >= threshold]
+    if not cols or not rows:
+        raise WindowError("the mirror frame shows no opaque phone screen (blank or transparent frame)")
+    return (cols[0] / w, rows[0] / h, (cols[-1] + 1) / w, (rows[-1] + 1) / h)
+
+
+def screen_rect(size: tuple[int, int] = SCREEN_ALPHA_SIZE):
+    """Where the phone screen sits inside the mirroring window, normalized (x0, y0, x1, y1).
+
+    The same window pixels as window_luma (CGWindowListCreateImage, frame ignored, nominal
+    resolution, so the image matches the window bounds that taps and swipes are normalized to),
+    drawn into an alpha-only bitmap. Raises WindowError when the window is missing or off screen,
+    or its image cannot be read.
+    """
+    import Quartz
+
+    w, h = size
+    wi = get_window_info()
+    if not wi:
+        raise WindowError("iPhone Mirroring window not found")
+    if not wi.get("onscreen", False):
+        raise WindowError(
+            "the mirroring window is not on screen "
+            "(hidden, minimized or on another Space)"
+        )
+    img = _capture_window_image(wi["id"])
+    if img is None:
+        raise WindowError("could not read the mirroring window's image")
+    buf = bytearray(w * h)  # bitmap backing store; never resized while ctx lives
+    ctx = Quartz.CGBitmapContextCreate(buf, w, h, 8, w, None, Quartz.kCGImageAlphaOnly)
+    if ctx is None:
+        raise WindowError("CGBitmapContextCreate failed")
+    Quartz.CGContextDrawImage(ctx, Quartz.CGRectMake(0, 0, w, h), img)
+    return screen_rect_from_alpha(bytes(buf), w, h)
+
+
 def is_capture_error(exc: BaseException) -> bool:
     """True when ``exc`` means the pixels a check needed are not the phone's.
 

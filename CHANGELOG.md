@@ -1,5 +1,405 @@
 # Changelog
 
+## [0.3.0] — 2026-11-15
+
+Background input, a stop switch and per-app input rules, and clicks by
+screenshot pixels.
+
+### Added
+- **Background input (bgpost).** Under `mechanism: "auto"`, a physical click
+  on a native app, and a named key for a native frontmost app, are posted
+  straight to the app's process (`CGEventPostToPid`): the pointer does not
+  move and the app need not be in front. Web-engine apps (Chromium/Electron,
+  whose event loops drop such events) and `mechanism: "physical"` use the
+  real pointer; every result's `route` says which path delivered. A posted
+  click is never re-sent another way: no visible change is reported as
+  `delivered_unverified` with a note, a timeout as `delivery=unknown`. Double
+  and triple clicks carry their click count. `NORACU_NO_BGPOST=1` turns the
+  layer off.
+- **Your own Chrome (opt-in).** `browser_launch` with `chrome: true` works
+  in the Chrome you use, with its sign-ins, through Chrome's own
+  remote-debugging switch (`chrome://inspect/#remote-debugging`, Chrome
+  144+); Chrome asks you to allow each connection. It needs
+  `NORACU_ALLOW_CHROME=1`. noracu opens a window of its own there, in the
+  background, and lists, reads and acts only on the tabs it opened (and
+  tabs those open); `browser_tabs` `new` opens a tab in that window. Your
+  other tabs are never touched unless `NORACU_CHROME_TABS=all` is also
+  set: then your tabs on http(s) pages are listed and can be selected, read
+  and acted on (never `file://`, whatever `NORACU_ALLOW_FILE_URL` says; never
+  closed or sent to another kind of address; one becomes the active page only
+  when selected and stops being it when it leaves http(s)). `browser_evaluate` never runs there. `browser_close` closes
+  noracu's tabs and disconnects. `NORACU_CHROME_DIR` points at another
+  profile folder (Chrome Beta, Canary, another Chromium-based browser). `mac_status`
+  reports whether it is allowed.
+- **Stop switch.** While the file named by `NORACU_STOP_FILE` exists, every
+  input tool — Mac and iPhone (semantic actions included) and the browser's
+  input tools (navigate, click, type, fill, press_key, scroll, evaluate,
+  `browser_tabs` new/close) — returns `user_stopped` and sends nothing. It is
+  checked when a call leaves the input queue and again right before events go
+  out. A set but blank `NORACU_STOP_FILE` refuses all input, and a set but blank
+  `NORACU_APPROVAL_FILE` all Mac and iPhone input, until it is removed or given a path.
+- **Per-app input rules.** `NORACU_DENY_APPS` names apps that never get
+  input; by default the common terminal apps (Terminal, iTerm2, WezTerm,
+  Ghostty, Warp, Alacritty, kitty, Hyper) and the IDEs with a built-in
+  terminal (VS Code, Cursor, Windsurf, Zed, JetBrains IDEs, Android Studio,
+  with their preview and nightly editions), by bundle id and by name, so an
+  agent cannot type into those shells. A list of your own adds to it; a list
+  that starts with `none` drops it (`none` alone: no deny list). Warp Preview,
+  Tabby, Rio and Wave are on it too. The name `Code`
+  and `com.jetbrains.*` are broad on purpose: they also deny any app named
+  exactly Code, and JetBrains Toolbox. `NORACU_APPROVAL_FILE` (opt-in) names a `0600`
+  JSON file `{allow, ask, deny}` of bundle-id or app-name patterns: an app
+  under `ask`, or not listed, gets `approval_required` and nothing is sent;
+  noracu never writes the file; once the variable is set, a missing,
+  malformed, symlinked, group-readable or foreign-owned file, an unknown key
+  or an empty pattern refuses all input. An app whose bundle id cannot be
+  read gets nothing while either rule is in force. Both are judged
+  on the app that receives the input — the element's app, both ends of a
+  drag, the named app, or the app on top at an x,y point — and an app that
+  cannot be identified gets nothing.
+- **Clicks by screenshot pixels.** A `mac_screenshot` of one window returns a
+  `screenshot_id` (valid 30 s); `mac_click` takes `screenshot_id` + `x,y` in
+  that image's pixels for targets accessibility cannot name (canvas, custom
+  drawing). The point is the window's origin plus the pixels at the scale of
+  the window's own display; the window's position and size are re-checked
+  first, and a window that moved, resized or was rebuilt is refused as
+  `stale`; pixels outside the image are refused.
+- **iPhone: an XCUITest backend (experimental, opt-in).** With
+  `NORACU_PHONE_BACKEND=xcuitest` the `phone_*` tools are replaced by nine
+  `ios_*` tools that drive the phone itself instead of the iPhone Mirroring
+  window: a small UI-test bundle (the "runner", source in `ios-runner/`,
+  protocol in `docs/ios-runner-protocol.md`) runs on the iPhone and executes
+  one command at a time. `ios_snapshot` returns an app's accessibility
+  elements with an `element_index` (unique across snapshots, valid 30 s);
+  `ios_tap` and `ios_type` read the app again before acting and return
+  `element_no_longer_valid` when the element moved, changed, or its app left
+  the front; `ios_home` and `ios_launch` end earlier indexes. `ios_type`
+  types as keyboard input — no clipboard — and is `delivered_verified` only
+  when the field that took the text (the one tapped, or the only one of its
+  kind whose value changed) afterwards holds its old value with the text put
+  in at one place, for text of four characters or more (`type_not_confirmed`
+  when the fields were read and do not show that; `delivered_unverified`
+  when the two reads cannot settle it: the fields could not be read, are not
+  the same ones in both reads, several changed at once and one of those
+  gained the text, or no field changed and an empty one has the text as
+  its placeholder); `ios_launch` opens an app by bundle id through
+  `devicectl`.
+  Coordinates are screen points. Every input first passes the stop file, the
+  per-app rules (matched on the iOS bundle id) and a lock check: a locked
+  iPhone, or one whose lock state cannot be read, gets nothing — and is not
+  read either (no snapshot, no screenshot); the lock is read again before
+  any command sent to the runner more than a second after the last
+  unlocked answer. While an approval file or a `NORACU_DENY_APPS` of your
+  own is set, no input that names `com.apple.springboard` is sent — not
+  even one tap on a button of a system prompt; it is `input_denied`: sent
+  by screen coordinates it would land on whichever app is in front, a tap
+  on a Home Screen icon would open an app the rules were not asked about
+  (apps are opened with `ios_launch`; `ios_home` still goes out), and text
+  goes wherever the keyboard focus is. The refusal comes before a runner is
+  started, so it changes nothing on the phone. An input the
+  runner does not answer in time ends the runner, so the gesture cannot go
+  out later; a failure XCTest records during a gesture is reported as
+  `xctest_issue`, never as sent, and ends the runner too. The runner
+  listens only on the device's own CoreDevice tunnel address (`127.0.0.1` on
+  a simulator), accepts only its peer on that tunnel, and requires a token
+  made new at every start. Needs Xcode, a developer team, a paired iPhone
+  with Developer Mode (cable or local network) or a booted simulator, and one
+  build per device: `npx noracu ios-setup --team <TeamID>` — an explicit
+  command, never run on install. The iPhone must stay unlocked. The Mirroring
+  backend remains the default and is unchanged. Under `NORACU_READ_ONLY=1` the
+  backend answers `ios_status` only and never starts the runner: `ios_snapshot`
+  and `ios_screenshot` return `runner_not_started`. `noracu ios-setup` stops a
+  build that has not finished in 15 minutes and says so. A runner that was
+  stopped is given up to 4 seconds to exit before the next one starts —
+  while it is still there, every call says so instead of starting a second
+  one — and `devicectl` calls still running end with the server. The runner
+  names the sources it was built from when it starts, and one built from
+  other sources than the installed noracu's — an older build left on the
+  phone — is not used: `runner_version_mismatch`, run `ios-setup` again
+  (the start is tried once more first: the first start after a rebuild was
+  seen running the previous build).
+- **`mac_drag` timing:** `hold_ms` (0–2000) holds after mouse-down before the
+  move; `step_ms` (1–500) moves in steps of about 20 points. A drag whose
+  waits add up to more than 10 s is refused, and a drag that fails midway
+  sends a mouse-up so the button is not left held.
+- **`permission_pending`:** when the Accessibility grant is missing,
+  `mac_status` returns a structured object to poll, naming the settings pane.
+- **`NORACU_LAYERS`:** a comma-separated list of `mac`, `browser`, `iphone`
+  narrows what a server offers: a tool of a layer that is left out is
+  neither listed nor callable, and the `initialize` instructions name only
+  the listed tools — for instance `NORACU_LAYERS=iphone` for a client entry
+  that carries the iPhone tools only. Unset or blank lists the Mac and
+  browser layers (see Changed). A name that is not one of the three stops
+  the server at start (exit code 2) instead of falling back. A call to a
+  tool of a layer that is off says which layer and how to turn it on.
+- **iPhone Mirroring: reading confidence.** `phone_open`'s result line names
+  the confidence (0–1) the recognizer gave the label it tapped; `phone_ocr`
+  and `phone_find` end each line with it, as before, and now say so.
+  Opt-in, off by default: with `NORACU_OCR_MIN_CONFIDENCE` set to a number
+  above 0 and at most 1, `phone_open` does not tap a label read below it and
+  answers `open_not_confirmed` with nothing tapped; a value that is set and
+  is not such a number makes `phone_open` refuse (`invalid_args`) rather
+  than run without the check. While it is unset, what
+  is tapped does not change.
+- **`browser_tabs`.** One tool for the tabs of the browser session: `list`
+  (the default), `new` (optionally with a url), `select` and `close`, by a
+  `tab_id` that stays the same while the tab lives. The active page changes
+  only when asked: a tab the page itself opens is listed and not followed.
+  `select` takes only a tab on an http(s) page, or one still on the blank
+  page that `browser_launch` or `browser_tabs` opened it on (`file://` with
+  `NORACU_ALLOW_FILE_URL=1`; `tab_not_selectable` otherwise): a tab someone
+  opened on a local file or a browser page, a blank tab that a page opened
+  (it can read that page), and a tab that shows a blank page after it has
+  loaded something, are listed (url and title), not read.
+  `close` only closes a tab `browser_tabs` opened (`tab_not_owned`
+  otherwise) and never the last open tab. A tab whose page does not answer
+  is listed with `title: null`. Not available under `NORACU_READ_ONLY=1`.
+
+### Changed
+- **Breaking:** the experimental iPhone layer is off by default. With
+  `NORACU_LAYERS` unset the server lists the Mac and browser tools only;
+  `NORACU_LAYERS=mac,browser,iphone` gives the 0.2.7 set (and is needed for
+  the `ios_*` tools of `NORACU_PHONE_BACKEND=xcuitest`). A server started
+  with `NORACU_PHONE_BACKEND` but without the iPhone layer says so on
+  stderr.
+- **Breaking:** `browser_evaluate` is off by default. It runs any script in
+  the page, so it returns `eval_disabled` and runs nothing unless the server
+  was started with `NORACU_ENABLE_EVAL=1`. `NORACU_DISABLE_EVAL=1` still
+  turns it off and wins over `NORACU_ENABLE_EVAL`. The tool stays listed;
+  `mac_status` reports whether it is on.
+- Terminal apps and IDEs with a built-in terminal get no input by default
+  (see `NORACU_DENY_APPS` above); set `NORACU_DENY_APPS=none` for the 0.2.7
+  behaviour.
+- `mechanism: "physical"` on `mac_click` always uses the real pointer.
+- `mac_status` reports `bgpost`, `stop_file`, `approval_file` and
+  `deny_apps`.
+- `phone_tap` and `phone_longpress` refuse a point on the iPhone Mirroring
+  window's transparent margin — the strip above the phone screen, which
+  holds the window's own controls, and the thin edge around it — with
+  `out_of_screen`; nothing is sent. While the screen's edges are not known
+  (see Fixed), a point where the margin may be — near the top of the window
+  or along its other sides — is refused as well, and a tap that goes out
+  says the edges were not known. When nothing is remembered and the window's
+  image cannot be read, or the window is gone by the time its edges are
+  looked up, a tap or long press is refused with `capture_failed`, as a
+  swipe is.
+- The note that a server process is older than the files on disk now looks
+  at every source file in `src/` — it used to look at `server.mjs` and
+  `mac-ax.js` only — and names the files that changed. A file put back to
+  its earlier content does not count.
+
+### Fixed
+
+- **Deep code audit (S5A), 2026-11-14.**
+  - The stop file, a cancelled request and a server shutdown are checked
+    again right before an input runs: after the read of the time since the
+    last keyboard or mouse event, and after waiting for an earlier phone
+    command to end. A stop file made, or a cancel sent, during those seconds
+    now stops the input; before, it went out.
+  - `mac_click` with `count` 2 or 3 through cliclick sends one double or
+    triple click (cliclick `dc:` / `tc:`); before, it sent separate single
+    clicks, which apps do not take for a double click.
+  - `mac_screenshot` with `display` uses that display's own scale for
+    `scale` and `logical_size`; before, it used the main display's, which
+    is wrong next to a screen of another scale.
+  - `mac_app` launch with `cdp_port` asks the app rules first: an app the
+    deny list or the approval file rules out (Cursor is on the default list)
+    is not launched with a DevTools port, because the browser tools that
+    would drive it are not judged by app rules. An app that is not running is
+    named by its bundle on disk.
+  - Semantic actions: an element that cannot be read after the action (the
+    app did not answer in time) no longer counts as gone, so it is not
+    reported `delivered_verified`; only an element that is really gone
+    is evidence.
+  - `mac_set_value` on a checkbox, radio button or switch waits up to 1 s for
+    the control to show a new state before deciding on a second press (and
+    again after a second press, for a mixed checkbox); a
+    control that showed its new state late was pressed twice, which undid
+    the first press. One that never changes is reported `NOT_CONFIRMED` and
+    not pressed again.
+  - Typing into a secure (password) field that takes text only by rewriting
+    its whole value is refused unless the field is known to be empty;
+    before, what was already typed there was replaced by the new text.
+  - App rules match the bundle id and app name without surrounding spaces,
+    as the check before them reads them; a FIFO named by
+    `NORACU_APPROVAL_FILE` is refused at once (not a regular file) instead
+    of blocking the server until something writes to it.
+  - Browser: when a persistent profile opens but no page can be made in it,
+    noracu closes it again, so the profile lock does not stay held.
+  - `phone_open` after a timeout: the Home Screen tidy-up is skipped while
+    the stop file exists, and the result says the Home Screen command was
+    sent; it no longer says the phone was returned to the Home Screen, which
+    was not checked.
+  - When a result's first text block is JSON (a screenshot's metadata,
+    `mac_status`), the note that the server is older than its files on disk
+    now comes in a text block of its own after it; before, it was put in
+    front of the JSON, which then no longer parsed.
+- **Formal pre-release review (S4A), 2026-11-13.**
+  - iPhone, XCUITest backend: no input goes to an app while a system alert (a
+    permission prompt) is up, or while SpringBoard cannot be read
+    (`system_alert`, nothing sent); the runner listens only on loopback or the
+    CoreDevice tunnel's unique-local address; `ios_home` says the app left the
+    front only when it was read in front before the press and in the background
+    after it; input never starts a runner, and a runner that had to start
+    during a call refuses that call's input (`runner_restarted`); an app's state
+    on a locked phone is not taken as an answer; secure text fields are
+    reported as `secureTextField`.
+  - The person at the Mac goes first: only keyboard and mouse events noracu
+    posts through the HID system count as its own, so an AXPress, a set_value
+    or a background post no longer hides a key the person pressed meanwhile.
+  - App rules: a pid that was not read is refused instead of judging the
+    frontmost app; an app with no name, or with no bundle id while a rule is in
+    force, gets nothing; `mac_click` with `screenshot_id` and `app` needs the
+    screenshot's window to be that app's, and the window is read again right
+    before the click (`stale` if it moved).
+  - Background posting refuses a missing, fractional or out-of-range pid, key
+    or point instead of turning it into 0; a posted click carries no modifier
+    someone holds; Safari, Firefox and Arc take the real pointer.
+  - Browser: `browser_tabs` new reports the tab's real address, and says
+    `delivered_unverified` (a blank tab may be left) or `active_page_not_allowed`
+    instead of verified when it did not see it; closing in your Chrome waits for
+    the disconnect and counts only tabs noracu's close reached; a session with
+    no tab left answers `no_active_page` with what to do.
+- **Second review (S4B) and the device run of 2026-11-14** (iPhone 16 Pro, iOS 27.2.1).
+  - iPhone, XCUITest backend: taps, long presses and drags go out without
+    XCTest's wait for the app to go idle — with a context menu up (a
+    long-pressed note in Notes), a tap went out in about a second instead of
+    timing out unsent after 20 s; a runner that ends while the iPhone turns on
+    UI automation (seen right after an iOS update) says to unlock the iPhone and
+    check Settings › Developer › Enable UI Automation; an input whose runner
+    went away after the element was read answers `runner_unreachable`.
+  - `noracu ios-setup` removes a build made for another `--bundle-prefix`
+    before building, and fails instead of reporting "Built" when the build
+    still names a runner under another prefix; when no runner bundle id can
+    be read back from the build, "Built" comes with a line saying the prefix
+    was not checked.
+  - `system_alert` says a system prompt is up on the iPhone only when the
+    runner saw one; when SpringBoard could not be read, the answer says
+    noracu could not tell, and still sends nothing.
+  - iPhone Mirroring: a swipe whose end was moved off the mirror window's
+    margin and that is left shorter than about 10 pt is refused
+    (`out_of_screen`) instead of landing as a tap; a phone input that imctl
+    refused before sending anything no longer counts as noracu's own keyboard
+    or mouse event, so the person's input of that moment is not taken for it.
+  - `mac_screenshot` with `display` and `region`: `region` is in the screen
+    points `mac_windows` reports (not relative to the display), and a region
+    outside the display named is refused instead of returning another
+    display's pixels.
+- Playwright is held at 1.65.x (`~1.65.1`; it was `^1.58.0`), the version this
+  release was tested with, so a fresh install gets the Playwright the tests
+  ran on rather than any later 1.x. With 1.65.1, `browser_launch` with
+  `cdp_port` was tried against Chrome for Testing 156 and 159, and with
+  `chrome: true` against 159 (2026-11-14).
+- Browser: when the active tab closes, the tab that takes over is the first
+  open one that shows an http(s) page — or is still on the blank page
+  that `browser_launch` or `browser_tabs` opened it on (`file://` with
+  `NORACU_ALLOW_FILE_URL=1`). Before, it was the first open tab whatever it
+  showed: in a headed session that could be a tab someone had opened on a
+  local file, and `browser_read` then returned the file. When no such tab
+  is open the page tools return `no_active_page`; `browser_tabs` still
+  works and can open or select one. The tab that already is the active
+  page is held to the same rule on every call: once it shows something
+  else — a blob the page made, Chromium's page for a load that failed, a
+  blank page after another page, a local file opened in it by hand — the
+  page tools return
+  `active_page_not_allowed` and the tab stays the active page;
+  `browser_navigate` takes it to an http(s) page again, and `browser_tabs`
+  can open or select another. (After a load that failed, `browser_read`
+  used to return the empty text of Chromium's error page and
+  `browser_screenshot` a picture of it.) What `browser_read`,
+  `browser_snapshot`, `browser_screenshot` or `browser_evaluate` got back —
+  a result or an error — is dropped as well when the page stopped passing,
+  or went through a page that does not pass, while they worked; and
+  `browser_snapshot`, whose tree, element list and address are read one
+  after the other, returns `page_changed` when the page navigated in
+  between — to another address, by a fragment, a reload or
+  `history.pushState`. `browser_read` does the same without a selector;
+  with one it hands its text over under a first line that says the page
+  navigated and gives both addresses; a script's result and a screenshot
+  are handed over with a note that says so. An `element_index` is not used
+  after the page navigated, a reload of the same address included. The
+  session's first tab is Chromium's own: noracu sends it to `about:blank`
+  itself at launch and empties `window.name` before it counts as that
+  blank page, and any navigation it reports afterwards ends that; when
+  the tab does not count, `browser_launch` says so in its result.
+  A session attached to an app with `cdp_port` keeps that app's own
+  pages, whatever they show.
+- Before a physical click or drag the person-goes-first check is made a
+  second time, right before the pointer is taken: someone who started using
+  the keyboard or mouse after the call left the queue keeps the pointer —
+  `user_active`, nothing is sent. The check used to be made once, when the
+  call left the queue.
+- A Mac or iPhone input call that sent nothing — refused with
+  `delivery=not_delivered` — no longer counts as noracu's own last input.
+  Before, the person's keyboard or mouse event of that moment could be taken
+  for noracu's own, and the next call went ahead instead of returning
+  `user_active`.
+- `phone_swipe` keeps both points inside the phone screen. The iPhone
+  Mirroring window has a transparent margin around the screen (a strip
+  above it and a thin edge on the other sides: x 0.029–0.971, y 0.061–0.987
+  of a 280×620 pt window in a device run on macOS 27.2), and iOS cancels a
+  drag that starts or ends there. An App Switcher card swiped up to y 0.03
+  stayed put (no pixel changed) while the same swipe ending at y 0.12 closed
+  it, and a share sheet dragged down to y 0.995 stayed open; `phone_swipe`
+  reported `swiped` each time. The screen's edges are now read from the
+  window's own pixels (from their transparency, so a black app edge still
+  counts as screen); a point on the margin is moved 0.01 inside the edge and
+  the result names it. The edges are measured once per window size and
+  macOS version and remembered in
+  `~/Library/Caches/noracu/phone-screen-rect.json`, because phone apps treat
+  every capture of the mirror window as a screenshot (see Known issues). A
+  measurement that shows no strip above the screen — what the capture gives
+  while the pointer rests on that strip — is neither used nor remembered:
+  both points are then kept clear of where the margin may be, and the
+  result says so. A swipe whose two points would become one point once
+  moved inside — a press, not a swipe — is refused with `out_of_screen`.
+  When nothing is
+  remembered and the window's image cannot be read, or the window is gone
+  by the time its edges are looked up, the swipe is refused with
+  `capture_failed` and nothing is sent.
+
+### Known issues
+- XCUITest backend: what was run, and what was not. Run: iPhone 16 Pro on
+  iOS 27.2 (paired; over the local network through the CoreDevice tunnel,
+  and with the cable connected, which `devicectl` reports as a wired
+  transport) and an iPhone 17 Pro simulator on iOS 26.5, Xcode 27.2, in the
+  Settings app and on the Home Screen — every `ios_*` tool through the MCP
+  server. Measured on the
+  iPhone: the first call that needs the phone takes about 9 s (the runner
+  starts); each input then takes about 0.8 s more than on the simulator,
+  because the lock check asks `devicectl` every time; a list dragged 150 pt
+  moved 136–140 pt. A locked iPhone was run twice: `ios_status` reports it,
+  `ios_home`, `ios_launch`, `ios_snapshot` and `ios_screenshot` return
+  `device_locked`, and the runner is not started. Not run: a phone that
+  locks while the runner is up, a tap into a system prompt on a real
+  iPhone (on the simulator only), apps that ask for a login, a phone with
+  Wi-Fi off, and iPhone models or iOS versions other than the two above. An
+  app that has just come to the front keeps filling in its rows for a
+  second or two, so an index from a
+  snapshot taken in that moment can come back as `element_no_longer_valid`.
+- iPhone Mirroring margin. While the phone screen's edges are not known
+  (the pointer resting on the strip above the screen when the window is
+  measured), a point is sent only when it is clear of a band along the
+  window's edges: the top 8 % of its height or 48 pt, whichever is more;
+  4 % of its width or 12 pt at each side; 2 % or 12 pt at the bottom. The
+  bands were sized from one window: 280×620 pt on macOS 27.2, where the
+  strip is 38 pt and the side margins 8 pt. A window whose strip is taller
+  than its band would let a tap near the top reach the window's own
+  controls while the edges are not known. Not run: other window sizes, and
+  this path on a real mirror window (unit tests only).
+- Phone apps see a capture of the iPhone Mirroring window as a screenshot.
+  In a device run (iPhone 17 Pro Max on iOS 27, Mac on macOS 27.2) LinkedIn
+  and rednote each showed their after-screenshot share sheet 1–4 s after
+  every capture, one more sheet per capture. Every tool that reads the
+  screen captures it: `phone_screenshot`, `phone_ocr`, `phone_find`, any
+  `expect` check, the checks inside `phone_type`, `phone_open` and
+  `phone_scroll`, and a phone input that first has to bring iPhone Mirroring
+  to the front. Ruled out: a stray tap (the sheets appeared in a run that
+  sent no input) and the capture method (`CGWindowListCreateImage` and
+  `screencapture -l` both raised them). X and the Home Screen showed no
+  reaction. Not tested: other apps, and whether an app that reports
+  screenshots to someone else does so here. See SECURITY.md, threat 21.
+
 ## [0.2.7] — 2026-11-08
 
 ### Changed

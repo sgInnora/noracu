@@ -14,6 +14,23 @@ sys.path.insert(0, "src")
 from imctl.window import WindowBounds, parse_overlay
 from imctl.input import _ease_in_out
 from imctl.cli import build_parser
+from imctl import cli as _cli_under_test
+
+# 2026-11-10: no test reads the real mirror window or the real remembered-edges file.
+# 2026-11-11 (pre-review P5): a tap with no window record is refused, so by default the tests see a
+# 280x620 pt mirror window whose phone screen is where a device run measured it, remembered in a
+# throwaway file. The tests of the phone-screen check set the window, the measurement and the file
+# themselves (_phone_window below).
+import atexit as _atexit
+import os as _os
+import shutil as _shutil
+import tempfile as _tempfile
+
+_default_rect_dir = _tempfile.mkdtemp(prefix="imctl-rect-default-")
+_atexit.register(_shutil.rmtree, _default_rect_dir, True)
+_cli_under_test._window_info = lambda: {"id": 1, "x": 0, "y": 0, "w": 280, "h": 620, "onscreen": True}
+_cli_under_test._screen_rect = lambda: (0.0286, 0.0613, 0.9714, 0.9871)
+_cli_under_test._rect_file = _os.path.join(_default_rect_dir, "noracu", "phone-screen-rect.json")
 
 
 def test_denormalize():
@@ -4663,6 +4680,519 @@ def test_pointer_goes_back_after_a_gesture():
             os.environ.pop("NORACU_USER_IDLE_S", None)
         else:
             os.environ["NORACU_USER_IDLE_S"] = saved_env
+
+
+
+def test_screen_rect_from_alpha():
+    # 2026-11-10: the phone screen inside the mirror window is the opaque area of its alpha map
+    from imctl.verify import screen_rect_from_alpha
+    from imctl.window import WindowError
+    w, h = 20, 40
+    a = bytearray(w * h)
+    for y in range(4, 39):
+        for x in range(2, 18):
+            a[y * w + x] = 255
+    for x, y in ((2, 4), (17, 4), (2, 38), (17, 38)):  # rounded corners do not move the edges
+        a[y * w + x] = 0
+    assert screen_rect_from_alpha(bytes(a), w, h) == (0.1, 0.1, 0.9, 0.975)
+    try:
+        screen_rect_from_alpha(bytes(w * h), w, h)
+        assert False, "a fully transparent frame must not give a screen"
+    except WindowError:
+        pass
+    try:
+        screen_rect_from_alpha(b"\xff" * 10, w, h)
+        assert False, "a map of the wrong size must be refused"
+    except ValueError:
+        pass
+
+
+def test_clamp_to_rect():
+    from imctl.input import clamp_to_rect
+    rect = (0.0286, 0.0613, 0.9714, 0.9871)  # device run 2026-11-10
+    assert clamp_to_rect(0.5, 0.12, rect) == (0.5, 0.12)  # inside: unchanged
+    x, y = clamp_to_rect(0.5, 0.03, rect)  # above the screen: onto its top edge, 0.01 inside
+    assert x == 0.5 and abs(y - 0.0713) < 1e-9, (x, y)
+    x, y = clamp_to_rect(0.0, 0.995, rect)
+    assert abs(x - 0.0386) < 1e-9 and abs(y - 0.9771) < 1e-9, (x, y)
+    try:
+        clamp_to_rect(0.5, 0.5, (0.4, 0.4, 0.41, 0.9))
+        assert False, "a screen narrower than twice the inset must be refused"
+    except ValueError:
+        pass
+
+
+def _phone_window(rect=None, rect_error=None, window=(280, 620), rect_file=None):
+    """Context manager: swap the live/expect guards, the window record, the edge measurement, the
+    remembered-edges file and the gestures. Yields (sent, measured): what would have been sent and
+    one item per capture the measurement made."""
+    import contextlib
+    import os
+    import shutil
+    import tempfile
+    from imctl import cli
+
+    @contextlib.contextmanager
+    def swapped():
+        sent, measured = [], []
+        tmp = None
+        path = rect_file
+        if path is None:
+            tmp = tempfile.mkdtemp(prefix="imctl-rect-")
+            path = os.path.join(tmp, "noracu", "phone-screen-rect.json")
+        real = (cli._require_live, cli._require_expect, cli._screen_rect, cli._window_info, cli._rect_file,
+                cli.input.swipe, cli.input.tap, cli.input.long_press)
+
+        def fake_rect():
+            measured.append(1)
+            if rect_error is not None:
+                raise rect_error
+            return rect
+
+        cli._require_live = lambda: None
+        cli._require_expect = lambda args, **kw: None
+        cli._screen_rect = fake_rect
+        cli._window_info = lambda: {"id": 1, "x": 0, "y": 0, "w": window[0], "h": window[1], "onscreen": True}
+        cli._rect_file = path
+        cli.input.swipe = lambda *a: sent.append(("swipe",) + a)
+        cli.input.tap = lambda *a: sent.append(("tap",) + a)
+        cli.input.long_press = lambda *a: sent.append(("long_press",) + a)
+        try:
+            yield sent, measured
+        finally:
+            (cli._require_live, cli._require_expect, cli._screen_rect, cli._window_info, cli._rect_file,
+             cli.input.swipe, cli.input.tap, cli.input.long_press) = real
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    return swapped()
+
+
+def _run_cli(argv):
+    """Run one parsed imctl command in this process; returns (exit code, stdout, stderr)."""
+    import contextlib
+    import io
+
+    out, err = io.StringIO(), io.StringIO()
+    args = build_parser().parse_args(argv)
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = args.func(args)
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _run_swipe(argv, rect=None, rect_error=None):
+    """Run one swipe against a 280x620 window with nothing remembered; sent holds (fx, fy, tx, ty, ms)."""
+    with _phone_window(rect, rect_error) as (sent, _measured):
+        rc, out, err = _run_cli(argv)
+        return rc, [g[1:] for g in sent], out, err
+
+
+def test_swipe_moves_points_inside_the_phone_screen():
+    rect = (0.0286, 0.0613, 0.9714, 0.9871)
+    # end above the screen (the 2026-11-10 App Switcher swipe that did nothing): moved and named
+    rc, sent, out, _ = _run_swipe(["swipe", "0.5", "0.55", "0.5", "0.03", "--ms", "300"], rect)
+    assert rc == 0 and len(sent) == 1, (rc, sent)
+    fx, fy, tx, ty, ms = sent[0]
+    assert (fx, fy) == (0.5, 0.55) and tx == 0.5 and abs(ty - 0.0713) < 1e-9 and ms == 300, sent
+    assert out.startswith("swiped (0.5,0.55) -> (0.5,0.071)") and "moved the end (0.5,0.03)" in out, out
+    # both points inside: sent as asked, no note
+    rc, sent, out, _ = _run_swipe(["swipe", "0.5", "0.55", "0.5", "0.12"], rect)
+    assert rc == 0 and sent[0][:4] == (0.5, 0.55, 0.5, 0.12) and "moved" not in out, (sent, out)
+    # both points outside, on different sides: both moved and named
+    rc, sent, out, _ = _run_swipe(["swipe", "0.5", "0.999", "0.5", "0.0"], rect)
+    assert rc == 0 and "moved the start (0.5,0.999) and end (0.5,0)" in out, out
+    # both points on the margin at the same side (a sheet dragged from its grabber past the bottom edge): moved
+    # inside they would be one point — a press, not a swipe — so nothing is sent (pre-review P4)
+    rc, sent, out, err = _run_swipe(["swipe", "0.5", "0.999", "0.5", "1.0"], rect)
+    assert rc == 2 and sent == [] and out == "" and err.startswith("out_of_screen: the swipe from (0.5,0.999) to (0.5,1) starts or ends on"), (rc, sent, err)
+    assert "nothing was sent" in err, err
+    # one point on the margin and the other where that one is moved to: one point again — and the refusal
+    # does not say that both were on the margin (pre-review P5)
+    rc, sent, _out, err = _run_swipe(["swipe", "0.5", "0.01", "0.5", "0.0713"], rect)
+    assert rc == 2 and sent == [] and err.startswith("out_of_screen: the swipe from (0.5,0.01) to (0.5,0.071) starts or ends on"), (rc, sent, err)
+    assert "both points" not in err and "a press, not a swipe" in err, err
+    # two points almost on top of each other on the margin: moved inside they are one point — refused as
+    # well, not sent as a press on the phone screen (pre-review P5)
+    rc, sent, out, err = _run_swipe(["swipe", "0.5", "0.01", "0.5004", "0.01"], rect)
+    assert rc == 2 and sent == [] and out == "" and err.startswith("out_of_screen: the swipe from (0.5,0.01) to (0.5,0.01) starts or ends on"), (rc, sent, err)
+    # a pull-down from the margin that ends just inside the screen: moved, it is about 2 pt long — iOS would
+    # take it as a tap at the top of the app, so it is refused (review S4A-s10-gemini-1)
+    rc, sent, out, err = _run_swipe(["swipe", "0.5", "0.01", "0.5", "0.075"], rect)
+    assert rc == 2 and sent == [] and out == "" and "a press, not a swipe" in err and "nothing was sent" in err, (rc, sent, err)
+    # moved, but still a real swipe (about 18 pt): it goes out, and the line names the moved point
+    rc, sent, out, _ = _run_swipe(["swipe", "0.5", "0.01", "0.5", "0.1"], rect)
+    assert rc == 0 and len(sent) == 1 and abs(sent[0][1] - 0.0713) < 1e-9 and "moved the start (0.5,0.01)" in out, (rc, sent, out)
+    # the same swipe on the phone screen was not moved: it goes out as it was asked
+    rc, sent, out, _ = _run_swipe(["swipe", "0.5", "0.5", "0.5004", "0.5"], rect)
+    assert rc == 0 and sent[0][:4] == (0.5, 0.5, 0.5004, 0.5) and "moved" not in out, (rc, sent, out)
+    # with the edges not known: the same
+    rc, sent, _out, err = _run_swipe(["swipe", "0.5", "0.01", "0.5", "0.05"], (0.0, 0.0, 1.0, 1.0))
+    assert rc == 2 and sent == [] and err.startswith("out_of_screen: the swipe from (0.5,0.01) to (0.5,0.05) starts or ends on"), (rc, sent, err)
+    rc, sent, _out, err = _run_swipe(["swipe", "0.5", "0.01", "0.5004", "0.01"], (0.0, 0.0, 1.0, 1.0))
+    assert rc == 2 and sent == [] and err.startswith("out_of_screen: the swipe from"), (rc, sent, err)
+
+
+def test_swipe_refused_when_the_screen_cannot_be_measured():
+    from imctl.window import WindowError
+    rc, sent, _, err = _run_swipe(["swipe", "0.5", "0.55", "0.5", "0.12"],
+                                  rect_error=WindowError("could not read the mirroring window's image"))
+    assert rc == 7 and sent == [] and err.startswith("capture_failed:") and "nothing was sent" in err, (rc, sent, err)
+
+
+DEVICE_RECT = (0.0286, 0.0613, 0.9714, 0.9871)  # device run 2026-11-10, 280x620 pt window on macOS 27.2
+
+
+def test_screenrect_trusts_only_a_measurement_with_the_strip_above_the_screen():
+    from imctl import screenrect
+    assert screenrect.trusted(DEVICE_RECT)
+    assert screenrect.trusted((0.0, 0.05, 1.0, 1.0))  # a strip above and no side edges: still told apart
+    # the pointer resting on the strip above the screen: the capture reads as the whole window
+    assert not screenrect.trusted((0.0, 0.0, 1.0, 1.0))
+    assert not screenrect.trusted((0.0286, 0.0, 0.9714, 0.9871))  # side edges but no strip above
+    assert not screenrect.trusted((0.0286, 0.4, 0.9714, 0.9871))  # a "strip" taller than a quarter of the window
+    assert not screenrect.trusted((0.4, 0.06, 0.6, 0.98))  # a screen narrower than half the window
+    for junk in (None, "x", (0.1, 0.1, 0.9), (0.1, 0.1, 0.9, float("nan")), (0.9, 0.06, 0.1, 0.98)):
+        assert not screenrect.trusted(junk), junk
+    assert screenrect.contains(DEVICE_RECT, 0.5, 0.0613) and screenrect.contains(DEVICE_RECT, 0.9714, 0.9871)
+    assert not screenrect.contains(DEVICE_RECT, 0.5, 0.03) and not screenrect.contains(DEVICE_RECT, 0.99, 0.5)
+    assert screenrect.key(280.0, 620.4).startswith("280x620@")
+
+
+def test_screenrect_measures_once_per_window_size_and_remembers():
+    import json
+    import os
+    import tempfile
+    from imctl import screenrect
+
+    d = tempfile.mkdtemp(prefix="imctl-rect-")
+    path = os.path.join(d, "sub", "phone-screen-rect.json")
+    calls = []
+
+    def measure(value=DEVICE_RECT):
+        calls.append(1)
+        return value
+
+    try:
+        # nothing remembered: one capture, then remembered (the folder is made on the way)
+        assert screenrect.resolve("280x620@27.2", measure, retry_untrusted=True, now=1000, path=path) == (DEVICE_RECT, "measured")
+        assert screenrect.resolve("280x620@27.2", measure, retry_untrusted=True, now=2000, path=path) == (DEVICE_RECT, "remembered")
+        assert screenrect.resolve("280x620@27.2", measure, retry_untrusted=False, now=3000, path=path) == (DEVICE_RECT, "remembered")
+        assert screenrect.remembered("280x620@27.2", path=path) == DEVICE_RECT and screenrect.remembered("1x1@27.2", path=path) is None
+        assert len(calls) == 1, calls
+        # another window size, or the same size after a macOS update, is measured for itself
+        assert screenrect.resolve("326x720@27.2", measure, retry_untrusted=True, now=3000, path=path)[1] == "measured"
+        assert screenrect.resolve("280x620@27.3", measure, retry_untrusted=True, now=3000, path=path)[1] == "measured"
+        assert len(calls) == 3, calls
+        saved = json.loads(open(path, encoding="utf-8").read())
+        assert saved["version"] == 1 and saved["sizes"]["280x620@27.2"] == {"rect": list(DEVICE_RECT), "measured_at": 1000}, saved
+
+        # an untrusted measurement is never remembered as edges
+        whole = lambda: measure((0.0, 0.0, 1.0, 1.0))
+        assert screenrect.resolve("400x880@27.2", whole, retry_untrusted=True, now=5000, path=path) == (None, "untrusted")
+        assert json.loads(open(path, encoding="utf-8").read())["sizes"]["400x880@27.2"] == {"untrusted_at": 5000}
+        assert screenrect.remembered("400x880@27.2", path=path) is None
+        # a swipe measures again at once; a tap waits out UNTRUSTED_TTL_S first
+        n = len(calls)
+        assert screenrect.resolve("400x880@27.2", whole, retry_untrusted=False, now=5100, path=path) == (None, "not_measured")
+        assert len(calls) == n
+        assert screenrect.resolve("400x880@27.2", whole, retry_untrusted=True, now=5100, path=path) == (None, "untrusted")
+        assert screenrect.resolve("400x880@27.2", whole, retry_untrusted=False,
+                                  now=5100 + screenrect.UNTRUSTED_TTL_S, path=path) == (None, "untrusted")
+        assert len(calls) == n + 2, calls
+        # a later trusted measurement replaces the untrusted mark
+        assert screenrect.resolve("400x880@27.2", measure, retry_untrusted=True, now=9000, path=path) == (DEVICE_RECT, "measured")
+        assert screenrect.resolve("400x880@27.2", whole, retry_untrusted=False, now=9001, path=path) == (DEVICE_RECT, "remembered")
+
+        # a file that is not ours, or holds untrustworthy edges, is ignored: measured again and rewritten
+        for bad in ("not json", json.dumps({"version": 99, "sizes": {}}), json.dumps([1, 2]),
+                    json.dumps({"version": 1, "sizes": {"280x620@27.2": {"rect": [0, 0, 1, 1], "measured_at": 1}}}),
+                    json.dumps({"version": 1, "sizes": {"280x620@27.2": "x"}})):
+            open(path, "w", encoding="utf-8").write(bad)
+            assert screenrect.resolve("280x620@27.2", measure, retry_untrusted=True, now=1, path=path) == (DEVICE_RECT, "measured"), bad
+        # a capture failure passes through and leaves the file alone
+        before = open(path, encoding="utf-8").read()
+
+        def boom():
+            raise RuntimeError("no image")
+
+        try:
+            screenrect.resolve("999x999@27.2", boom, retry_untrusted=True, now=1, path=path)
+            assert False, "the measurement's own error must reach the caller"
+        except RuntimeError:
+            pass
+        assert open(path, encoding="utf-8").read() == before
+        # a file that cannot be written (its folder is a file) only costs the next capture
+        blocked = os.path.join(d, "plain-file")
+        open(blocked, "w").close()
+        nowhere = os.path.join(blocked, "phone-screen-rect.json")
+        assert screenrect.resolve("280x620@27.2", measure, retry_untrusted=True, now=1, path=nowhere) == (DEVICE_RECT, "measured")
+        assert screenrect.resolve("280x620@27.2", measure, retry_untrusted=True, now=2, path=nowhere) == (DEVICE_RECT, "measured")
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_swipe_captures_the_window_once_per_size():
+    # 2026-11-10: phone apps treat every capture of the mirror window as a screenshot, so the edges are
+    # measured once and remembered, not before each swipe
+    import os
+    import tempfile
+    d = tempfile.mkdtemp(prefix="imctl-rect-")
+    path = os.path.join(d, "phone-screen-rect.json")
+    try:
+        with _phone_window(DEVICE_RECT, rect_file=path) as (sent, measured):
+            for _ in range(3):
+                rc, out, _ = _run_cli(["swipe", "0.5", "0.55", "0.5", "0.03"])
+                assert rc == 0 and "moved the end (0.5,0.03)" in out, out
+            assert len(measured) == 1 and len(sent) == 3, (measured, sent)
+        # the same file serves the next process; a resized window is measured for itself
+        with _phone_window(DEVICE_RECT, rect_file=path) as (sent, measured):
+            assert _run_cli(["swipe", "0.5", "0.55", "0.5", "0.03"])[0] == 0 and measured == []
+        with _phone_window(DEVICE_RECT, window=(326, 720), rect_file=path) as (sent, measured):
+            assert _run_cli(["swipe", "0.5", "0.55", "0.5", "0.03"])[0] == 0 and len(measured) == 1
+        # remembered edges need no capture, so a window whose image cannot be read still swipes
+        from imctl.window import WindowError
+        with _phone_window(rect_error=WindowError("no image"), rect_file=path) as (sent, measured):
+            rc, out, _ = _run_cli(["swipe", "0.5", "0.55", "0.5", "0.03"])
+            assert rc == 0 and measured == [] and len(sent) == 1 and "moved the end" in out, (rc, out)
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_swipe_keeps_clear_of_the_possible_margin_when_the_edges_cannot_be_trusted():
+    # the pointer resting on the strip above the screen: the capture reads as the whole window
+    with _phone_window((0.0, 0.0, 1.0, 1.0)) as (sent, measured):
+        rc, out, _ = _run_cli(["swipe", "0.5", "0.55", "0.5", "0.03", "--ms", "300"])
+        assert rc == 0 and sent == [("swipe", 0.5, 0.55, 0.5, 0.08, 300)], (rc, sent)
+        assert out.startswith("swiped (0.5,0.55) -> (0.5,0.08) (the phone screen's edges are not known"), out
+        assert "moved the end (0.5,0.03) clear of where the window's margin may be, into x 0.043-0.957 y 0.080-0.980" in out, out
+        assert "iOS cancels a drag" in out, out
+        # not remembered: the next swipe measures again; points already clear of the band go as asked
+        rc, out, _ = _run_cli(["swipe", "0.5", "0.55", "0.5", "0.12"])
+        assert len(measured) == 2 and sent[1][1:5] == (0.5, 0.55, 0.5, 0.12), (measured, sent)
+        assert "both points are clear of where the window's margin may be" in out and "moved" not in out, out
+        # a start on the left band and an end below the bottom one: both moved
+        _run_cli(["swipe", "0.01", "0.5", "0.5", "0.999"])
+        assert abs(sent[2][1] - 12 / 280) < 1e-9 and sent[2][2] == 0.5 and sent[2][3] == 0.5 and abs(sent[2][4] - 0.98) < 1e-9, sent[2]
+
+
+def test_tap_and_long_press_on_the_window_margin_are_refused():
+    import os
+    import tempfile
+    d = tempfile.mkdtemp(prefix="imctl-rect-")
+    path = os.path.join(d, "phone-screen-rect.json")
+    try:
+        with _phone_window(DEVICE_RECT, rect_file=path) as (sent, measured):
+            # the strip above the screen holds the window's own controls
+            rc, out, err = _run_cli(["tap", "0.5", "0.03"])
+            assert rc == 2 and sent == [] and out == "", (rc, sent, out)
+            assert err.startswith("out_of_screen: (0.5,0.03) is on the iPhone Mirroring window's margin"), err
+            assert "x 0.029-0.971, y 0.061-0.987" in err and err.rstrip().endswith("nothing was sent"), err
+            # the thin edge on the left, by long press; the refusal comes before the --expect capture
+            from imctl import cli
+            expect_checks = []
+            cli._require_expect = lambda args, **kw: expect_checks.append(1)
+            rc, _, err = _run_cli(["longpress", "0.01", "0.5", "--duration", "1", "--expect", "Anything"])
+            assert rc == 2 and sent == [] and err.startswith("out_of_screen: (0.01,0.5)"), (rc, sent, err)
+            assert expect_checks == [], "the screen must not be captured for --expect once the point is refused"
+            # on the phone screen, edge included: sent as before
+            assert _run_cli(["tap", "0.5", "0.0613"])[0] == 0 and _run_cli(["longpress", "0.5", "0.5", "--duration", "1"])[0] == 0
+            assert sent == [("tap", 0.5, 0.0613), ("long_press", 0.5, 0.5, 1.0)], sent
+            assert len(measured) == 1, measured  # four commands, one capture
+            # once the edges are remembered, a refused point never brings the mirror forward
+            brought = []
+            cli._require_live = lambda: brought.append(1)
+            assert _run_cli(["tap", "0.99", "0.5"])[0] == 2 and _run_cli(["longpress", "0.5", "0.999"])[0] == 2
+            assert brought == [] and len(measured) == 1, (brought, measured)
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+    # edges that cannot be trusted: a point where the margin may be is refused — after one more look each time —
+    # and a point well inside goes out without another capture
+    with _phone_window((0.0, 0.0, 1.0, 1.0)) as (sent, measured):
+        for _ in range(3):
+            rc, _out, err = _run_cli(["tap", "0.5", "0.03"])
+            assert rc == 2 and err.startswith("out_of_screen: (0.5,0.03) may be on the iPhone Mirroring window's margin"), (rc, err)
+            assert "x 0.043-0.957, y 0.080-0.980" in err and "nothing was sent" in err and "no strip above the screen" in err, err
+        assert sent == [] and len(measured) == 3, (sent, measured)
+        for _ in range(3):
+            rc, out, _err = _run_cli(["tap", "0.5", "0.5"])
+            assert rc == 0 and out.startswith("tapped (0.5, 0.5) — the phone screen's edges are not known"), (rc, out)
+        assert len(sent) == 3 and len(measured) == 3, (sent, measured)
+        rc, _out, err = _run_cli(["longpress", "0.99", "0.5", "--duration", "1"])
+        assert rc == 2 and len(sent) == 3 and err.startswith("out_of_screen: (0.99,0.5) may be"), (rc, sent, err)
+    # a window whose image cannot be read, nothing remembered: nothing says where the phone screen is — refused
+    # with capture_failed wherever the point is, as a swipe is (pre-review P4)
+    from imctl.window import WindowError
+    with _phone_window(rect_error=WindowError("no image")) as (sent, _measured):
+        for argv in (["tap", "0.5", "0.03"], ["tap", "0.5", "0.5"], ["longpress", "0.5", "0.5", "--duration", "1"]):
+            rc, out, err = _run_cli(argv)
+            assert rc == 7 and sent == [] and out == "" and err.startswith("capture_failed:") and "nothing was sent" in err, (argv, rc, sent, err)
+    # no window record once the mirror is live: nothing says where the phone screen is, and without the window's
+    # size the bands cannot be measured — capture_failed, nothing sent, nothing captured (pre-review P5)
+    from imctl import cli
+    with _phone_window(DEVICE_RECT) as (sent, measured):
+        cli._window_info = lambda: None
+        for argv in (["longpress", "0.5", "0.03", "--duration", "1"], ["tap", "0.5", "0.5"], ["swipe", "0.5", "0.6", "0.5", "0.4"]):
+            rc, out, err = _run_cli(argv)
+            assert rc == 7 and sent == [] and measured == [] and out == "", (argv, rc, sent, measured, out)
+            assert err.startswith("capture_failed:") and "nothing was sent" in err, (argv, err)
+    # a swipe whose window is there for the measurement — which cannot be trusted — and has no record right after
+    with _phone_window((0.0, 0.0, 1.0, 1.0)) as (sent, measured):
+        seen = [cli._window_info(), None]
+        cli._window_info = lambda: seen.pop(0)
+        rc, out, err = _run_cli(["swipe", "0.5", "0.6", "0.5", "0.4"])
+        assert rc == 7 and sent == [] and len(measured) == 1 and out == "" and err.startswith("capture_failed:"), (rc, sent, measured, err)
+    # the doubt does not outlast a clean look: untrusted once, then the pointer is out of the way
+    looks = [(0.0, 0.0, 1.0, 1.0), DEVICE_RECT]
+    with _phone_window(DEVICE_RECT) as (sent, measured):
+        cli._screen_rect = lambda: (measured.append(1), looks.pop(0))[1]
+        assert _run_cli(["tap", "0.5", "0.07"])[0] == 2   # edges not known: 0.07 is inside the band at the top
+        rc, out, _err = _run_cli(["tap", "0.5", "0.07"])   # measured again and trusted: 0.07 is on the screen (it starts at 0.0613)
+        assert rc == 0 and out.strip() == "tapped (0.5, 0.07)", (rc, out)   # edges known: no note
+        assert sent == [("tap", 0.5, 0.07)] and len(measured) == 2 and looks == [], (sent, measured, looks)
+
+
+def test_screenrect_fallback_band():
+    from imctl import screenrect
+    assert screenrect.fallback() == (0.04, 0.08, 0.96, 0.98)
+    x0, y0, x1, y1 = screenrect.fallback(280, 620)
+    assert abs(x0 - 12 / 280) < 1e-9 and y0 == 0.08 and abs(x1 - (1 - 12 / 280)) < 1e-9 and y1 == 0.98
+    # wider than the one measured margin on every side
+    assert x0 > DEVICE_RECT[0] and y0 > DEVICE_RECT[1] and x1 < DEVICE_RECT[2] and y1 < DEVICE_RECT[3]
+    # a small window: the bands are counted in points and are never made thinner to fit — the top band stays
+    # above the 38 pt of controls that were measured (pre-review P4) …
+    for w, h in ((200, 400), (140, 300), (100, 150)):
+        x0, y0, _x1, _y1 = screenrect.fallback(w, h)
+        assert abs(y0 - max(0.08, 48 / h)) < 1e-9 and y0 * h >= 48 - 1e-9 and abs(x0 - max(0.04, 12 / w)) < 1e-9, (w, h, y0)
+    # … and a window too small to have a part clear of its margin has none: everything is refused there
+    assert screenrect.fallback(10, 10) is None and screenrect.fallback(23, 400) is None and screenrect.fallback(280, 59) is None
+    with _phone_window((0.0, 0.0, 1.0, 1.0), window=(20, 40)) as (sent, _measured):
+        rc, _out, err = _run_cli(["tap", "0.5", "0.5"])
+        assert rc == 2 and sent == [] and "too small" in err and "nothing was sent" in err, (rc, sent, err)
+        rc, _out, err = _run_cli(["swipe", "0.5", "0.4", "0.5", "0.6"])
+        assert rc == 2 and sent == [] and "too small" in err, (rc, sent, err)
+    for bad in (None, 0, -5, float("nan"), "x"):
+        assert screenrect.fallback(bad, bad) == (0.04, 0.08, 0.96, 0.98), bad
+
+
+def test_open_app_min_confidence():
+    """WP2: phone_open reports the confidence of the label it taps; NORACU_OCR_MIN_CONFIDENCE
+    (opt-in) keeps it from tapping a label read below that. Fully injected — no phone."""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+
+    from imctl import cli, gestures
+    from imctl.gestures import OPEN_MIN_DIFF, _min_confidence, open_app
+    from imctl.vision import OCRHit
+
+    # the env value: only a number above 0 and at most 1 turns the minimum on
+    for raw in (None, "", "  "):
+        assert _min_confidence(raw) == (None, None), raw
+    for raw in ("abc", "0", "-0.5", "1.5", "nan", "inf", "90"):
+        assert _min_confidence(raw) == (None, raw), raw   # set, and not usable: phone_open refuses (below)
+    assert _min_confidence("0.5") == (0.5, None) and _min_confidence(" 1 ") == (1.0, None)
+
+    def frame(total_diff, size=100):
+        q, r = divmod(total_diff, size)
+        return bytes([q + 1] * r + [q] * (size - r))
+
+    ZEROS = b"\x00" * 100
+    OPENED = frame(round(OPEN_MIN_DIFF * 100))
+    UNCHANGED = frame(round(OPEN_MIN_DIFF * 100) - 1)
+    HEADER = OCRHit(text="Top Hit", nx=0.18, ny=0.16, confidence=1.0)
+    LABEL_AT = (0.18, 0.27)
+
+    def card(confidence):
+        return [HEADER, OCRHit(text="X", nx=0.18, ny=0.27, confidence=confidence)]
+
+    def run(screens, lumas):
+        screens, lumas = list(screens), list(lumas)
+        taps, homes, typed, rep = [], [], [], {}
+        result = open_app(
+            "X", spotlight_open=True, read_screen=lambda **kw: screens.pop(0),
+            luma=lambda: lumas.pop(0), sleep=lambda s: None,
+            tap=lambda nx, ny: taps.append((nx, ny)),
+            home=lambda: homes.append(1) or True,
+            clear_text=lambda: None, type_text=typed.append, report=rep)
+        assert screens == [] and lumas == [], (screens, lumas)  # every scripted read was used
+        return result, taps, homes, rep
+
+    saved = gestures.OCR_MIN_CONFIDENCE
+    try:
+        # off (the default): a label read with a low confidence is tapped as before; the report has it
+        gestures.OCR_MIN_CONFIDENCE = None
+        res, taps, homes, rep = run([card(0.3), card(0.3), []], [ZEROS, OPENED])
+        assert res == "opened" and taps == [LABEL_AT] and homes == []
+        assert rep == {"confidence": 0.3, "min_confidence": None}, rep
+
+        gestures.OCR_MIN_CONFIDENCE = 0.5
+        # below the minimum: nothing tapped, back on the Home Screen
+        res, taps, homes, rep = run([card(0.3), card(0.3)], [])
+        assert res == "low_confidence" and taps == [] and homes == [1]
+        assert rep == {"confidence": 0.3, "min_confidence": 0.5, "home": True}, rep
+        # exactly the minimum counts as enough
+        res, taps, homes, rep = run([card(0.5), card(0.5), []], [ZEROS, OPENED])
+        assert res == "opened" and taps == [LABEL_AT] and rep["confidence"] == 0.5
+        # a confidence that is not a number counts as below
+        res, taps, homes, rep = run([card(float("nan")), card(float("nan"))], [])
+        assert res == "low_confidence" and taps == [] and homes == [1]
+        # the label tap did nothing and the read after it shows the label below the minimum:
+        # no second tap (the icon above the label)
+        res, taps, homes, rep = run([card(0.9), card(0.9), card(0.3)], [ZEROS, UNCHANGED])
+        assert res == "not_confirmed" and taps == [LABEL_AT] and homes == [1]
+        assert rep["confidence"] == 0.9, rep
+        # … and at or above it: the second tap goes out, and the report names that read
+        res, taps, homes, rep = run([card(0.9), card(0.9), card(0.6), []],
+                                    [ZEROS, UNCHANGED, ZEROS, OPENED])
+        assert res == "opened" and len(taps) == 2 and taps[0] == LABEL_AT
+        assert rep["confidence"] == 0.6, rep
+    finally:
+        gestures.OCR_MIN_CONFIDENCE = saved
+
+    # ── CLI lines ──
+    p = build_parser()
+    real_live, real_gestures = cli._require_live, cli.gestures
+    cli._require_live = lambda: None
+    try:
+        def lines(result, **rep):
+            cli.gestures = SimpleNamespace(
+                open_spotlight_checked=lambda: True,
+                open_app=lambda name, spotlight_open=True, report=None, **kw:
+                    report.update(home=True, **rep) or result)
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli._cmd_open(p.parse_args(["open", "X"]))
+            return code, out.getvalue().strip(), err.getvalue().strip()
+
+        assert lines("opened") == (0, "opened 'X'", "")
+        assert lines("opened", confidence=0.9, min_confidence=None) == (
+            0, "opened 'X' (label read with confidence 0.90)", "")
+        assert lines("opened", confidence=0.9, min_confidence=0.5) == (
+            0, "opened 'X' (label read with confidence 0.90; minimum 0.50)", "")
+        assert lines("low_confidence", confidence=0.3, min_confidence=0.5) == (
+            4, "", "open_not_confirmed: Spotlight showed 'X' but the label was read with "
+                   "confidence 0.30, below NORACU_OCR_MIN_CONFIDENCE=0.50, so nothing was "
+                   "tapped; back on the Home Screen")
+        assert lines("not_confirmed", confidence=0.9, min_confidence=None) == (
+            4, "", "open_not_confirmed: tapped 'X' in Spotlight (label read with confidence "
+                   "0.90) but the app did not open; back on the Home Screen")
+        # a minimum that is set and cannot be read: refused before the mirror is touched
+        touched = []
+        cli._require_live = lambda: touched.append("live")
+        cli.gestures = SimpleNamespace(OCR_MIN_CONFIDENCE_PROBLEM="90",
+                                       open_spotlight_checked=lambda: touched.append("spotlight") or True,
+                                       open_app=lambda *a, **kw: touched.append("open") or "opened")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli._cmd_open(p.parse_args(["open", "X"]))
+        assert code == 2 and touched == [] and out.getvalue() == "", (code, touched, out.getvalue())
+        assert err.getvalue().startswith("invalid_args: NORACU_OCR_MIN_CONFIDENCE is set to '90'") and "nothing was sent" in err.getvalue(), err.getvalue()
+    finally:
+        cli._require_live, cli.gestures = real_live, real_gestures
 
 
 if __name__ == "__main__":

@@ -913,6 +913,32 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
 }
 
 {
+  // audit S5A-s10-G-3 / -D-2: an element that cannot be read after the action (-25204) is not "gone" — no
+  // delivered_verified from a read error; an element that is really gone (-25202) still is evidence
+  const ctx = loadEngine(ENGINE);
+  const btn = Object.assign(el("AXButton", { title: "Save", frame: [10, 10, 60, 20], actions: ["AXPress"] }), { label: "Save" });
+  const win = el("AXWindow", { title: "Doc", frame: [0, 0, 300, 200], wid: 32 }, [btn]);
+  installApp(ctx, { pid: 81, name: "T", windows: [win] });
+  const res = snap(ctx, { app: "T" });
+  const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton"));
+  const origPerform = ctx.perform;
+  ctx.perform = (e, a) => { if (e === btn) { btn.hung = true; return 0; } return origPerform(e, a); };
+  const rHung = ctx.opAct({ target: t, action: "AXPress", settle_ms: 0 });
+  check("审计 S5A：动作后元素读不出（-25204）→ delivered_unverified，不算 gone、不算验证",
+    rHung.ok === true && rHung.delivery === "delivered_unverified", JSON.stringify(rHung));
+  btn.hung = false;
+  const before = ctx.observeState(btn, ctx.appElement());
+  btn.hung = true;
+  const mid = ctx.observeState(btn, ctx.appElement());
+  btn.hung = false; btn.gone = true;
+  const after = ctx.observeState(btn, ctx.appElement());
+  check("审计 S5A：observeState —— -25204 记为 gone 未知（null），-25202 才是 gone；真消失仍算验证",
+    mid.gone === null && after.gone === true && ctx.diffState(before, after).verified === true && ctx.diffState(before, mid).verified === false,
+    JSON.stringify({ mid: mid.gone, after: after.gone, v1: ctx.diffState(before, after).verified, v2: ctx.diffState(before, mid).verified }));
+  ctx.perform = origPerform;
+}
+
+{
   // opInsertText + setValueCore: write returns 0, value never changes → NOT_CONFIRMED with delivered_unverified, retry unsafe
   const ctx = loadEngine(ENGINE);
   const tf = Object.assign(el("AXTextField", { placeholder: "Name", value: "old", frame: [10, 10, 200, 22], settable: { AXSelectedText: true, AXValue: true } }), { label: "Name field" });
@@ -1019,6 +1045,63 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("mixed checkbox: AXValue 2, want false → pressed (not 'already off') until off",
     rOff.ok === true && rOff.delivery === "delivered_verified" && rOff.value === false && calls.length === 2,
     JSON.stringify({ rOff, calls }));
+}
+
+{
+  // audit S5A-s11-X-4: a checkbox that publishes its new value late is pressed once, not twice (a second press undid
+  // the first); one that never changes is reported, not pressed again
+  const ctx = loadEngine(ENGINE);
+  const cb = Object.assign(el("AXCheckBox", { title: "Agree", value: 0, frame: [10, 10, 100, 20], actions: ["AXPress"] }), {
+    label: "Agree",
+    onPerform(act) { if (act === "AXPress") { cb.value = cb.value ? 0 : 1; cb.lag = 3; } },
+  });
+  const win = el("AXWindow", { title: "Form", frame: [0, 0, 300, 200], wid: 36 }, [cb]);
+  const { calls } = installApp(ctx, { pid: 86, name: "T", windows: [win] });
+  const orig = ctx.readNode;
+  ctx.readNode = (e) => { if (e === cb && cb.lag > 0) { cb.lag--; return Object.assign(orig(e), { AXValue: cb.value ? 0 : 1 }); } return orig(e); };
+  const res = snap(ctx, { app: "T" });
+  const t = targetOf(res, nodeAt(res, (n) => n.role === "AXCheckBox"));
+  const rLate = ctx.opSetValue({ target: t, value: "true" });
+  check("审计 S5A：勾选框晚 3 次读才显示新值 → 只按一次，delivered_verified，最后是 on",
+    rLate.ok === true && rLate.delivery === "delivered_verified" && cb.value === 1 && calls.length === 1, JSON.stringify({ rLate, calls: calls.length, v: cb.value }));
+  // review S5C-G-1: a mixed checkbox slow on both presses (mixed → on → off, each shown 3 reads late) ends off, verified
+  cb.value = 2; calls.length = 0;
+  cb.onPerform = (act) => { if (act === "AXPress") { cb.prev = cb.value; cb.value = cb.value === 2 ? 1 : cb.value === 1 ? 0 : 1; cb.lag = 3; } };
+  ctx.readNode = (e) => { if (e === cb && cb.lag > 0) { cb.lag--; return Object.assign(orig(e), { AXValue: cb.prev }); } return orig(e); };
+  const tm = targetOf(snap(ctx, { app: "T" }), nodeAt(snap(ctx, { app: "T" }), (n) => n.role === "AXCheckBox"));
+  const rMixed = ctx.opSetValue({ target: tm, value: "false" });
+  check("复审 S5C：mixed 勾选框两次按下都晚 3 次读才显示 → 两次按下、最后 off、delivered_verified",
+    rMixed.ok === true && rMixed.delivery === "delivered_verified" && cb.value === 0 && calls.length === 2, JSON.stringify({ rMixed, calls: calls.length, v: cb.value }));
+  ctx.readNode = (e) => { if (e === cb && cb.lag > 0) { cb.lag--; return Object.assign(orig(e), { AXValue: cb.value ? 0 : 1 }); } return orig(e); };
+  cb.onPerform = () => {};   // the press does nothing visible
+  cb.value = 1; cb.lag = 0;
+  calls.length = 0;
+  const t2 = targetOf(snap(ctx, { app: "T" }), nodeAt(snap(ctx, { app: "T" }), (n) => n.role === "AXCheckBox"));
+  const rStill = ctx.opSetValue({ target: t2, value: "false" });
+  check("审计 S5A：按了一次一直没变 → NOT_CONFIRMED，不按第二次",
+    rStill.ok === false && rStill.code === "NOT_CONFIRMED" && calls.length === 1, JSON.stringify({ rStill, calls: calls.length }));
+  ctx.readNode = orig;
+}
+
+{
+  // audit S5A-s11-X-2: appending into a secure field that takes text only through AXValue replaces what is there —
+  // refused unless the field is known to be empty
+  const ctx = loadEngine(ENGINE);
+  const pw = Object.assign(el("AXTextField", { subrole: "AXSecureTextField", title: "Password", value: "", frame: [10, 10, 160, 22], settable: { AXValue: true } }), { label: "Password" });
+  const win = el("AXWindow", { title: "Login", frame: [0, 0, 300, 200], wid: 37 }, [pw]);
+  const { calls } = installApp(ctx, { pid: 87, name: "T", windows: [win] });
+  const res = snap(ctx, { app: "T" });
+  const t = targetOf(res, nodeAt(res, (n) => n.role === "AXTextField"));
+  const origAttr = ctx.attr;
+  let chars = 4;
+  ctx.attr = (e, name) => (e === pw && name === "AXNumberOfCharacters" ? chars : origAttr(e, name));
+  const rFull = ctx.opInsertText({ target: t, text: "x" });
+  chars = 0;
+  const rEmpty = ctx.opInsertText({ target: t, text: "x" });
+  check("审计 S5A：密码框只能整值改写时，不确定为空 → 拒绝追加（什么都没发）；确定为空 → 照常写入",
+    rFull.ok === false && /secure field/.test(rFull.message || "") && rFull.delivery === "not_delivered" && rEmpty.ok === true && calls.filter((c) => c[0] === "set" && c[2] === "AXValue").length === 1,
+    JSON.stringify({ rFull, rEmpty, calls }));
+  ctx.attr = origAttr;
 }
 
 {

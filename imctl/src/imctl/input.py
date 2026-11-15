@@ -232,6 +232,20 @@ def long_press(nx: float = 0.5, ny: float = 0.5, duration_s: float = LONG_PRESS_
         _mouse_event(kCGEventLeftMouseUp, x, y, src)
 
 
+# 2026-11-10: every point of a phone_swipe stays this far inside the phone screen (verify.screen_rect),
+# in window units (0.01 is about 6 pt of a 620 pt window), because iOS cancels a drag that starts or
+# ends on the transparent window margin around the screen.
+SCREEN_INSET = 0.01
+
+
+def clamp_to_rect(nx: float, ny: float, rect, inset: float = SCREEN_INSET) -> tuple[float, float]:
+    """Move (nx, ny) to the nearest point at least `inset` inside rect = (x0, y0, x1, y1)."""
+    x0, y0, x1, y1 = rect
+    if x1 - x0 <= 2 * inset or y1 - y0 <= 2 * inset:
+        raise ValueError(f"phone screen rect too small to swipe in: {rect!r}")
+    return (min(max(nx, x0 + inset), x1 - inset), min(max(ny, y0 + inset), y1 - inset))
+
+
 def _ease_in_out(t: float) -> float:
     """Quadratic ease-in-out: slow start, fast middle, slow end."""
     if t < 0.5:

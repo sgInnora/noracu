@@ -30,6 +30,18 @@ jobs:
           NORACU_PYTHON=python npm run test:imctl
       - name: "engine unit tests (node:vm, no macOS permissions needed)"
         run: node test/engine-unit.mjs
+      - name: "background input + input gate contract tests (no GUI)"
+        run: node test/bg-inject-unit.mjs
+      - name: "release gate tests (throwaway git repository)"
+        run: node test/release-gate-unit.mjs
+      - name: "iOS XCUITest backend client contract tests (fake runner, no iPhone, no Xcode)"
+        run: node test/ios-xcuitest-unit.mjs
+      - name: "iOS XCUITest backend: tool logic against a model phone, and the ios-setup command (no iPhone, no Xcode)"
+        run: |
+          node test/ios-session-unit.mjs
+          node test/ios-setup-unit.mjs
+      - name: "iOS XCUITest backend e2e: the real server with a fake xcrun / xcodebuild (no iPhone, no Xcode)"
+        run: node test/ios-e2e.mjs
       - name: "e2e (CI mode: browser layer + security regressions; hardware-dependent tests skipped)"
         run: NORACU_CI=1 node test/e2e.mjs
         env:
@@ -40,3 +52,37 @@ jobs:
           git diff --exit-code docs/tools.md || (echo "::error::docs/tools.md is stale — run: node scripts/gen-tools.mjs" && exit 1)
       - name: "package contents: runtime files present, internal material absent"
         run: node scripts/check-pack.mjs
+
+  # The XCUITest iPhone backend against a real simulator: build the runner (ios-runner/) with the runner
+  # image's Xcode, then drive the ios_* tools through the MCP server in the simulator's Settings app.
+  # continue-on-error until this job has had its first green run on GitHub's runners (it was written and
+  # run locally only: iPhone 17 Pro simulator, iOS 26.5, Xcode 27.2).
+  ios-simulator:
+    name: "iOS runner on a simulator (XCUITest backend, experimental)"
+    runs-on: macos-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: "boot an iPhone simulator (the newest iOS runtime on the image)"
+        run: |
+          UDID=$(xcrun simctl list devices available -j | node -e '
+            const d = JSON.parse(require("fs").readFileSync(0, "utf8")).devices;
+            const num = (k) => k.split("iOS-")[1].split("-").map(Number);
+            const rts = Object.keys(d).filter((k) => /SimRuntime\.iOS-\d/.test(k) && d[k].some((x) => /^iPhone/.test(x.name)));
+            rts.sort((a, b) => { const [x, y] = [num(a), num(b)]; return x[0] - y[0] || (x[1] || 0) - (y[1] || 0); });
+            const dev = rts.length ? d[rts.at(-1)].find((x) => /^iPhone/.test(x.name)) : null;
+            if (!dev) { console.error("no iPhone simulator on this image"); process.exit(1); }
+            console.log(dev.udid);')
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+      - name: "build the runner for it (noracu ios-setup; a simulator build is not signed)"
+        run: node src/server.mjs ios-setup --udid "$SIM_UDID"
+      - name: "live run: every ios_* tool against the simulator's Settings app"
+        run: node test/ios-live.mjs --udid "$SIM_UDID"

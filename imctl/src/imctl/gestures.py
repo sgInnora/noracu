@@ -610,6 +610,27 @@ def _tophit_labels(raw):
 TOP_HIT_LABELS = _tophit_labels(os.environ.get("NORACU_TOPHIT_LABELS"))
 
 
+# NORACU_OCR_MIN_CONFIDENCE (opt-in, off by default): phone_open does not tap a label the
+# recognizer read with a lower confidence than this. Unset or empty: no label is refused on its
+# confidence. Set to anything but a number above 0 and at most 1 (text, 0, 90, nan): the person
+# meant a check to be on and it cannot be, so phone_open refuses (cli._cmd_open) rather than run
+# without it. → (minimum or None, the unusable text or None)
+def _min_confidence(raw):
+    text = (raw or "").strip()
+    if not text:
+        return None, None
+    try:
+        value = float(text)
+    except ValueError:
+        return None, text
+    if math.isfinite(value) and 0.0 < value <= 1.0:
+        return value, None
+    return None, text
+
+
+OCR_MIN_CONFIDENCE, OCR_MIN_CONFIDENCE_PROBLEM = _min_confidence(os.environ.get("NORACU_OCR_MIN_CONFIDENCE"))
+
+
 def _field_echo(hits, name) -> bool:
     """True when the search field shows ``name`` (F42).
 
@@ -834,7 +855,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
     "deadline" (the OPEN_DEADLINE_S budget ran out before a tap; back on
     the Home Screen); "ambiguous" (Y6: the Top Hit card showed the name at
     two or more spots and no read showed it at one — nothing was tapped;
-    back on the Home Screen); "focus_lost" (another app came to the front
+    back on the Home Screen); "low_confidence" (NORACU_OCR_MIN_CONFIDENCE is set and the label was read below it: nothing tapped; back on the Home Screen); "focus_lost" (another app came to the front
     during type_text's wait after the clipboard write: the paste was called
     off and nothing was tapped; Spotlight is left as it is — going Home
     would pull the mirror forward again); "clipboard_changed" (another app or
@@ -1012,6 +1033,13 @@ def open_app(name: str, *, spotlight_open: bool = False,
         if out_of_time():
             tidy()
             return "deadline"
+        if report is not None:
+            # how sure the recognizer was of the label about to be tapped, and the opt-in minimum
+            report["confidence"] = hit.confidence
+            report["min_confidence"] = OCR_MIN_CONFIDENCE
+        if OCR_MIN_CONFIDENCE is not None and not (hit.confidence >= OCR_MIN_CONFIDENCE):
+            tidy()
+            return "low_confidence"  # opt-in: a label read below the minimum is not tapped
         # ② tap the row (the label inside the Top Hit card) and confirm.
         # The post-tap read uses reread(): for a short name it also sweeps,
         # so ③ can find the label again (F32/F35).
@@ -1026,7 +1054,12 @@ def open_app(name: str, *, spotlight_open: bool = False,
         # card NOW (choose_app_hit, F35) — never the first read's position:
         # the results may have changed. No such label → no second tap.
         again = choose_app_hit(hits, name)
+        if (again is not None and OCR_MIN_CONFIDENCE is not None
+                and not (again.confidence >= OCR_MIN_CONFIDENCE)):
+            again = None  # opt-in: no second tap aimed at a label read below the minimum
         if again is not None and not out_of_time():
+            if report is not None:
+                report["confidence"] = again.confidence
             opened, _ = _tap_and_confirm_open(
                 again.nx, again.ny - SPOTLIGHT_ICON_ABOVE_LABEL,
                 luma=luma, sleep=sleep, tap=tap, read_screen=reread, name=name)

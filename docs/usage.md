@@ -10,7 +10,7 @@ the *flow*.
 > If you set `NORACU_READ_ONLY=1`, the action steps below (`mac_click`,
 > `mac_type`, `browser_click`, …) are refused, along with `mac_clipboard_read`,
 > `mac_notifications`, and `mac_wait` on `condition: "notification"` — that mode
-> allows only the 18 observe + browser-lifecycle tools (and skips toggling
+> allows only the observe + browser-lifecycle tools (and skips toggling
 > `web_accessibility` on apps). Unset it to run the full loop.
 
 ## 1. The core pattern: observe, then act by `element_index`
@@ -149,12 +149,28 @@ Notes:
 
 - **One session, no tab API** in v0.2 — `browser_launch` reuses the existing
   session if one is open, and a tab the page opens itself (`window.open`,
-  `target=_blank`) is not switched to. Close with `browser_close {}`.
+  `target=_blank`) is not switched to. `browser_tabs {}` lists the tabs and `browser_tabs {"action":"select","tab_id":"t2"}` switches to one; Close with `browser_close {}`.
+- **The active page is an http(s) page**, or a tab still on the blank page that
+  `browser_launch` or `browser_tabs` opened it on (`file://` with
+  `NORACU_ALLOW_FILE_URL=1`). When it comes to show anything else — a blob the
+  page made, Chromium's page for a load that failed, a blank page after another
+  page — the page tools return `active_page_not_allowed`: `browser_navigate`
+  takes the tab to a page again, and `browser_tabs` can open or select another.
+  When no open tab may be the active page they return `no_active_page`.
 - The index re-check compares tag, name, href, and position at click time, and
   a snapshot is invalidated if the page navigated since. A mismatch returns
   `element_no_longer_valid` — re-snapshot.
+- `browser_snapshot` returns `page_changed`, and nothing of the page, when the
+  page navigated while the snapshot was being taken (another address, a
+  fragment, a reload, `history.pushState`) — call it again. `browser_read`
+  without a selector does the same. With a selector it returns its text (a
+  read that waits for a selector goes on across the page's own move to the
+  next page), under a first line that says the page navigated and gives both
+  addresses. `browser_evaluate` and `browser_screenshot` hand their result
+  over with a note that the page navigated.
 - Don't use `browser_evaluate` just to read a page (`browser_read` does that,
-  and `browser_evaluate` can be disabled with `NORACU_DISABLE_EVAL=1`).
+  and `browser_evaluate` is off unless the server runs with `NORACU_ENABLE_EVAL=1`;
+  `NORACU_DISABLE_EVAL=1` keeps it off, and it never runs in a `chrome: true` session).
 - `file://` URLs are blocked unless `NORACU_ALLOW_FILE_URL=1`.
 
 ## 4. Menu commands
@@ -213,6 +229,28 @@ mac_notifications {}                                                       # ban
 mac_notifications { "action": "dismiss", "id": "BC2BF929-…" }              # notification_not_found if gone
 ```
 
+## 5b2. Your own Chrome, with its sign-ins
+
+With `NORACU_ALLOW_CHROME=1` on the server and Chrome's remote-debugging
+switch on (`chrome://inspect/#remote-debugging`, Chrome 144+), the browser
+tools work in the Chrome you use. Chrome asks you to allow the connection.
+noracu opens a window of its own and works only in the tabs it opens there;
+your other tabs are not listed, read or touched. With `NORACU_CHROME_TABS=all`
+your http(s) tabs are listed too (`noracu_tab: false`) and `browser_tabs` `select`
+makes one the active page (nothing else does); noracu still closes only its own tabs. `browser_evaluate` never runs in this session,
+even with `NORACU_ENABLE_EVAL=1`.
+
+```
+browser_launch { "chrome": true }          # Chrome shows its dialog: allow
+browser_navigate { "url": "https://github.com/notifications" }   # signed in as you
+browser_tabs { "action": "new", "url": "https://mail.google.com" }  # a tab in noracu's window
+browser_close {}                           # closes noracu's tabs; Chrome keeps running
+```
+
+Errors: `chrome_not_reachable` (the switch is off, or Chrome is not running),
+`chrome_attach_failed` (the dialog was not answered within 60 s),
+`policy_denied` (`NORACU_ALLOW_CHROME` is not set).
+
 ## 5c. Electron and Chromium apps: web contents through Playwright
 
 With `NORACU_ALLOW_CDP=1` on the server, start the app fresh with a DevTools
@@ -248,7 +286,7 @@ model — don't let it override the task.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `NORACU_READ_ONLY` | unset | `=1` observation-only (allowlist of 18); all input-synthesis tools plus `mac_clipboard_read`, `mac_notifications`, and `mac_wait` on `condition: "notification"` are refused (`mac_ax_state` / `mac_find` also skip `web_accessibility`) |
+| `NORACU_READ_ONLY` | unset | `=1` observation-only (an allowlist of observe + browser-lifecycle tools); all input-synthesis tools plus `mac_clipboard_read`, `mac_notifications`, and `mac_wait` on `condition: "notification"` are refused (`mac_ax_state` / `mac_find` also skip `web_accessibility`) |
 | `NORACU_DISABLE_EVAL` | unset | `=1` makes `browser_evaluate` return an error when called (stays listed) |
 | `NORACU_ALLOW_FILE_URL` | unset | `=1` allows `browser_navigate` to open `file://` |
 | `NORACU_DISABLE_AUTO_INSTALL` | unset | `=1` skips Chromium auto-install on first `browser_launch` |
@@ -258,8 +296,18 @@ model — don't let it override the task.
 | `NORACU_PHONE_TIMEOUT_MS` | 30000 (45000 for `phone_open` / `phone_type`) | time limit for each iPhone-layer step, 1000–600000 ms (`imctl_timeout` on expiry) |
 | `NORACU_OCR_LANGUAGES` | `zh-Hans,en-US` | comma-separated Vision OCR language codes for the iPhone screen, in priority order |
 | `NORACU_TOPHIT_LABELS` | `Top Hit` | comma-separated Spotlight Top Hit section label(s) that `phone_open` looks for |
+| `NORACU_OCR_MIN_CONFIDENCE` | unset (off) | opt-in, experimental: a number above 0 and at most 1. With it, `phone_open` does not tap a Spotlight label the recognizer read with a lower confidence and answers `open_not_confirmed` with nothing tapped; a value that is set and is not such a number makes `phone_open` refuse (`invalid_args`, nothing sent). Set or not, `phone_open`'s result line names the confidence of the label it tapped |
+| `NORACU_ALLOW_CHROME` | unset | `=1` lets `browser_launch` with `chrome: true` work in your own Chrome (see 5b2); refused under `NORACU_READ_ONLY=1` |
+| `NORACU_CHROME_TABS` | unset | `all`: with `chrome: true`, your other tabs are listed and can be selected, read and acted on (never closed) |
+| `NORACU_CHROME_DIR` | `~/Library/Application Support/Google/Chrome` | profile folder whose `DevToolsActivePort` `chrome: true` reads |
 | `NORACU_ALLOW_CDP` | unset | `=1` allows `mac_app` launch with `cdp_port` and `browser_launch` with `cdp_port` for ports opened by this `noracu` process (`=any` for external loopback ports; refused under `NORACU_READ_ONLY=1`) |
 | `NORACU_TRACE` | unset | file path for a JSON-lines call log (`{ts, tool, args, ms, error, code}` — argument names/sizes and error code prefix only, never result or error text; opened `0600` with `O_NOFOLLOW`) |
+| `NORACU_USER_IDLE_S` | `2` | seconds without the person's keyboard or mouse input before a Mac or iPhone Mirroring (`phone_*`) input tool acts (the `ios_*` tools do not wait: they do not use this Mac's keyboard or mouse) (`user_active` sooner); also puts the pointer back after pointer actions; `0` turns both off |
+| `NORACU_NO_BGPOST` | unset | `=1` turns off background input (physical clicks and named keys use the real pointer and the HID key path) |
+| `NORACU_STOP_FILE` | unset | file path: while it exists, every input tool — Mac, iPhone and the browser's input tools (navigate, click, type, fill, press_key, scroll, evaluate, `browser_tabs` new/close) — returns `user_stopped` and sends nothing; set but blank, it refuses all input |
+| `NORACU_DENY_APPS` | the common terminal apps and IDEs with a built-in terminal | comma-separated bundle ids / app names (`*`, `?`) that never get input; a list of your own adds to the default, blank keeps the default, a list starting with `none` drops it |
+| `NORACU_APPROVAL_FILE` | unset | `0600` JSON `{allow, ask, deny}` of bundle-id / app-name patterns, judged on the app that receives the input; `ask` or unlisted → `approval_required`; a broken file refuses all Mac and iPhone input (app rules do not judge the browser layer) |
+| `NORACU_LAYERS` | unset (`mac,browser`) | comma-separated `mac`, `browser`, `iphone`: only those layers' tools are listed and callable (the experimental iPhone layer only when `iphone` is named); a call to a tool of a layer that is off says how to turn it on; a name that is not one of the three stops the server at start |
 | `NORACU_CI` | unset | `=1` only affects `npm test` (skips hardware-gated checks) |
 
 ## 8. Error reference
@@ -292,7 +340,8 @@ model — don't let it override the task.
 
 ## 9. iPhone layer
 
-Experimental. The driver (imctl, Python) ships inside the package. The tools
+Experimental and off by default: `NORACU_LAYERS=mac,browser,iphone` turns it on
+(section 7). The driver (imctl, Python) ships inside the package. The tools
 need Apple's iPhone Mirroring with the iPhone **locked and near the Mac**
 (unlocking it ends the session; not available in the EU) and a python3 with
 pyobjc (`NORACU_PYTHON`, or the automatic probe described in the README).
@@ -382,3 +431,47 @@ live — working without python/pyobjc on English macOS, refusing when paused or
 closed, returning `menu_unknown` without a fallback swipe on timeout, and
 falling back to `imctl` when the English menu item is absent on non-English
 macOS.
+
+## 10. iPhone: the XCUITest backend
+
+Experimental and opt-in (`NORACU_PHONE_BACKEND=xcuitest`, with the iPhone layer on); the `ios_*` tools then
+replace `phone_*`. Requirements and the one-time `npx noracu ios-setup` are in the
+README. The iPhone must be unlocked.
+
+```
+ios_status                                  → device, locked?, runner built?, runner running?
+ios_launch   { bundle_id: "com.apple.Preferences" }   → in front (delivered_verified)
+ios_snapshot { interactive: true }          → elements: [{ i, type, label, value, frame }]
+ios_type     { element_index: 12, text: "wifi" }      → verified when a field shows the text
+ios_tap      { element_index: 31 }          → sent; look again
+ios_snapshot                                → the new screen, new indexes
+ios_home                                    → Home Screen; earlier indexes end
+```
+
+- Indexes last 30 s and are unique across snapshots. Before one is used the app
+  is read again; `element_no_longer_valid` means the element moved, changed, or
+  its app left the front — take a new `ios_snapshot`. An app that has just come
+  to the front may still be filling in its rows: snapshot again after a moment.
+- `bundle_id` defaults to the app of the last call (`ios_launch` sets it;
+  `ios_home` sets it to `com.apple.springboard`).
+- Coordinates (`ios_tap` x,y, `ios_swipe` from/to, element frames, the size
+  `ios_screenshot` reports) are screen points.
+- Scroll with `ios_swipe` (a list moves a little less than the finger); press
+  return or delete with `ios_key`; a long press is `ios_tap` with `duration_ms`.
+
+| Error | Meaning / fix |
+|---|---|
+| `ios_setup_required` | no runner build for this device — run the `npx noracu ios-setup …` command it names |
+| `device_not_found` / `device_ambiguous` | no connected iPhone, or several: connect and unlock one, or set `NORACU_IOS_UDID` |
+| `device_locked` / `lock_unknown` | the iPhone is locked, or its lock state could not be read — nothing was sent or read; unlock it |
+| `input_denied: … while app rules are in force` | app rules are set (`NORACU_APPROVAL_FILE` or `NORACU_DENY_APPS`): no input that names `com.apple.springboard` is sent — not even one tap on a button of a system prompt (answer those on the phone). It is refused before a runner is started, so the refusal changes nothing on the phone. Open apps with `ios_launch`, go home with `ios_home` |
+| `home_not_confirmed` | Home was pressed but the app is still in front — after 3 s, or when its state was last read before a read failed (the result says which); look with `ios_screenshot` |
+| `runner_not_started` | `NORACU_READ_ONLY=1` is set: observation-only mode does not start the runner (starting it puts the runner's app in front on the iPhone) — unset it to read the screen |
+| `xctest_issue` | XCTest reported a failure while the command ran, or after an earlier one had answered. The test session is ended either way and the next call starts a new one. For an input that may have gone out the delivery is unknown; a command that was not run says `delivery=not_delivered`. Look with `ios_snapshot` before acting again |
+| `app_not_running` / `app_not_foreground` | the app is not in front — `ios_launch` it first; nothing was sent |
+| `no_keyboard` | no keyboard is up — tap a text field, or give `ios_type` an `element_index` |
+| `type_not_confirmed` | the text was typed but the field that took it does not hold its old value with the text put in at one place (autocorrection or completion changed it, the field hides its value, part of the text was lost, or the text went to another field) — read the field before typing again |
+| `launch_not_confirmed` | the app was started but is not in front after 10 s (a system prompt may cover it), or its state could not be read to the end of that wait — the result says which; `ios_screenshot` |
+| `launch_failed` | `devicectl` / `simctl` refused (not installed, wrong bundle id) — nothing was sent |
+| `ios_timeout` | the phone did not answer in time — delivery unknown, never re-sent; look before acting again |
+| `runner_start_failed` / `runner_start_timeout` / `runner_version_mismatch` | the runner did not start (the message says why) — a version mismatch means the runner on the device was built by another noracu version (it names its build, and so does the message): run `ios-setup` again; `the runner that was stopped has not exited yet` means the last test session is still ending: try again in a moment |

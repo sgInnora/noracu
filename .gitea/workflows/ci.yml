@@ -1,0 +1,62 @@
+# CI for the maintainers' own Gitea. Its runner runs on a maintainer's Mac in host mode (label macos-noracu),
+# one job at a time, with the Mac's own Node. The steps follow .github/workflows/ci.yml, which stays for the
+# public repository; the simulator job is not run here.
+# It runs only while nobody is using that Mac (2026-11-13): checks that time an action or look for keyboard and
+# mouse input fail when a person works on it. A watcher on the Mac dispatches it after 10 minutes without keyboard
+# or mouse input, once per new commit; a push does not start it.
+name: CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-noracu
+    timeout-minutes: 30
+    steps:
+      - name: "the Mac is not in use (no keyboard or mouse input for 10 minutes)"
+        run: |
+          idle=$(( $(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}') / 1000000000 ))
+          echo "keyboard and mouse idle for ${idle}s"
+          if [ "$idle" -lt 600 ]; then
+            echo "::error::not run: this Mac was in use (idle ${idle}s, needs 600s) — the tests were not started; the watcher dispatches again once it is idle"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - name: "node and dependencies"
+        run: |
+          node -v
+          npm ci
+      - name: "Chromium for Playwright (kept on the Mac after the first run)"
+        run: npx playwright install chromium
+      - name: "syntax: server, engine, scripts, imctl"
+        run: npm run check
+      - name: "iPhone driver smoke tests (no iPhone; pyobjc in a venv kept with the runner)"
+        run: |
+          V="$HOME/.cache/noracu-runner/py"
+          [ -x "$V/bin/python" ] || { python3 -m venv "$V" && "$V/bin/pip" install -q pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-Cocoa; }
+          NORACU_PYTHON="$V/bin/python" npm run test:imctl
+      - name: "engine unit tests (node:vm, no macOS permissions needed)"
+        run: node test/engine-unit.mjs
+      - name: "background input + input gate contract tests (no GUI)"
+        run: node test/bg-inject-unit.mjs
+      - name: "release gate tests (throwaway git repository)"
+        run: node test/release-gate-unit.mjs
+      - name: "iOS XCUITest backend client contract tests (fake runner, no iPhone, no Xcode)"
+        run: node test/ios-xcuitest-unit.mjs
+      - name: "iOS XCUITest backend: tool logic against a model phone, and the ios-setup command"
+        run: |
+          node test/ios-session-unit.mjs
+          node test/ios-setup-unit.mjs
+      - name: "iOS XCUITest backend e2e: the real server with a fake xcrun / xcodebuild"
+        run: node test/ios-e2e.mjs
+      - name: "e2e (CI mode: browser layer + security regressions; tests that act on the desktop skipped)"
+        run: NORACU_CI=1 node test/e2e.mjs
+        env:
+          NORACU_IMCTL_DIR: /nonexistent
+      - name: "docs freshness: tools.md must match the running server"
+        run: |
+          node scripts/gen-tools.mjs
+          git diff --exit-code docs/tools.md || (echo "docs/tools.md is stale — run: node scripts/gen-tools.mjs" && exit 1)
+      - name: "package contents: runtime files present, internal material absent"
+        run: node scripts/check-pack.mjs

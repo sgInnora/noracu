@@ -28,17 +28,20 @@ import sys
 import tempfile
 import time
 
-from . import gestures, input, pointer, verify, vision
+from . import gestures, input, pointer, screenrect, verify, vision
 from .vision import CaptureError
 import subprocess
 
-from .window import WindowError, ensure_frontmost, get_overlay, is_frontmost
+from .window import WindowError, ensure_frontmost, get_overlay, get_window_info, is_frontmost
 
 # F31 / R13 §3: every phone input command starts in _require_live(), which probes
 # get_overlay() first so a paused or stopped mirror refuses without stealing focus,
 # then brings the mirror to the front (switching Spaces if needed and waiting for a
 # real frame) before any capture or input. Module-level callables so tests can swap them.
 _bring_front = ensure_frontmost
+_screen_rect = verify.screen_rect  # where the phone screen sits in the window (one capture); swappable in tests
+_window_info = get_window_info  # the mirror window's CGWindow record (its size keys the remembered edges); swappable in tests
+_rect_file = None  # where the screen's edges are remembered (None: screenrect.cache_file()); swappable in tests
 _is_front = is_frontmost
 sleep = time.sleep
 
@@ -66,10 +69,117 @@ _CAPTURE_FAILED_EXPECT_LINE = (
 )
 
 
+# 2026-11-10: the same failure while measuring where the phone screen sits in the window, before a swipe
+_CAPTURE_FAILED_EDGES_LINE = (
+    "capture_failed: could not read the iPhone Mirroring window's image to find the phone screen's edges "
+    "(it may be hidden, minimized or on another Space); nothing was sent"
+)
+
+
 def _capture_failed() -> int:
     """Print the F25 capture-failure line; exit code 7."""
     print(_CAPTURE_FAILED_LINE, file=sys.stderr)
     return 7
+
+
+def _phone_screen(*, retry_untrusted: bool):
+    """Where the phone screen sits in the mirror window as it is now: (rect or None, how).
+
+    Remembered per window size and macOS version (screenrect); the window is captured only when
+    nothing trusted is remembered for this size. Raises WindowError / CaptureError from that capture.
+    """
+    wi = _window_info()
+    if not wi:
+        raise WindowError("iPhone Mirroring window not found")
+    return screenrect.resolve(screenrect.key(wi["w"], wi["h"]), _screen_rect,
+                              retry_untrusted=retry_untrusted, path=_rect_file)
+
+
+_EDGES_UNTRUSTED = ("the window's image showed no strip above the screen, as it does while the pointer rests on "
+                    "the window's top edge")
+_EDGES_UNREADABLE = "the window's image could not be read"
+
+
+_edges_note = ""  # what a tap's result line adds when it went out with the screen's edges not known
+
+
+def _refuse_off_screen(x: float, y: float, *, measure: bool) -> int | None:
+    """Refuse a tap or long press aimed at the mirror window's margin (exit 2); None lets it go on.
+
+    Called twice: first with measure=False, before the mirror is brought forward, from remembered
+    edges only (a refused point then takes no focus and makes no capture); then with measure=True,
+    once the mirror is live and in front, where the edges are measured if nothing is remembered.
+
+    When the measurement cannot be trusted (the pointer resting on the strip above the screen), a
+    point where the margin may be is refused as well — everything outside screenrect.fallback(): the
+    top of the window and a band along its other sides. The strip above the screen holds the
+    window's own controls, and a click there is a click on the Mac, not on the phone. Before a point
+    is refused on an untrusted measurement made earlier, the window is measured once more. A point
+    that goes out anyway says so in its result (_edges_note).
+
+    When nothing is remembered and the window's image cannot be read at all, nothing says where the
+    phone screen is: capture_failed (exit 7) and nothing is sent, as for a swipe. The same when the
+    window has no record once the mirror is live: without its size the bands cannot be measured.
+    """
+    global _edges_note
+    if measure:
+        _edges_note = ""
+    wi = None
+    try:
+        wi = _window_info()
+        if not measure:
+            rect = screenrect.remembered(screenrect.key(wi["w"], wi["h"]), path=_rect_file) if wi else None
+            if rect is None:
+                return None  # nothing remembered: decided once the mirror is live and in front
+        elif not wi:
+            # the live check has just seen the window and now there is no record of it: nothing says where the
+            # phone screen is, and without the window's size the bands cannot be measured (pre-review P5)
+            raise WindowError("iPhone Mirroring window not found")
+        else:
+            rect, how = _phone_screen(retry_untrusted=False)
+            if rect is None and how == "not_measured":
+                safe = screenrect.fallback(wi["w"], wi["h"])
+                if safe is None or not screenrect.contains(safe, x, y):
+                    # an earlier measurement could not be trusted and this point is where the margin may
+                    # be: one more capture now, rather than a refusal on that old doubt
+                    rect, how = _phone_screen(retry_untrusted=True)
+    except (WindowError, CaptureError):
+        if not measure:
+            return None
+        print(_CAPTURE_FAILED_EDGES_LINE, file=sys.stderr)
+        return 7
+    if rect is not None:
+        if screenrect.contains(rect, x, y):
+            return None
+        x0, y0, x1, y1 = rect
+        print(
+            f"out_of_screen: ({_num(x)},{_num(y)}) is on the iPhone Mirroring window's margin, not on the "
+            f"phone screen (x {x0:.3f}-{x1:.3f}, y {y0:.3f}-{y1:.3f}): a click there goes to the window's "
+            f"own controls or nowhere; nothing was sent",
+            file=sys.stderr,
+        )
+        return 2
+    safe = screenrect.fallback(wi["w"], wi["h"])
+    if safe is not None and screenrect.contains(safe, x, y):
+        _edges_note = (" — the phone screen's edges are not known; the point is clear of where the window's "
+                       "margin may be")
+        return None
+    if safe is None:
+        print(
+            f"out_of_screen: the phone screen's edges are not known ({_EDGES_UNTRUSTED}) and the iPhone Mirroring window is too "
+            f"small to have a part that is certainly clear of its margin; nothing was sent",
+            file=sys.stderr,
+        )
+        return 2
+    x0, y0, x1, y1 = safe
+    print(
+        f"out_of_screen: ({_num(x)},{_num(y)}) may be on the iPhone Mirroring window's margin: the phone "
+        f"screen's edges are not known ({_EDGES_UNTRUSTED}), and while they are not, a point outside x {x0:.3f}-{x1:.3f}, "
+        f"y {y0:.3f}-{y1:.3f} is not sent — the strip above the screen holds the window's own controls; "
+        f"nothing was sent. Move the pointer off the top of the mirror window and try again, or aim further inside",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _mirror_not_live(overlay: dict) -> int:
@@ -201,14 +311,20 @@ def _cmd_status(_args) -> int:
 
 
 def _cmd_tap(args) -> int:
+    guard = _refuse_off_screen(args.x, args.y, measure=False)
+    if guard is not None:
+        return guard
     guard = _require_live()
+    if guard is not None:
+        return guard
+    guard = _refuse_off_screen(args.x, args.y, measure=True)
     if guard is not None:
         return guard
     guard = _require_expect(args)
     if guard is not None:
         return guard
     input.tap(args.x, args.y)
-    print(f"tapped ({args.x}, {args.y})")
+    print(f"tapped ({args.x}, {args.y}){_edges_note}")
     return 0
 
 
@@ -223,7 +339,13 @@ def _cmd_longpress(args) -> int:
         input._check_duration(_longpress_duration(args), 0.01, 10, "long-press duration (s)")
     except ValueError as exc:
         return _invalid_duration(exc)
+    guard = _refuse_off_screen(args.x, args.y, measure=False)
+    if guard is not None:
+        return guard
     guard = _require_live()
+    if guard is not None:
+        return guard
+    guard = _refuse_off_screen(args.x, args.y, measure=True)
     if guard is not None:
         return guard
     guard = _require_expect(args)
@@ -231,7 +353,7 @@ def _cmd_longpress(args) -> int:
         return guard
     duration = _longpress_duration(args)
     input.long_press(args.x, args.y, duration)
-    print(f"long-pressed ({args.x}, {args.y}) for {duration}s")
+    print(f"long-pressed ({args.x}, {args.y}) for {duration}s{_edges_note}")
     return 0
 
 
@@ -252,9 +374,106 @@ def _cmd_swipe(args) -> int:
     guard = _require_expect(args)
     if guard is not None:
         return guard
-    input.swipe(args.fx, args.fy, args.tx, args.ty, args.ms)
-    print(f"swiped ({args.fx},{args.fy}) -> ({args.tx},{args.ty})")
+    asked = (args.fx, args.fy, args.tx, args.ty)
+    try:
+        rect, _how = _phone_screen(retry_untrusted=True)
+    except (WindowError, CaptureError):
+        print(_CAPTURE_FAILED_EDGES_LINE, file=sys.stderr)
+        return 7
+    if rect is None:
+        # the capture could not tell the phone screen from the window's margin: both points are kept clear of
+        # where that margin may be (the top of the window holds its own controls: a drag from there acts on the
+        # window, not on the phone)
+        try:
+            wi = _window_info()
+        except (WindowError, CaptureError):
+            wi = None
+        if not wi:
+            # the window was there for the measurement and has no record now: nothing is sent (pre-review P5)
+            print(_CAPTURE_FAILED_EDGES_LINE, file=sys.stderr)
+            return 7
+        safe = screenrect.fallback(wi["w"], wi["h"])
+        if safe is None:
+            print("out_of_screen: the phone screen's edges are not known and the iPhone Mirroring window is too small to "
+                  "have a part that is certainly clear of its margin; nothing was sent", file=sys.stderr)
+            return 2
+        fx, fy = input.clamp_to_rect(args.fx, args.fy, safe, inset=0.0)
+        tx, ty = input.clamp_to_rect(args.tx, args.ty, safe, inset=0.0)
+        if _collapsed(asked, (fx, fy, tx, ty)):
+            return _refuse_collapsed(asked)
+        input.swipe(fx, fy, tx, ty, args.ms)
+        print(_swipe_line(asked, (fx, fy, tx, ty), safe, known=False))
+        return 0
+    fx, fy = input.clamp_to_rect(args.fx, args.fy, rect)
+    tx, ty = input.clamp_to_rect(args.tx, args.ty, rect)
+    if _collapsed(asked, (fx, fy, tx, ty)):
+        return _refuse_collapsed(asked)
+    input.swipe(fx, fy, tx, ty, args.ms)
+    print(_swipe_line(asked, (fx, fy, tx, ty), rect))
     return 0
+
+
+def _num(v: float) -> str:
+    return f"{round(v, 3):g}"
+
+
+# A swipe whose points were moved clear of the margin and that is left shorter than this (in points of the
+# 280x620 pt mirror window measured on 2026-11-10) is refused: iOS starts a pan only after about 10 pt, so a
+# shorter drag lands as a tap or press on whatever is under it (review S4A-s10-gemini-1).
+_MIN_MOVED_SWIPE_PT = 10.0
+_REF_WINDOW_PT = (280.0, 620.0)
+
+
+def _collapsed(asked, sent) -> bool:
+    """True when moving a point clear of the margin left the swipe too short to be a swipe: a press, not a
+    swipe — whatever length it was asked for with (a pull-down from the margin that ends just inside the
+    screen would otherwise go out as a tap at the top of the app). That covers a swipe whose two ends read
+    as the same point in the result line. A swipe that was not moved goes out as it was asked."""
+    moved = any(abs(p - q) > 1e-9 for p, q in zip(asked, sent))
+    if not moved:
+        return False
+    if (_num(sent[0]), _num(sent[1])) == (_num(sent[2]), _num(sent[3])):
+        return True
+    w, h = _REF_WINDOW_PT
+    return math.hypot((sent[2] - sent[0]) * w, (sent[3] - sent[1]) * h) < _MIN_MOVED_SWIPE_PT
+
+
+def _refuse_collapsed(asked) -> int:
+    print(
+        f"out_of_screen: the swipe from ({_num(asked[0])},{_num(asked[1])}) to ({_num(asked[2])},{_num(asked[3])}) "
+        f"starts or ends on the iPhone Mirroring window's margin, or where it may be: with its points moved "
+        f"onto the phone screen it would be shorter than a swipe (under about {_MIN_MOVED_SWIPE_PT:g} pt) — a press, "
+        f"not a swipe; nothing was sent",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _swipe_line(asked, sent, rect, known: bool = True) -> str:
+    """The phone_swipe result line; names every point that was moved. ``rect`` is the phone screen, or —
+    with known=False, while its edges are not known — the part of the window clear of where the margin may be."""
+    line = f"swiped ({_num(sent[0])},{_num(sent[1])}) -> ({_num(sent[2])},{_num(sent[3])})"
+    moved = [
+        f"{name} ({_num(a[0])},{_num(a[1])})"
+        for name, a, b in (("start", asked[:2], sent[:2]), ("end", asked[2:], sent[2:]))
+        if any(abs(p - q) > 1e-9 for p, q in zip(a, b))
+    ]
+    x0, y0, x1, y1 = rect
+    if not known:
+        what = (f"moved the {' and '.join(moved)} clear of where the window's margin may be, into x {x0:.3f}-{x1:.3f} "
+                f"y {y0:.3f}-{y1:.3f}" if moved else "both points are clear of where the window's margin may be")
+        return line + (
+            " (the phone screen's edges are not known: the window's image showed no strip above the "
+            f"screen, as it does while the pointer rests on the window's top edge; {what}; iOS cancels a "
+            "drag that starts or ends on the transparent window margin)"
+        )
+    if moved:
+        line += (
+            f" (moved the {' and '.join(moved)} inside the phone screen, x {x0:.3f}-{x1:.3f} "
+            f"y {y0:.3f}-{y1:.3f}: iOS cancels a drag that starts or ends on the transparent "
+            f"window margin around it)"
+        )
+    return line
 
 
 def _cmd_home(_args) -> int:
@@ -531,6 +750,12 @@ def _open_deadline_kwargs(now=time.time) -> dict:
 
 
 def _cmd_open(args) -> int:
+    # a minimum that was meant to be on but cannot be read is not run without: said before anything is touched
+    problem = getattr(gestures, "OCR_MIN_CONFIDENCE_PROBLEM", None)
+    if problem is not None:
+        print(f"invalid_args: NORACU_OCR_MIN_CONFIDENCE is set to {str(problem)[:40]!r}, which is not a number above 0 "
+              f"and at most 1 — correct it or unset it; nothing was sent", file=sys.stderr)
+        return 2
     guard = _require_live()
     if guard is not None:
         return guard
@@ -541,6 +766,21 @@ def _cmd_open(args) -> int:
     # SIGKILL 1.5 s later could leave Cmd held); after a timeout the server returns the phone to the
     # Home Screen itself through the mirror's menu (no focus change, no chord).
     return _open_and_report(args)
+
+
+def _fmt_confidence(value) -> str:
+    return f"{value:.2f}" if isinstance(value, (int, float)) and not isinstance(value, bool) else "?"
+
+
+def _confidence_note(report: dict) -> str:
+    """' (label read with confidence 0.90)' for phone_open's line; '' when open_app recorded none.
+    The opt-in minimum (NORACU_OCR_MIN_CONFIDENCE) is named when it is in force."""
+    conf = report.get("confidence")
+    if not isinstance(conf, (int, float)) or isinstance(conf, bool):
+        return ""
+    floor = report.get("min_confidence")
+    tail = f"; minimum {_fmt_confidence(floor)}" if floor is not None else ""
+    return f" (label read with confidence {_fmt_confidence(conf)}{tail})"
 
 
 def _open_and_report(args) -> int:
@@ -562,7 +802,7 @@ def _open_and_report(args) -> int:
         # phone is known — refuse rather than guess.
         return _capture_failed()
     if result == "opened":
-        print(f"opened {args.app!r}")
+        print(f"opened {args.app!r}{_confidence_note(tidy)}")
         return 0
     # every unsuccessful path ends with a trip back to the Home Screen; say so only
     # when it worked
@@ -597,6 +837,12 @@ def _open_and_report(args) -> int:
         print(f"open_not_confirmed: Spotlight's Top Hit card showed {args.app!r} at more than one "
               f"spot, so nothing was tapped; {home_note} — open it from its Home Screen icon "
               "instead (phone_screenshot, then phone_tap)", file=sys.stderr)
+        return 4
+    if result == "low_confidence":
+        print(f"open_not_confirmed: Spotlight showed {args.app!r} but the label was read with "
+              f"confidence {_fmt_confidence(tidy.get('confidence'))}, below "
+              f"NORACU_OCR_MIN_CONFIDENCE={_fmt_confidence(tidy.get('min_confidence'))}, so "
+              f"nothing was tapped; {home_note}", file=sys.stderr)
         return 4
     if result == "short_unreadable":
         print(f"open_not_confirmed: could not read {args.app!r} in Spotlight — OCR often misses a "
@@ -633,7 +879,7 @@ def _open_and_report(args) -> int:
     # "not_confirmed" (F24): the row — and possibly the Top Hit icon —
     # was tapped but the app never verifiably opened; the phone is
     # back on the Home Screen.
-    print(f"open_not_confirmed: tapped {args.app!r} in Spotlight but the app did not open; {home_note}", file=sys.stderr)
+    print(f"open_not_confirmed: tapped {args.app!r} in Spotlight{_confidence_note(tidy)} but the app did not open; {home_note}", file=sys.stderr)
     return 4
 
 

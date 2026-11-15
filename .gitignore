@@ -20,3 +20,5 @@ OUTPUTS/
 # python bytecode (bundled imctl)
 __pycache__/
 *.pyc
+# internal planning notes (never in the repository)
+.planning/

@@ -1135,6 +1135,9 @@ function observeState(el, appEl) {
   const o = { gone: true };
   if (el) {
     const v = readNode(el);
+    // only an invalid element (-25202) is gone; any other read error (-25204: the app did not answer in time)
+    // says nothing about the element, so it is unknown, never evidence of a change (audit S5A-s10-G-3 / -D-2)
+    if (v.__err && v.__err !== -25202) o.gone = null;
     if (!v.__err) {
       o.gone = false;
       o.value = v.AXValue === undefined ? null : typeof v.AXValue === 'string' ? vhash(v.AXValue) : v.AXValue;
@@ -1167,7 +1170,9 @@ const WEAK_STATE_KEYS = new Set(['frontmost', 'focusedWindow', 'focus']);
 function diffState(a, b, keys) {
   const changed = STATE_KEYS.filter(k => JSON.stringify(a[k] === undefined ? null : a[k]) !== JSON.stringify(b[k] === undefined ? null : b[k]));
   const allowed = Array.isArray(keys) ? new Set(keys) : null;
-  const verified = changed.some(k => !WEAK_STATE_KEYS.has(k) && (!allowed || allowed.has(k)) && !(b.gone === true && k !== 'gone' && b[k] === undefined));
+  // a key not read on either side (the element gone or unreadable there) proves nothing; neither does an unknown gone
+  const known = (s, k) => (k === 'gone' ? s.gone !== null : !(s.gone !== false && s[k] === undefined));
+  const verified = changed.some(k => !WEAK_STATE_KEYS.has(k) && (!allowed || allowed.has(k)) && known(a, k) && known(b, k));
   const surfaces = [];
   if ((b.sheets || 0) > (a.sheets || 0)) surfaces.push('sheet');
   if (b.menu && !a.menu) surfaces.push('menu');
@@ -1491,6 +1496,11 @@ function opInsertText(req) {
   if (!req.replace && !canSel && typeof before !== 'string' && !secure) {
     return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `${label} takes text only by rewriting its whole value, and its value cannot be read — appending would replace what is there; nothing was sent`, details: { kind: 'value_unreadable' } }));
   }
+  // a secure field never shows its value: rewriting it to append is safe only when it is known to be empty (audit
+  // S5A-s11-X-2: what was typed there was replaced by the new text)
+  if (!req.replace && !canSel && secure && beforeLen !== 0) {
+    return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `${label} is a secure field that takes text only by rewriting its whole value, and it is not known to be empty — appending would replace what is there; nothing was sent`, details: { kind: 'value_unreadable', textlike: true } }));
+  }
   let err, via;
   if (req.replace) { err = setAttr(el, 'AXValue', $(text)); via = 'AXValue'; }
   else if (canSel) { err = setAttr(el, 'AXSelectedText', $(text)); via = 'AXSelectedText'; }
@@ -1635,13 +1645,20 @@ function setValueCore(req, r) {
     if (acts.indexOf('AXPress') < 0) return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: 'the control cannot be pressed', details: { actions: acts } }));
     const e = perform(r.el, 'AXPress');
     if (e !== 0) return fail(axCallError(e, 'AXPress'));
-    sleep(200);
-    let afterState = toggleState(readNode(r.el));
+    // a control can publish its new state late (or not be readable for a moment): wait for a definite state other
+    // than the one before; pressing again while the first press is still on its way would undo it (audit S5A-s11-X-4)
+    let afterState = cur;
+    for (let i = 0; i < 5 && (afterState === cur || afterState === null); i++) { sleep(200); afterState = toggleState(readNode(r.el)); }
+    if (afterState === cur || afterState === null) {
+      return fail({ code: 'NOT_CONFIRMED', message: `pressed once, but the control still reads ${toggleLabel(afterState)} after 1 s — not pressed again, which could undo a late first press`, delivery: 'unknown', retry: 'unsafe' });
+    }
+    // a third state (mixed → on, wanted off): one more press moves it on
     if (afterState !== want) {
       const e2 = perform(r.el, 'AXPress');
       if (e2 !== 0) return fail({ code: 'NOT_CONFIRMED', message: `pressed once, then second AXPress failed (${axCallError(e2, 'AXPress').message})`, delivery: 'unknown', retry: 'unsafe' });
-      sleep(200);
-      afterState = toggleState(readNode(r.el));
+      // the same wait for the second press (review S5C-G-1: a control slow the first time is slow the second time)
+      const mid = afterState;
+      for (let i = 0; i < 5 && (afterState === mid || afterState === null); i++) { sleep(200); afterState = toggleState(readNode(r.el)); }
     }
     if (afterState === want) return done('delivered_verified', { value: want, via: 'AXPress' });
     return fail({ code: 'NOT_CONFIRMED', message: `pressed, but the control still reads ${toggleLabel(afterState)}`, delivery: 'unknown', retry: 'unsafe' });
