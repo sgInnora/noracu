@@ -38,8 +38,9 @@ brew install cliclick       # for physical Mac input (keys, drags, clicks that n
 npx noracu --doctor         # checks this machine and prints the configuration for your client
 ```
 
-**2. Add it to your MCP client.** `--doctor` prints what to paste, with this machine's absolute paths: one
-command for Claude Code, one JSON block for Claude Desktop and Cursor. Written by hand, it is the following.
+**2. Add it to your MCP client.** Paste what `--doctor` printed, rather than the lines below: it has this machine's
+absolute paths and points at the copy you just installed — one command for Claude Code (`-s user`: for all your
+projects), one JSON block for Claude Desktop and Cursor. Written by hand, it is the following.
 
 Claude Code, started from a terminal with Node on its `PATH`:
 
@@ -64,12 +65,15 @@ Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json
 
 Quit the client completely (menu-bar icon included) and open it again.
 
+Upgrading from an earlier install? `claude mcp add` refuses a name that is taken: run `claude mcp remove noracu`
+first (with `-s user` if it was added for all your projects). In a JSON config, change the path in `args`.
+
 **3. Grant permissions to the client app, not to `node`.** System Settings → Privacy & Security →
 **Accessibility** and **Screen Recording** (on macOS 15 and later: **Screen & System Audio Recording**) → turn
 on Claude Desktop, Cursor or your terminal. Quit and reopen the client once more.
 
 **4. Check.** Call `mac_status`: it says whether the client has both permissions and whether cliclick was
-found. Then call `mac_ax_state` with Finder in front — an indexed tree comes back. That is the sign that it works;
+found. Then call `mac_ax_state` with Finder in front (or with `app: "Finder"`) — an indexed tree comes back. That is the sign that it works;
 a click comes after it. In the browser: `browser_launch` → `browser_navigate` → `browser_snapshot` →
 `browser_click` with an `element_index`.
 
@@ -95,6 +99,9 @@ reads or operates badly? [Report a bug](https://github.com/sgInnora/noracu/issue
   by `NORACU_STOP_FILE` exists no input is sent; `NORACU_DENY_APPS` and `NORACU_APPROVAL_FILE` say which apps
   may receive input (terminals and IDEs are refused by default); running scripts in a page and `file://`
   pages are off by default.
+- **One read sets a flag.** Reading an Electron or Chromium app (`mac_ax_state`, `mac_find`) tries to turn on its
+  web accessibility (`AXManualAccessibility`) so that its pages appear in the tree — Electron apps take it, Google
+  Chrome refuses it; `web_accessibility: false` or `NORACU_READ_ONLY=1` leaves it alone.
 - **Stays on this machine.** It uses the browser profile and the Mac apps you are signed in to. noracu makes
   no network calls of its own apart from Playwright's one-time Chromium download. Your client still sends
   what the tools return — text, screenshots — to the model it uses.

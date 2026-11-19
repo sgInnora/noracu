@@ -29,7 +29,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   form.kids.forEach((r, i) => { const y = 10 + 30 * i; r.frame[1] = y; r.kids[0].frame[1] = y; r.kids[1].frame[1] = y; });
   reparent(form);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: row inserted above an unlabelled field → never the neighbour (G1-1)", r.error && r.error.code === "STALE_REF", tag(r));
+  check("engine: row inserted above an unlabelled field → never the neighbour", r.error && r.error.code === "STALE_REF", tag(r));
 }
 {
   // the whole window moved: an unlabelled field is still the same field
@@ -52,7 +52,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("engine: a sibling inserted next to an unlabelled field → stale (path shape changed)", r.error && r.error.code === "STALE_REF", tag(r));
 }
 {
-  // the panel holding the target closed; another unlabelled field remains elsewhere (G1-1 search step)
+  // the panel holding the target closed; another unlabelled field remains elsewhere (the search step)
   const ctx = loadEngine(ENGINE);
   const a = Object.assign(el("AXTextField", { frame: [10, 10, 200, 22] }), { label: "A" });
   const b = Object.assign(el("AXTextField", { frame: [10, 400, 200, 22] }), { label: "B" });
@@ -62,7 +62,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXTextField" && n.frame[1] === 400));
   win.kids.splice(1, 1);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: target's panel closed → stale, not the other panel's field (G1-1)", r.error && r.error.code === "STALE_REF", tag(r));
+  check("engine: target's panel closed → stale, not the other panel's field", r.error && r.error.code === "STALE_REF", tag(r));
 }
 
 // ── identity: named elements ────────────────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("engine: panels swapped → never the Inbox Delete now at the Trash Delete's old place", (r.error && r.error.code === "STALE_REF") || r.el?.label === "Trash Delete", tag(r));
 }
 {
-  // the panel holding the target closed; the other panel's same-named button must not be taken (R11 #5a)
+  // the panel holding the target closed; the other panel's same-named button must not be taken
   const ctx = loadEngine(ENGINE);
   const del = (who, x) => Object.assign(el("AXButton", { title: "Delete", frame: [x, 20, 60, 20], actions: ["AXPress"] }), { label: `${who} Delete` });
   const win = el("AXWindow", { title: "Mail", frame: [0, 0, 500, 400], wid: 20 }, [el("AXGroup", { desc: "Inbox" }, [del("Inbox", 10)]), el("AXGroup", { desc: "Trash" }, [del("Trash", 260)])]);
@@ -92,7 +92,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton" && n.frame[0] === 260));
   win.kids.splice(1, 1);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: target panel closed → stale, never the other panel's same-named button (R11)", r.error && r.error.code === "STALE_REF", tag(r));
+  check("engine: target panel closed → stale, never the other panel's same-named button", r.error && r.error.code === "STALE_REF", tag(r));
 }
 {
   // a list sorted (or recycled) under a stale index: another row's Delete sits at the same place
@@ -111,7 +111,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("engine: list re-sorted → never another row's Delete at the same place", (r.error && r.error.code === "STALE_REF") || r.el?.label === "Beta Delete", tag(r));
 }
 {
-  // a same-named control replaced far away in the same panel (R11 #5b)
+  // a same-named control replaced far away in the same panel
   const ctx = loadEngine(ENGINE);
   const msg = (n, y) => Object.assign(el("AXButton", { title: "Delete", frame: [300, y, 60, 20], actions: ["AXPress"] }), { label: `msg ${n} Delete` });
   const thread = el("AXGroup", { desc: "Thread" }, [msg(1, 120)]);
@@ -121,7 +121,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton"));
   thread.kids = [el("AXGroup", {}, []), msg(3, 480)]; reparent(thread);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: same-named control replaced far away in the same panel → stale (R11)", r.error && r.error.code === "STALE_REF", tag(r));
+  check("engine: same-named control replaced far away in the same panel → stale", r.error && r.error.code === "STALE_REF", tag(r));
 }
 {
   // a named button moved far after a window resize → found by its unique label
@@ -136,7 +136,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("engine: named button nudged (≤64 px) with its path changed → resolves", tag(ctx.resolveTarget(t, 1000)) === "search+frame → OK", tag(ctx.resolveTarget(t, 1000)));
   win.frame[2] = 900; ok.frame[0] = 800;
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: named button re-laid-out far away → stale, not guessed (R11 rule)", r.error && r.error.code === "STALE_REF", tag(r));
+  check("engine: named button re-laid-out far away → stale, not guessed", r.error && r.error.code === "STALE_REF", tag(r));
 }
 {
   // a label is not content: a text field keeps its placeholder label while its value changes
@@ -162,11 +162,11 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const n = nodeAt(res, (x) => x.role === "AXButton");
   web.kids.unshift(el("AXGroup", {}, [])); reparent(web);
   const r = n ? ctx.resolveTarget(targetOf(res, n), 2000) : { error: { code: "NOT_IN_SNAPSHOT" } };
-  check("engine: control 60 wrappers deep re-found after its path shifted (G1-2 / G9-3)", !r.error && r.el.label === "Send", tag(r));
+  check("engine: control 60 wrappers deep re-found after its path shifted", !r.error && r.el.label === "Send", tag(r));
 }
 
 {
-  // panes share an AXIdentifier (one nib / component per pane); the target pane closes (R12 #1)
+  // panes share an AXIdentifier (one nib / component per pane); the target pane closes
   const ctx = loadEngine(ENGINE);
   const pane = (name, x) => el("AXGroup", { desc: name }, [Object.assign(el("AXButton", { id: "del", title: "Delete", frame: [x, 20, 60, 22], actions: ["AXPress"] }), { label: `${name} Delete` })]);
   const win = el("AXWindow", { title: "W", frame: [0, 0, 400, 200], wid: 24 }, [pane("Inbox", 10), pane("Trash", 260)]);
@@ -175,10 +175,10 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton" && n.frame[0] === 260));
   win.kids.splice(1, 1);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: shared AXIdentifier, target pane closed → stale, never the other pane's button (R12)", r.error && r.error.code === "STALE_REF", tag(r));
+  check("engine: shared AXIdentifier, target pane closed → stale, never the other pane's button", r.error && r.error.code === "STALE_REF", tag(r));
 }
 {
-  // rows whose first text is a shared badge and whose title is a link (R12 #2); the table is re-sorted
+  // rows whose first text is a shared badge and whose title is a link; the table is re-sorted
   const ctx = loadEngine(ENGINE);
   const tr = (badge, title, y) => el("AXRow", { frame: [0, y, 400, 28] }, [el("AXStaticText", { value: badge }), el("AXLink", { title }), Object.assign(el("AXButton", { title: "Delete", frame: [320, y, 60, 22], actions: ["AXPress"] }), { label: `${title} Delete` })]);
   const tbl = el("AXTable", {}, [tr("Open", "Draft", 0), tr("Open", "Prod DB", 28)]);
@@ -188,10 +188,10 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton" && n.frame[1] === 0));
   tbl.kids = [tr("Open", "Prod DB", 0), tr("Open", "Draft", 28)]; reparent(tbl);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: re-sorted rows with a shared badge → the Draft row's Delete, never Prod DB's (R12)", !r.error && r.el.label === "Draft Delete", tag(r));
+  check("engine: re-sorted rows with a shared badge → the Draft row's Delete, never Prod DB's", !r.error && r.el.label === "Draft Delete", tag(r));
 }
 {
-  // a list of AXGroup items (no AXRow), 28 px apart; the first item is deleted (R12 #3)
+  // a list of AXGroup items (no AXRow), 28 px apart; the first item is deleted
   const ctx = loadEngine(ENGINE);
   const item = (title, y) => el("AXGroup", { frame: [0, y, 400, 28] }, [el("AXStaticText", { value: title }), Object.assign(el("AXButton", { title: "Delete", frame: [320, y, 60, 22], actions: ["AXPress"] }), { label: `${title} Delete` })]);
   const list = el("AXGroup", {}, [item("one", 0), item("two", 28), item("three", 56)]);
@@ -201,7 +201,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton" && n.frame[1] === 28));
   list.kids = [item("two", 0), item("three", 28)]; reparent(list);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: list item above deleted → item two's Delete (moved up), never item three's (R12)", !r.error && r.el.label === "two Delete", tag(r));
+  check("engine: list item above deleted → item two's Delete (moved up), never item three's", !r.error && r.el.label === "two Delete", tag(r));
 }
 {
   // a row as the target itself: its own texts identify it
@@ -218,7 +218,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("engine: rows re-sorted → the b.txt row is never taken for a.txt", (r.error && r.error.code === "STALE_REF") || r.el?.label === "b.txt row", tag(r));
 }
 
-// ── identity: look-alikes that appear after the snapshot (R13 §1) ──────────────────────────────
+// ── identity: look-alikes that appear after the snapshot ──────────────────────────────
 {
   // (1) newest-first feed with a single item; a second item arrives on top → the old path now holds the
   // new item's Delete at the very same position
@@ -229,14 +229,14 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   installApp(ctx, { pid: 81, name: "T", windows: [win] });
   const res = snap(ctx, { app: "T" });
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton"));
-  check("engine: a unique labelled control still records its item key (R13)", !t.fp.dup && t.fp.item === "1:Draft", JSON.stringify(t.fp));
+  check("engine: a unique labelled control still records its item key", !t.fp.dup && t.fp.item === "1:Draft", JSON.stringify(t.fp));
   feed.kids = [item("Prod DB", 0), item("Draft", 28)]; reparent(feed);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: a look-alike arrives on top of a one-item list → Draft's Delete, never Prod DB's (R13 §1-1)", !r.error && r.el.label === "Draft Delete", tag(r));
+  check("engine: a look-alike arrives on top of a one-item list → Draft's Delete, never Prod DB's", !r.error && r.el.label === "Draft Delete", tag(r));
   // same slot, the old item gone and a different one in its place → stale, not the new item's Delete
   feed.kids = [item("Prod DB", 0)]; reparent(feed);
   const r2 = ctx.resolveTarget(t, 1000);
-  check("engine: the only item replaced by another one in the same place → stale (R13 §1)", r2.error && r2.error.code === "STALE_REF", tag(r2));
+  check("engine: the only item replaced by another one in the same place → stale", r2.error && r2.error.code === "STALE_REF", tag(r2));
 }
 {
   // (2) snapshot drilled into one row of a table: uniqueness is unknown → the row's Delete is treated as a
@@ -250,10 +250,10 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const row0 = nodeAt(top, (n) => n.role === "AXRow" && n.frame[1] === 0);
   const d = ctx.opSnapshot({ op: "snapshot", root: targetOf(top, row0) });
   const t = targetOf(d, nodeAt(d, (n) => n.role === "AXButton"));
-  check("engine: a drilled snapshot marks its elements as look-alikes (R13 §1-2)", t.fp.dup === true && /Draft/.test(t.fp.item || ""), JSON.stringify(t.fp));
+  check("engine: a drilled snapshot marks its elements as look-alikes", t.fp.dup === true && /Draft/.test(t.fp.item || ""), JSON.stringify(t.fp));
   tbl.kids = [tr("Prod DB", 0), tr("Draft", 28), tr("Notes", 56)]; reparent(tbl);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: drilled row re-sorted → Draft's Delete, never Prod DB's (R13 §1-2)", !r.error && r.el.label === "Draft Delete", tag(r));
+  check("engine: drilled row re-sorted → Draft's Delete, never Prod DB's", !r.error && r.el.label === "Draft Delete", tag(r));
 }
 {
   // (3) mac_find filtered by value: the other look-alike was visited, not shown → still a look-alike
@@ -264,10 +264,10 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   installApp(ctx, { pid: 83, name: "T", windows: [win] });
   const f = ctx.opFind({ op: "find", app: "T", role: "textfield", value: "draft.txt" });
   const t = targetOf(f, f.nodes[0]);
-  check("engine: a filtered find knows the field has a look-alike it did not show (R13 §1-3)", f.nodes.length === 1 && t.fp.dup === true && t.fp.item === "1:draft.txt", JSON.stringify(t.fp));
+  check("engine: a filtered find knows the field has a look-alike it did not show", f.nodes.length === 1 && t.fp.dup === true && t.fp.item === "1:draft.txt", JSON.stringify(t.fp));
   outline.kids = [tr("prod.db", 0), tr("draft.txt", 22)]; reparent(outline);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: rows re-sorted after a filtered find → the draft.txt field, never prod.db's (R13 §1-3)", !r.error && r.el.label === "draft.txt field", tag(r));
+  check("engine: rows re-sorted after a filtered find → the draft.txt field, never prod.db's", !r.error && r.el.label === "draft.txt field", tag(r));
 }
 {
   // no false stale: typing into a form field does not change the identity of the Save button next to it
@@ -281,7 +281,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton"));
   field.value = "typed by mac_type";
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: a form field's value is not part of the Save button's item key (R13 §1-③)", t.fp.item === "1:Name" && !r.error && r.el.label === "Save", `${t.fp.item} ${tag(r)}`);
+  check("engine: a form field's value is not part of the Save button's item key", t.fp.item === "1:Name" && !r.error && r.el.label === "Save", `${t.fp.item} ${tag(r)}`);
   // the window's own texts are never an item: a status line that changes does not make a toolbar button stale
   const ctx2 = loadEngine(ENGINE);
   const status = el("AXStaticText", { value: "Line 1" });
@@ -292,10 +292,10 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t2 = targetOf(res2, nodeAt(res2, (n) => n.role === "AXButton"));
   status.value = "Line 7";
   const r2 = ctx2.resolveTarget(t2, 1000);
-  check("engine: the container is never an item ancestor (R13 §1-④)", t2.fp.item === undefined && !r2.error, `${t2.fp.item} ${tag(r2)}`);
+  check("engine: the container is never an item ancestor", t2.fp.item === undefined && !r2.error, `${t2.fp.item} ${tag(r2)}`);
 }
 
-// ── identity v6 (R14 §1) ───────────────────────────────────────────────────────────────────────
+// ── identity v6 ───────────────────────────────────────────────────────────────────────
 {
   // (a)1 form rows whose only text is a field value (not table content): both Remove buttons climb to the
   // section heading → that shared item tells nothing apart; removing b's row must not send b's index to a's
@@ -306,10 +306,10 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   installApp(ctx, { pid: 91, name: "T", windows: [win] });
   const res = snap(ctx, { app: "T" });
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton" && n.frame[0] === 410));
-  check("engine: an item key shared by look-alikes is marked shared (R14 §1a-1)", t.fp.dup === true && t.fp.shared === true && t.fp.item === "2:Invitees", JSON.stringify(t.fp));
+  check("engine: an item key shared by look-alikes is marked shared", t.fp.dup === true && t.fp.shared === true && t.fp.item === "2:Invitees", JSON.stringify(t.fp));
   sec.kids.splice(2, 1); reparent(sec);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: b's row removed → b's Remove index is stale, never a's Remove (R14 §1a-1)", r.error && r.error.code === "STALE_REF", tag(r));
+  check("engine: b's row removed → b's Remove index is stale, never a's Remove", r.error && r.error.code === "STALE_REF", tag(r));
 }
 {
   // (a)2 a one-card list without any text; a second card arrives on top at the very same place
@@ -322,7 +322,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton"));
   list.kids = [card("new", 0), card("first", 40)]; reparent(list);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: a textless card arrives on top of the only one → never the new card's Remove (R14 §1a-2)", (r.error && /STALE_REF|AMBIGUOUS_TARGET/.test(r.error.code)) || r.el?.label === "first Remove", tag(r));
+  check("engine: a textless card arrives on top of the only one → never the new card's Remove", (r.error && /STALE_REF|AMBIGUOUS_TARGET/.test(r.error.code)) || r.el?.label === "first Remove", tag(r));
 }
 {
   // (b) a character counter next to the Send button changes while typing: Send stays valid; so does a
@@ -341,7 +341,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const tRun = targetOf(res, nodeAt(res, (n) => n.title === "Run"));
   counter.value = "12/280"; status.value = "Edited";
   const r1 = ctx.resolveTarget(tSend, 1000), r2 = ctx.resolveTarget(tRun, 1000);
-  check("engine: a counter in the item does not make a unique Send stale; a toolbar is never an item (R14 §1b)", !r1.error && r1.el.label === "Send" && !r2.error && r2.el.label === "Run" && tRun.fp.item === undefined, `${tag(r1)} ${tag(r2)} ${tRun.fp.item}`);
+  check("engine: a counter in the item does not make a unique Send stale; a toolbar is never an item", !r1.error && r1.el.label === "Send" && !r2.error && r2.el.label === "Run" && tRun.fp.item === undefined, `${tag(r1)} ${tag(r2)} ${tRun.fp.item}`);
 }
 {
   // (c) view-based table: AXRow > AXCell > AXGroup > AXTextField — the file name still identifies the row
@@ -352,10 +352,10 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   installApp(ctx, { pid: 94, name: "T", windows: [win] });
   const res = snap(ctx, { app: "T" });
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton" && n.frame[1] === 0));
-  check("engine: a field value under a cell several levels up is item text (R14 §1c)", t.fp.item === "2:draft.txt", JSON.stringify(t.fp));
+  check("engine: a field value under a cell several levels up is item text", t.fp.item === "2:draft.txt", JSON.stringify(t.fp));
   outline.kids = [tr("prod.db", 0), tr("draft.txt", 22)]; reparent(outline);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: view-based rows re-sorted → draft.txt's Share, never prod.db's (R14 §1c)", !r.error && r.el.label === "draft.txt Share", tag(r));
+  check("engine: view-based rows re-sorted → draft.txt's Share, never prod.db's", !r.error && r.el.label === "draft.txt Share", tag(r));
 }
 
 {
@@ -396,7 +396,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
 }
 
 {
-  // R15 §2: a unique Delete in a one-row list; "Invoice 13" is prepended above "Invoice 12" — digits are
+  // A unique Delete in a one-row list; "Invoice 13" is prepended above "Invoice 12" — digits are
   // ignored for a unique element's item, so the shape must still hold for the path to be taken
   const ctx = loadEngine(ENGINE);
   const row = (name, y) => el("AXGroup", { frame: [0, y, 400, 28] }, [el("AXStaticText", { value: name }), Object.assign(el("AXButton", { title: "Delete", frame: [320, y, 60, 22], actions: ["AXPress"] }), { label: `${name} Delete` })]);
@@ -407,13 +407,13 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXButton"));
   list.kids = [row("Invoice 13", 0), row("Invoice 12", 28)]; reparent(list);
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: \"Invoice 13\" prepended above the only \"Invoice 12\" → never Invoice 13's Delete (R15 §2)", (r.error && /STALE_REF|AMBIGUOUS_TARGET/.test(r.error.code)) || r.el?.label === "Invoice 12 Delete", tag(r));
+  check("engine: \"Invoice 13\" prepended above the only \"Invoice 12\" → never Invoice 13's Delete", (r.error && /STALE_REF|AMBIGUOUS_TARGET/.test(r.error.code)) || r.el?.label === "Invoice 12 Delete", tag(r));
   // the same row, its counter changing in place (shape unchanged): still resolves
   list.kids = [row("Invoice 12 (2 items)", 0)]; reparent(list);
   const t2 = targetOf(snap(ctx, { app: "T" }), nodeAt(snap(ctx, { app: "T" }), (n) => n.role === "AXButton"));
   list.kids[0].kids[0].value = "Invoice 12 (3 items)";
   const r2 = ctx.resolveTarget(t2, 1000);
-  check("engine: a digit changing in place in a unique element's item does not make it stale (R15 §2)", !r2.error && r2.el.label === "Invoice 12 (2 items) Delete", tag(r2));
+  check("engine: a digit changing in place in a unique element's item does not make it stale", !r2.error && r2.el.label === "Invoice 12 (2 items) Delete", tag(r2));
 }
 {
   // two running apps under one name: none is picked for the caller; "pid:<number>" names one
@@ -488,10 +488,10 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("engine: surface menu is its own container (kind menu, by frame)", res.container.kind === "menu" && tag(ctx.resolveTarget(t, 1000)) === "path → popup Delete", `${JSON.stringify(res.container)} ${tag(ctx.resolveTarget(t, 1000))}`);
   win.kids = []; popItem.gone = true;
   const r = ctx.resolveTarget(t, 1000);
-  check("engine: pop-up closed → stale (menu_closed), never Edit > Delete (G1-5)", r.error && r.error.details.kind === "menu_closed", tag(r));
+  check("engine: pop-up closed → stale (menu_closed), never Edit > Delete", r.error && r.error.details.kind === "menu_closed", tag(r));
   const tApp = { pid: 49, container: { kind: "app" }, path: [9, 0], fp: { role: "AXMenuItem", subrole: "", id: "", name: "Delete" } };
   const r2 = ctx.resolveTarget(tApp, 1000);
-  check("engine: app-container search skips the menu bar (G1-5)", r2.error && r2.error.code === "STALE_REF", tag(r2));
+  check("engine: app-container search skips the menu bar", r2.error && r2.error.code === "STALE_REF", tag(r2));
 }
 {
   // window without a CGWindowID: a moved window is not "the same" by title alone
@@ -507,7 +507,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const r = ctx.resolveTarget(t, 1000);
   // 0.2.2: a window without an id is refused outright (a closed and reopened one could not be told
   // apart), so the closed window is never taken for the other "Untitled" either
-  check("engine: id-less window → policy_denied window_unverifiable, open or closed, never the other \"Untitled\" (G1-7, 0.2.2)",
+  check("engine: id-less window → policy_denied window_unverifiable, open or closed, never the other \"Untitled\" (0.2.2)",
     res.window_identity === "unverifiable" && open.error && open.error.code === "POLICY_DENIED" && open.error.details.kind === "window_unverifiable"
       && r.error && r.error.code === "POLICY_DENIED" && !r.el, `${tag(open)} | ${tag(r)}`);
 }
@@ -524,7 +524,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const d = ctx.opSnapshot({ op: "snapshot", root: targetOf(res, ib) });
   const rowNode = d.nodes && d.nodes.find((x) => x.role === "AXRow");
   const r = rowNode ? ctx.resolveTarget({ pid: 51, container: d.container, path: rowNode.path, fp: rowNode.fp }, 1000) : { error: { code: "NO_ROW" } };
-  check("engine: drill uses the root's live path (G1-3)", JSON.stringify(d.root_path) === "[2]" && !r.error && r.el.label === "inbox row", `${JSON.stringify(d.root_path)} ${tag(r)}`);
+  check("engine: drill uses the root's live path", JSON.stringify(d.root_path) === "[2]" && !r.error && r.el.label === "inbox row", `${JSON.stringify(d.root_path)} ${tag(r)}`);
 }
 {
   // window_id without app: the window's owner is the app
@@ -533,7 +533,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   installApp(ctx, { pid: 52, name: "Bg", windows: [win], frontPid: 1 });
   ctx.cgWindow = (id) => (id === 77 ? { id, pid: 52, app: "Bg", title: "Bg", bounds: [0, 0, 300, 200] } : null);
   const res = snap(ctx, { window_id: 77 });
-  check("engine: window_id alone selects its owner app (G1-7)", res.ok && res.pid === 52 && res.window.window_id === 77, JSON.stringify({ ok: res.ok, pid: res.pid, code: res.code }));
+  check("engine: window_id alone selects its owner app", res.ok && res.pid === 52 && res.window.window_id === 77, JSON.stringify({ ok: res.ok, pid: res.pid, code: res.code }));
 }
 {
   // a hung root is not an empty, complete tree
@@ -542,7 +542,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   installApp(ctx, { pid: 53, name: "T", windows: [win] });
   win.hung = true;
   const res = snap(ctx, { app: "T", window_id: 16 });
-  check("engine: root answering -25204 → APP_UNRESPONSIVE, not complete:true (G9-2)", res.ok === false && res.code === "APP_UNRESPONSIVE", JSON.stringify({ ok: res.ok, code: res.code, complete: res.complete }));
+  check("engine: root answering -25204 → APP_UNRESPONSIVE, not complete:true", res.ok === false && res.code === "APP_UNRESPONSIVE", JSON.stringify({ ok: res.ok, code: res.code, complete: res.complete }));
 }
 
 {
@@ -555,7 +555,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const res = snap(ctx, { app: "T", surface: "focused" });
   const n = res.nodes && res.nodes[0];
   const r = n ? ctx.resolveTarget({ pid: 63, container: res.container, path: n.path, fp: n.fp }, 1000) : { error: { code: "NONE" } };
-  check("engine: focused menu bar item → menubar container and resolvable (R11)", res.container?.kind === "menubar" && !r.error && r.el.label === "File", `${JSON.stringify(res.container)} ${tag(r)}`);
+  check("engine: focused menu bar item → menubar container and resolvable", res.container?.kind === "menubar" && !r.error && r.el.label === "File", `${JSON.stringify(res.container)} ${tag(r)}`);
 }
 
 // ── physical input gate ─────────────────────────────────────────────────────────────────────────
@@ -571,7 +571,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   ctx.hitTest = () => ({ verdict: "unknown", reason: "hit test error -25204" });
   ctx.cgTopAt = () => ({ pid: 999, owner: "Other", layer: 0, wid: 5 });
   const r1 = ctx.opPhysicalPrep({ target: t });
-  check("engine: inconclusive hit test + another app's window on top → OCCLUDED, nothing sent (G2-6)", r1.ok === false && r1.code === "OCCLUDED" && r1.delivery === "not_delivered", JSON.stringify({ code: r1.code, occ: r1.details?.occluder }));
+  check("engine: inconclusive hit test + another app's window on top → OCCLUDED, nothing sent", r1.ok === false && r1.code === "OCCLUDED" && r1.delivery === "not_delivered", JSON.stringify({ code: r1.code, occ: r1.details?.occluder }));
   ctx.cgTopAt = () => null;
   const r2 = ctx.opPhysicalPrep({ target: t });
   check("engine: inconclusive hit test + no window at the point → NOT_ACTIONABLE", r2.ok === false && r2.code === "NOT_ACTIONABLE", r2.code);
@@ -612,12 +612,12 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   ctx.hitTest = () => ({ verdict: "intercepted", occluder: { role: "AXSheet", title: "", app: "T" } });
   const r4 = ctx.opPhysicalPrep({ target: t });
   check("engine: hit test intercepted → OCCLUDED", r4.ok === false && r4.code === "OCCLUDED", r4.code);
-  // R17: the app's own, but another window (a floating panel) on top of the element's window
+  // The app's own, but another window (a floating panel) on top of the element's window
   ctx.hitTest = () => ({ verdict: "unknown", reason: "no element at the point" });
   ctx.axWindowId = (e) => { let c = e; while (c && c.wid === undefined) c = c.parent; return c ? c.wid : null; };
   ctx.cgTopAt = () => ({ pid: 70, owner: "T", layer: 3, wid: 31 });
   const r5 = ctx.opPhysicalPrep({ target: t });
-  check("engine: inconclusive hit test + another window of the same app on top → OCCLUDED (R17 §1-1)", r5.ok === false && r5.code === "OCCLUDED" && r5.details?.occluder?.other_window === true, JSON.stringify({ code: r5.code, occ: r5.details?.occluder }));
+  check("engine: inconclusive hit test + another window of the same app on top → OCCLUDED", r5.ok === false && r5.code === "OCCLUDED" && r5.details?.occluder?.other_window === true, JSON.stringify({ code: r5.code, occ: r5.details?.occluder }));
   ctx.cgTopAt = () => ({ pid: 70, owner: "T", layer: 0, wid: 30 });
   const r6 = ctx.opPhysicalPrep({ target: t });
   check("engine: …and the element's own window on top → allowed", r6.ok === true, JSON.stringify({ ok: r6.ok, code: r6.code }));
@@ -628,15 +628,15 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   installApp(ctx, { pid: 71, name: "Visual Studio Code", bundle: "com.microsoft.VSCode", windows: [], frontPid: 71 });
   const a = ctx.opFrontmost({ app: "com.microsoft.VSCode" });
   const b = ctx.opFrontmost({ pid: 71 });
-  check("engine: frontmost matches by bundle id or pid (G2-3)", a.match === true && b.match === true && a.front.pid === 71, JSON.stringify(a));
+  check("engine: frontmost matches by bundle id or pid", a.match === true && b.match === true && a.front.pid === 71, JSON.stringify(a));
 }
 
 // ── matching ────────────────────────────────────────────────────────────────────────────────────
 {
   const ctx = loadEngine(ENGINE);
   const m = (v, f) => ctx.matches(v, f);
-  check("engine: text exact matches the title alone (G1-6)", m({ AXRole: "AXButton", AXTitle: "Save" }, { text: "save", exact: true }) === true);
-  check("engine: text exact matches the value alone (G1-6)", m({ AXRole: "AXStaticText", AXValue: "Loading" }, { text: "Loading", exact: true }) === true);
+  check("engine: text exact matches the title alone", m({ AXRole: "AXButton", AXTitle: "Save" }, { text: "save", exact: true }) === true);
+  check("engine: text exact matches the value alone", m({ AXRole: "AXStaticText", AXValue: "Loading" }, { text: "Loading", exact: true }) === true);
   check("engine: text exact rejects a longer string", m({ AXRole: "AXButton", AXTitle: "Save As…" }, { text: "Save", exact: true }) === false);
   check("engine: id is a substring match unless exact (tool description)", m({ AXRole: "AXButton", AXIdentifier: "toolbar.save" }, { id: "save" }) === true && m({ AXRole: "AXButton", AXIdentifier: "toolbar.save" }, { id: "save", exact: true }) === false);
 }
@@ -736,7 +736,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
       JSON.stringify({ amb: rAmb.code, ok: rTwoSeg.ok, calls }));
   }
 
-  // review fix (Claude): a path that starts below the top level ("Export > PDF…") still matches as a suffix
+  // A path that starts below the top level ("Export > PDF…") still matches as a suffix
   {
     const ctx = loadEngine(ENGINE);
     const menubar = el("AXMenuBar", {}, [
@@ -819,7 +819,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   }
 }
 
-// review 0.2.6 #4: mac_clipboard_read marks Universal Clipboard content as remote (and still reads it)
+// mac_clipboard_read marks Universal Clipboard content as remote (and still reads it)
 {
   const ctx = loadEngine(ENGINE);
   const arr = (xs) => ({ isNil: () => false, count: xs.length, objectAtIndex: (i) => ({ js: xs[i] }) });
@@ -837,7 +837,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     JSON.stringify({ rRemote, rLocal }));
 }
 
-// ── mac_paste: one engine call, clipboard copied aside and put back (R13 §2) ───────────────────────
+// ── mac_paste: one engine call, clipboard copied aside and put back ───────────────────────
 {
   // a fake pasteboard and clock; frontApp/findApp come from installApp
   const setup = (opts = {}) => {
@@ -856,7 +856,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     ctx.pbWriteText = (t) => { log.push(`write:${t}`); const mine = ++cc; pb.types = ["public.utf8-plain-text", "org.nspasteboard.TransientType"]; pb.items = [[["public.utf8-plain-text", t]]]; if (opts.afterWrite) opts.afterWrite(api); return mine; };
     ctx.pbRestore = (saved) => { log.push("restore"); cc++; pb.items = saved.items; pb.types = ["public.utf8-plain-text"]; return true; };
     ctx.pbClear = () => { log.push("clear"); cc++; pb.items = []; pb.types = []; };
-    // E2 T7: ⌘V is posted by the engine on the layout's V key with the ⌘ modifier (no cliclick)
+    // ⌘V is posted by the engine on the layout's V key with the ⌘ modifier (no cliclick)
     ctx.postKey = (code, mods) => { log.push(`key:${code}:${mods.map((m) => m[0]).join("+")}`); if (opts.afterKey) opts.afterKey(api); return opts.keyResult ?? true; };
     ctx.releaseStuckModifiers = () => [];
     ctx.keyboardLayoutId = () => opts.layout ?? "com.apple.keylayout.US";
@@ -931,7 +931,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
       r.ok && r.restored === "false (app_unresponsive)" && t.log.indexOf("restore") < 0, JSON.stringify({ r, log: t.log }));
   }
   {
-    // E2 T7: the key events for ⌘V cannot be created → the V key never went out: not delivered, clipboard put back
+    // The key events for ⌘V cannot be created → the V key never went out: not delivered, clipboard put back
     const t = setup({ keyResult: false });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
     check("paste: ⌘V events cannot be created → not_delivered, the user's clipboard is put back",
@@ -951,32 +951,32 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
       JSON.stringify({ r: r.delivery, log: t.log, r2: r2.code, log2: t2.log }));
   }
   {
-    // R15: a copy that lands while the clipboard is being copied aside is not overwritten
+    // A copy that lands while the clipboard is being copied aside is not overwritten
     const t = setup({ duringSave: (a) => a.bump() });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
-    check("paste: another app copies during the save → nothing written, nothing sent (R15 §1-3)",
+    check("paste: another app copies during the save → nothing written, nothing sent",
       !r.ok && r.code === "NOT_CONFIRMED" && !t.log.some((x) => x.startsWith("write") || x.startsWith("key:")), JSON.stringify({ r, log: t.log }));
   }
   {
-    // R15: the paste shows at once → still held for the minimum before the clipboard goes back
+    // The paste shows at once → still held for the minimum before the clipboard goes back
     let restoredAt = null;
     const t = setup({ evidence: "before", afterKey: (a) => a.setEvidence("after") });
     const orig = t.ctx.pbRestore;
     t.ctx.pbRestore = (saved) => { restoredAt = t.now(); return orig(saved); };
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
-    check("paste: evidence at once → restore only after the 300 ms minimum hold (R15 §1-4)", r.ok && r.delivery === "delivered_verified" && restoredAt >= 300, `restoredAt=${restoredAt}`);
+    check("paste: evidence at once → restore only after the 300 ms minimum hold", r.ok && r.delivery === "delivered_verified" && restoredAt >= 300, `restoredAt=${restoredAt}`);
   }
   {
-    // CP (F4): the text was in the field before; after ⌘V the value changed in another way → not verified
+    // The text was in the field before; after ⌘V the value changed in another way → not verified
     const t = setup({ evidence: "before", raw: "hello", sel: { location: 5, length: 0 }, afterKey: (a) => a.setEvidence("after2", undefined, "hello ") });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
-    check("CP (F4): paste — text already there, value changed otherwise → delivered_unverified not_at_insertion_point; clipboard restored after the hold",
+    check("paste — text already there, value changed otherwise → delivered_unverified not_at_insertion_point; clipboard restored after the hold",
       r.ok && r.delivery === "delivered_unverified" && r.reason === "not_at_insertion_point" && r.restored === "true", JSON.stringify(r));
   }
   {
     const t = setup({ evidence: "before", raw: "abc", sel: null, afterKey: (a) => a.setEvidence("after3", undefined, "abchello") });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
-    check("CP: paste — insertion point unreadable → delivered_unverified insertion_point_unreadable even though the text shows",
+    check("paste — insertion point unreadable → delivered_unverified insertion_point_unreadable even though the text shows",
       r.ok && r.delivery === "delivered_unverified" && r.reason === "insertion_point_unreadable", JSON.stringify(r));
   }
   {
@@ -990,33 +990,33 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   {
     const t = setup({ evidence: "before", raw: "ab", sel: { location: 1, length: 0 }, afterKey: (a) => a.setEvidence("after4", undefined, "ahellob") });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
-    check("CP: paste — value becomes before[0:loc] + text + rest → delivered_verified",
+    check("paste — value becomes before[0:loc] + text + rest → delivered_verified",
       r.ok && r.delivery === "delivered_verified" && r.reason === undefined, JSON.stringify(r));
   }
   for (const [after, want] of [["abXYcd", "delivered_verified"], ["abcdXY", "delivered_unverified"], ["XYabcd", "delivered_unverified"]]) {
     const t = setup({ evidence: "before", raw: "abcd", sel: { location: 2, length: 0 }, afterKey: (a) => a.setEvidence(`k-${after}`, undefined, after) });
     const r = t.ctx.opPaste({ op: "paste", text: "XY" });
-    check(`CP R35: paste XY into "ab|cd" → ${after} gives ${want}; clipboard restored`, r.ok && r.delivery === want && r.restored === "true",
+    check(`paste XY into "ab|cd" → ${after} gives ${want}; clipboard restored`, r.ok && r.delivery === want && r.restored === "true",
       JSON.stringify({ delivery: r.delivery, reason: r.reason, restored: r.restored }));
   }
   {
-    // R36 (F4): PAYLOAD fully selected, PAYLOAD pasted over it: the value reads the same, only the selection moved
+    // PAYLOAD fully selected, PAYLOAD pasted over it: the value reads the same, only the selection moved
     const t = setup({ evidence: "before", raw: "PAYLOAD", sel: { location: 0, length: 7 }, afterKey: (a) => a.setEvidence("k-sel-moved", undefined, "PAYLOAD") });
     const r = t.ctx.opPaste({ op: "paste", text: "PAYLOAD" });
-    check("CP R36 (F4): paste PAYLOAD over a selected PAYLOAD, value unchanged → delivered_unverified value_unchanged, never verified",
+    check("paste PAYLOAD over a selected PAYLOAD, value unchanged → delivered_unverified value_unchanged, never verified",
       r.ok && r.delivery === "delivered_unverified" && r.reason === "value_unchanged", JSON.stringify({ delivery: r.delivery, reason: r.reason, restored: r.restored }));
   }
   {
-    // R15: focus moving to another element is not evidence of the paste
+    // Focus moving to another element is not evidence of the paste
     const t = setup({ evidence: "before", afterKey: (a) => a.setEvidence("other", { id: "elsewhere" }) });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
-    check("paste: a focus change is not evidence → delivered_unverified after the full hold (R15 §1-4)", r.ok && r.delivery === "delivered_unverified", JSON.stringify(r));
+    check("paste: a focus change is not evidence → delivered_unverified after the full hold", r.ok && r.delivery === "delivered_unverified", JSON.stringify(r));
   }
   {
-    // R15: a concealed marker on the second item (NSPasteboard.types lists only the first item's)
+    // A concealed marker on the second item (NSPasteboard.types lists only the first item's)
     const t = setup({ types: ["public.utf8-plain-text"], itemTypes: ["public.utf8-plain-text", "public.utf8-plain-text", "org.nspasteboard.ConcealedType"] });
     const r = t.ctx.opPaste({ op: "paste", text: "hello" });
-    check("paste: a concealed second item is never copied (R15 §1-5)", r.ok && r.restored === "cleared (previous_concealed)" && t.log.indexOf("save") < 0, JSON.stringify({ r, log: t.log }));
+    check("paste: a concealed second item is never copied", r.ok && r.restored === "cleared (previous_concealed)" && t.log.indexOf("save") < 0, JSON.stringify({ r, log: t.log }));
   }
   {
     // without evidence the clipboard is not restored before the hold (1 s by default)
@@ -1082,7 +1082,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
 }
 
 {
-  // audit S5A-s10-G-3 / -D-2: an element that cannot be read after the action (-25204) is not "gone" — no
+  // An element that cannot be read after the action (-25204) is not "gone" — no
   // delivered_verified from a read error; an element that is really gone (-25202) still is evidence
   const ctx = loadEngine(ENGINE);
   const btn = Object.assign(el("AXButton", { title: "Save", frame: [10, 10, 60, 20], actions: ["AXPress"] }), { label: "Save" });
@@ -1093,7 +1093,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const origPerform = ctx.perform;
   ctx.perform = (e, a) => { if (e === btn) { btn.hung = true; return 0; } return origPerform(e, a); };
   const rHung = ctx.opAct({ target: t, action: "AXPress", settle_ms: 0 });
-  check("审计 S5A：动作后元素读不出（-25204）→ delivered_unverified，不算 gone、不算验证",
+  check("动作后元素读不出（-25204）→ delivered_unverified，不算 gone、不算验证",
     rHung.ok === true && rHung.delivery === "delivered_unverified", JSON.stringify(rHung));
   btn.hung = false;
   const before = ctx.observeState(btn, ctx.appElement());
@@ -1101,7 +1101,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const mid = ctx.observeState(btn, ctx.appElement());
   btn.hung = false; btn.gone = true;
   const after = ctx.observeState(btn, ctx.appElement());
-  check("审计 S5A：observeState —— -25204 记为 gone 未知（null），-25202 才是 gone；真消失仍算验证",
+  check("observeState —— -25204 记为 gone 未知（null），-25202 才是 gone；真消失仍算验证",
     mid.gone === null && after.gone === true && ctx.diffState(before, after).verified === true && ctx.diffState(before, mid).verified === false,
     JSON.stringify({ mid: mid.gone, after: after.gone, v1: ctx.diffState(before, after).verified, v2: ctx.diffState(before, mid).verified }));
   ctx.perform = origPerform;
@@ -1121,7 +1121,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("insert_text: write=0 with unchanged value → NOT_CONFIRMED, delivered_unverified, retry unsafe",
     rIns.ok === false && rIns.code === "NOT_CONFIRMED" && rIns.delivery === "delivered_unverified" && rIns.retry === "unsafe" && calls.length === 1,
     JSON.stringify(rIns));
-  // review (Claude): only the caret moved after the write → not verified
+  // Only the caret moved after the write → not verified
   tf.attrs = { AXSelectedTextRange: { location: 0, length: 0 } };
   tf.onSet = () => { tf.attrs.AXSelectedTextRange = { location: 3, length: 0 }; };
   const rMoved = ctx.opInsertText({ target: tField, text: "hello" });
@@ -1129,7 +1129,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     rMoved.ok === true && rMoved.delivery === "delivered_unverified" && rMoved.reason === "selection_moved", JSON.stringify(rMoved));
   delete tf.attrs; delete tf.onSet;
   {
-    // review 0.2.6 #2: the focused-element path names the app it looked in, found or not
+    // the focused-element path names the app it looked in, found or not
     const c2 = loadEngine(ENGINE);
     const f2 = el("AXTextField", { value: "ab", frame: [10, 10, 200, 22], settable: { AXSelectedText: true } });
     f2.attrs = { AXSelectedTextRange: { location: 2, length: 0 } };
@@ -1243,7 +1243,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
 }
 
 {
-  // audit S5A-s11-X-4: a checkbox that publishes its new value late is pressed once, not twice (a second press undid
+  // A checkbox that publishes its new value late is pressed once, not twice (a second press undid
   // the first); one that never changes is reported, not pressed again
   const ctx = loadEngine(ENGINE);
   const cb = Object.assign(el("AXCheckBox", { title: "Agree", value: 0, frame: [10, 10, 100, 20], actions: ["AXPress"] }), {
@@ -1257,15 +1257,15 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const res = snap(ctx, { app: "T" });
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXCheckBox"));
   const rLate = ctx.opSetValue({ target: t, value: "true" });
-  check("审计 S5A：勾选框晚 3 次读才显示新值 → 只按一次，delivered_verified，最后是 on",
+  check("勾选框晚 3 次读才显示新值 → 只按一次，delivered_verified，最后是 on",
     rLate.ok === true && rLate.delivery === "delivered_verified" && cb.value === 1 && calls.length === 1, JSON.stringify({ rLate, calls: calls.length, v: cb.value }));
-  // review S5C-G-1: a mixed checkbox slow on both presses (mixed → on → off, each shown 3 reads late) ends off, verified
+  // A mixed checkbox slow on both presses (mixed → on → off, each shown 3 reads late) ends off, verified
   cb.value = 2; calls.length = 0;
   cb.onPerform = (act) => { if (act === "AXPress") { cb.prev = cb.value; cb.value = cb.value === 2 ? 1 : cb.value === 1 ? 0 : 1; cb.lag = 3; } };
   ctx.readNode = (e) => { if (e === cb && cb.lag > 0) { cb.lag--; return Object.assign(orig(e), { AXValue: cb.prev }); } return orig(e); };
   const tm = targetOf(snap(ctx, { app: "T" }), nodeAt(snap(ctx, { app: "T" }), (n) => n.role === "AXCheckBox"));
   const rMixed = ctx.opSetValue({ target: tm, value: "false" });
-  check("复审 S5C：mixed 勾选框两次按下都晚 3 次读才显示 → 两次按下、最后 off、delivered_verified",
+  check("mixed 勾选框两次按下都晚 3 次读才显示 → 两次按下、最后 off、delivered_verified",
     rMixed.ok === true && rMixed.delivery === "delivered_verified" && cb.value === 0 && calls.length === 2, JSON.stringify({ rMixed, calls: calls.length, v: cb.value }));
   ctx.readNode = (e) => { if (e === cb && cb.lag > 0) { cb.lag--; return Object.assign(orig(e), { AXValue: cb.value ? 0 : 1 }); } return orig(e); };
   cb.onPerform = () => {};   // the press does nothing visible
@@ -1273,13 +1273,13 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   calls.length = 0;
   const t2 = targetOf(snap(ctx, { app: "T" }), nodeAt(snap(ctx, { app: "T" }), (n) => n.role === "AXCheckBox"));
   const rStill = ctx.opSetValue({ target: t2, value: "false" });
-  check("审计 S5A：按了一次一直没变 → NOT_CONFIRMED，不按第二次",
+  check("按了一次一直没变 → NOT_CONFIRMED，不按第二次",
     rStill.ok === false && rStill.code === "NOT_CONFIRMED" && calls.length === 1, JSON.stringify({ rStill, calls: calls.length }));
   ctx.readNode = orig;
 }
 
 {
-  // audit S5A-s11-X-2: appending into a secure field that takes text only through AXValue replaces what is there —
+  // Appending into a secure field that takes text only through AXValue replaces what is there —
   // refused unless the field is known to be empty
   const ctx = loadEngine(ENGINE);
   const pw = Object.assign(el("AXTextField", { subrole: "AXSecureTextField", title: "Password", value: "", frame: [10, 10, 160, 22], settable: { AXValue: true } }), { label: "Password" });
@@ -1293,7 +1293,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const rFull = ctx.opInsertText({ target: t, text: "x" });
   chars = 0;
   const rEmpty = ctx.opInsertText({ target: t, text: "x" });
-  check("审计 S5A：密码框只能整值改写时，不确定为空 → 拒绝追加（什么都没发）；确定为空 → 照常写入",
+  check("密码框只能整值改写时，不确定为空 → 拒绝追加（什么都没发）；确定为空 → 照常写入",
     rFull.ok === false && /secure field/.test(rFull.message || "") && rFull.delivery === "not_delivered" && rEmpty.ok === true && calls.filter((c) => c[0] === "set" && c[2] === "AXValue").length === 1,
     JSON.stringify({ rFull, rEmpty, calls }));
   ctx.attr = origAttr;
@@ -1447,20 +1447,20 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     JSON.stringify({ running, gone, goneNow }).slice(0, 240));
 }
 {
-  // R19 §1-5: AXRaise fails after the window was already unminimized / made main → not "nothing sent"
+  // AXRaise fails after the window was already unminimized / made main → not "nothing sent"
   const ctx = loadEngine(ENGINE);
   const w1 = Object.assign(el("AXWindow", { title: "Doc", frame: [0, 0, 400, 300], wid: 38, focusedFlag: false, attrs: { AXMain: false } }), { label: "DocWin" });
   installApp(ctx, { pid: 86, name: "Editor", windows: [w1], frontPid: 86 });
   ctx.perform = (e, a) => (a === "AXRaise" ? -25206 : 0);
   const rF = ctx.opWindowOp({ action: "focus", app: "Editor", window: 0 });
-  check("opWindowOp: AXRaise unsupported and focus not reached → ACTION_NOT_SUPPORTED, delivered_unverified (R19)",
+  check("opWindowOp: AXRaise unsupported and focus not reached → ACTION_NOT_SUPPORTED, delivered_unverified",
     rF.ok === false && rF.code === "ACTION_NOT_SUPPORTED" && rF.delivery === "delivered_unverified" && rF.retry === "safe", JSON.stringify(rF));
   w1.onSet = (name, val) => { if (name === "AXMain") w1.attrs.AXMain = Boolean(val); };
   const rV = ctx.opWindowOp({ action: "focus", app: "Editor", window: 0 });
-  check("opWindowOp: AXRaise unsupported but the window became main → delivered_verified (R19)", rV.ok === true && rV.delivery === "delivered_verified", JSON.stringify(rV));
+  check("opWindowOp: AXRaise unsupported but the window became main → delivered_verified", rV.ok === true && rV.delivery === "delivered_verified", JSON.stringify(rV));
 }
 {
-  // R19 §1-6: the element's own window id is unknown → its window's (or the snapshot window's) id is used, never skipped
+  // The element's own window id is unknown → its window's (or the snapshot window's) id is used, never skipped
   const ctx = loadEngine(ENGINE);
   const b = Object.assign(el("AXButton", { title: "Go", frame: [10, 10, 40, 20] }), { label: "Go" });
   const win = el("AXWindow", { title: "W", frame: [0, 0, 300, 200], wid: 40 }, [b]);
@@ -1472,11 +1472,11 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   ctx.axWindowId = (e) => (e && e.wid !== undefined ? e.wid : null); // only windows answer
   ctx.cgTopAt = () => ({ pid: 87, owner: "T", layer: 3, wid: 41 });
   const r1 = ctx.opPhysicalPrep({ target: t });
-  check("engine: element window id unknown + another window of the same app on top → OCCLUDED (R19)", r1.ok === false && r1.code === "OCCLUDED" && r1.details?.occluder?.other_window === true, JSON.stringify({ ok: r1.ok, code: r1.code }));
+  check("engine: element window id unknown + another window of the same app on top → OCCLUDED", r1.ok === false && r1.code === "OCCLUDED" && r1.details?.occluder?.other_window === true, JSON.stringify({ ok: r1.ok, code: r1.code }));
   ctx.cgTopAt = () => ({ pid: 87, owner: "T", layer: 0, wid: 40 });
   const r2 = ctx.opPhysicalPrep({ target: t });
-  check("engine: …and its own window on top → allowed (R19)", r2.ok === true, JSON.stringify({ ok: r2.ok, code: r2.code }));
-  // R20: an app-surface snapshot and no AXWindow attribute → the window is found by climbing AXParent
+  check("engine: …and its own window on top → allowed", r2.ok === true, JSON.stringify({ ok: r2.ok, code: r2.code }));
+  // An app-surface snapshot and no AXWindow attribute → the window is found by climbing AXParent
   const resApp = snap(ctx, { app: "T", surface: "app" });
   const tApp = targetOf(resApp, nodeAt(resApp, (n) => n.role === "AXButton"));
   const origAttr = ctx.attr;
@@ -1484,12 +1484,12 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   ctx.cgTopAt = () => ({ pid: 87, owner: "T", layer: 3, wid: 41 });
   const r3 = ctx.opPhysicalPrep({ target: tApp });
   ctx.attr = origAttr;
-  check("engine: app-surface target without AXWindow + another window of the same app on top → OCCLUDED (R20)",
+  check("engine: app-surface target without AXWindow + another window of the same app on top → OCCLUDED",
     resApp.container?.kind === "app" && r3.ok === false && r3.code === "OCCLUDED" && r3.details?.occluder?.other_window === true, JSON.stringify({ kind: resApp.container?.kind, ok: r3.ok, code: r3.code }));
 }
 
 {
-  // t10 §1: enableWebAccessibility writes only AXManualAccessibility (never AXEnhancedUserInterface), and honours web_accessibility:false
+  // enableWebAccessibility writes only AXManualAccessibility (never AXEnhancedUserInterface), and honours web_accessibility:false
   const ctx = loadEngine(ENGINE);
   const win = el("AXWindow", { title: "App", frame: [0, 0, 300, 200], wid: 50 }, [el("AXButton", { title: "OK", frame: [10, 10, 40, 20] })]);
   const { appEl } = installApp(ctx, { pid: 95, name: "ElectronApp", windows: [win] });
@@ -1500,24 +1500,24 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     return name === "AXManualAccessibility" ? -25205 : 0;
   };
   const unsupported = ctx.enableWebAccessibility(appEl);
-  check("t10: enableWebAccessibility unsupported → returns 'unsupported' and never writes AXEnhancedUserInterface",
+  check("enableWebAccessibility unsupported → returns 'unsupported' and never writes AXEnhancedUserInterface",
     unsupported === "unsupported" && JSON.stringify(setCalls) === JSON.stringify([["AXManualAccessibility", true]]),
     JSON.stringify({ unsupported, setCalls }));
   setCalls.length = 0;
   ctx.setAttr = (_e, name, value) => { setCalls.push([name, value]); return 0; };
   const enabled = ctx.enableWebAccessibility(appEl);
-  check("t10: enableWebAccessibility supported → writes AXManualAccessibility=true and returns 'enabled'",
+  check("enableWebAccessibility supported → writes AXManualAccessibility=true and returns 'enabled'",
     enabled === "enabled" && JSON.stringify(setCalls) === JSON.stringify([["AXManualAccessibility", true]]),
     JSON.stringify({ enabled, setCalls }));
   setCalls.length = 0;
   ctx.opSnapshot({ app: "ElectronApp", web_accessibility: false });
   ctx.opFind({ app: "ElectronApp", role: "button", web_accessibility: false });
-  check("t10: opSnapshot and opFind with web_accessibility:false do not call enableWebAccessibility",
+  check("opSnapshot and opFind with web_accessibility:false do not call enableWebAccessibility",
     setCalls.length === 0, JSON.stringify(setCalls));
 }
 
 {
-  // t10 §3: opSetValue on AXSecureTextField never returns the value
+  // opSetValue on AXSecureTextField never returns the value
   const ctx = loadEngine(ENGINE);
   const pw = Object.assign(el("AXTextField", { subrole: "AXSecureTextField", title: "Password", value: "••••", frame: [10, 10, 160, 22], settable: { AXValue: true } }), { label: "Password" });
   const win = el("AXWindow", { title: "Sign In", frame: [0, 0, 300, 200], wid: 51 }, [pw]);
@@ -1525,13 +1525,13 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const res = snap(ctx, { app: "Auth" });
   const t = targetOf(res, nodeAt(res, (n) => n.role === "AXTextField"));
   const r = ctx.opSetValue({ target: t, value: "hunter2-secret" });
-  check("t10: opSetValue on AXSecureTextField returns no value and never echoes secret",
+  check("opSetValue on AXSecureTextField returns no value and never echoes secret",
     r.ok === true && r.delivery === "delivered_unverified" && r.secure === true && r.value === undefined && !JSON.stringify(r).includes("hunter2-secret") && !JSON.stringify(r).includes("••••"),
     JSON.stringify(r));
 }
 
 {
-  // t10 §2: opNotifications — open_center skips clock click when already open; missing/vanished id → NOTIFICATION_NOT_FOUND
+  // opNotifications — open_center skips clock click when already open; missing/vanished id → NOTIFICATION_NOT_FOUND
   const ctx = loadEngine(ENGINE);
   const clockItem = Object.assign(el("AXMenuBarItem", { id: "Clock", title: "Clock", actions: ["AXPress"] }), { label: "Clock" });
   const extrasBar = el("AXMenuBar", {}, [clockItem]);
@@ -1545,7 +1545,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const floatWin = el("AXWindow", { subrole: "AXSystemFloatingWindow", frame: [1080, 36, 340, 84], wid: 52 }, [banner]);
   const { appEl, calls } = installApp(ctx, { pid: 97, name: "Notification Center", bundle: "com.apple.notificationcenterui", windows: [floatWin], extra: { AXExtrasMenuBar: { el: extrasBar } } });
   const rClosed = ctx.opNotifications({ action: "list", open_center: true });
-  check("t10: opNotifications open_center:true when closed (banner-only) clicks clock to open and close",
+  check("opNotifications open_center:true when closed (banner-only) clicks clock to open and close",
     rClosed.ok === true && rClosed.center_opened === true && calls.filter((c) => c[1] === "Clock").length === 2,
     JSON.stringify({ rClosed, calls }));
   // 2) Desktop widgets are windows of the same process (macOS 27.2) — no evidence that the center is open
@@ -1553,7 +1553,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const widget = el("AXWindow", { subrole: "AXUnknown", frame: [20, 40, 180, 180], wid: 54 }, [el("AXGroup", { subrole: "AXHostingView" }, [el("AXButton", { title: "W" })])]);
   appEl.kids = [widget, floatWin]; reparent(appEl);
   const rWidget = ctx.opNotifications({ action: "list", open_center: true });
-  check("t10 review: widget windows are not an open Notification Center → the clock is clicked (opened, then closed)",
+  check("widget windows are not an open Notification Center → the clock is clicked (opened, then closed)",
     rWidget.ok === true && rWidget.center_opened === true && rWidget.center_was_open === false && calls.filter((c) => c[1] === "Clock").length === 2,
     JSON.stringify({ rWidget, calls }));
   // 3) Already open (the clock reads selected) → open_center does NOT click clock
@@ -1562,7 +1562,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const openWin = el("AXWindow", { title: "Notification Center", frame: [1060, 25, 360, 860], wid: 53 }, [el("AXScrollArea", {}, [banner])]);
   appEl.kids = [openWin]; reparent(appEl);
   const rOpen = ctx.opNotifications({ action: "list", open_center: true });
-  check("t10: opNotifications open_center:true when already open does not click clock",
+  check("opNotifications open_center:true when already open does not click clock",
     rOpen.ok === true && rOpen.center_was_open === true && rOpen.center_opened === false && rOpen.count === 1 && calls.length === 0,
     JSON.stringify({ rOpen, calls }));
   // 3) Missing id and notification disappearing during perform → NOTIFICATION_NOT_FOUND
@@ -1570,15 +1570,15 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const origPerform = ctx.perform;
   ctx.perform = (e, a) => { if (e === banner) { banner.gone = true; return -25202; } return origPerform(e, a); };
   const rVanished = ctx.opNotifications({ action: "dismiss", id: "n-1" });
-  check("t10: opNotifications absent or just-dismissed id → NOTIFICATION_NOT_FOUND (not generic error)",
+  check("opNotifications absent or just-dismissed id → NOTIFICATION_NOT_FOUND (not generic error)",
     rMissing.ok === false && rMissing.code === "NOTIFICATION_NOT_FOUND" && rMissing.delivery === "not_delivered"
       && rVanished.ok === false && rVanished.code === "NOTIFICATION_NOT_FOUND" && rVanished.delivery === "not_delivered",
     JSON.stringify({ rMissing, rVanished }));
-  // t10 review: a generic failure after which the notification is gone may be the action's own effect → not "not delivered"
+  // A generic failure after which the notification is gone may be the action's own effect → not "not delivered"
   banner.gone = false;
   ctx.perform = (e, a) => { if (e === banner) { banner.gone = true; return -25200; } return origPerform(e, a); };
   const rAmb = ctx.opNotifications({ action: "dismiss", id: "n-1" });
-  check("t10 review: action error then notification gone → ACTION_FAILED delivery=unknown (never not_delivered)",
+  check("action error then notification gone → ACTION_FAILED delivery=unknown (never not_delivered)",
     rAmb.ok === false && rAmb.code === "ACTION_FAILED" && rAmb.delivery === "unknown" && /no longer on screen/.test(rAmb.message),
     JSON.stringify(rAmb));
 }
@@ -1618,7 +1618,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
       && noEvent.ok === false && noEvent.code === "ACTION_FAILED" && noEvent.delivery === "not_delivered" && noEvent.retry === "safe",
     JSON.stringify({ plain, arrow, posted, badCode: badCode.code, badMod: badMod.code, noEvent }));
 
-  // 0.2.6 (review #1): a chord on a character asks the layout for its key (with ⌘ held when ⌘ is in the chord);
+  // 0.2.6: a chord on a character asks the layout for its key (with ⌘ held when ⌘ is in the chord);
   // an uppercase letter adds Shift; a character only on the shifted layer adds Shift; no key → refused, unsent
   {
     const asked = [], sent2 = [];
@@ -1919,7 +1919,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
 }
 
 {
-  // 0.2.2 (R20 follow-up): inconclusive hit test and no window id anywhere → refused, never assumed to be its own window
+  // 0.2.2: inconclusive hit test and no window id anywhere → refused, never assumed to be its own window
   const ctx = loadEngine(ENGINE);
   const b = Object.assign(el("AXButton", { title: "Go", frame: [10, 10, 40, 20] }), { label: "Go" });
   const win = el("AXWindow", { title: "W", frame: [0, 0, 300, 200], wid: 150 }, [b]);
@@ -1939,7 +1939,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
     /mechanism \"semantic\"/i.test(r.message) && !/\(mechanism auto\)/.test(r.message) && /take a new snapshot/.test(r.message), r.message.slice(-150));
 }
 
-// ── CP (Y6): a text verdict needs the change itself — not "the value contains the text somewhere" ──────
+// ── a text verdict needs the change itself — not "the value contains the text somewhere" ──────
 {
   const mk = (value, attrs) => {
     const ctx = loadEngine(ENGINE);
@@ -1953,42 +1953,42 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   {
     const m = mk("Hello \r\n");
     const r = m.ctx.opSetValue({ target: m.t, value: "Hello" });
-    check("CP: set_value to the value already there (line endings and outer white space aside) → not_delivered already, nothing written",
+    check("set_value to the value already there (line endings and outer white space aside) → not_delivered already, nothing written",
       r.ok === true && r.delivery === "not_delivered" && r.reason === "already" && r.retry === "safe" && m.calls.length === 0, JSON.stringify(r));
   }
   {
     const m = mk("old");
     m.tf.onSet = (name, v) => { if (name === "AXValue") m.tf.value = String(v) + "\n"; };
     const r = m.ctx.opSetValue({ target: m.t, value: "new" });
-    check("CP: set_value changes the value to the target (a trailing newline aside) → delivered_verified",
+    check("set_value changes the value to the target (a trailing newline aside) → delivered_verified",
       r.ok === true && r.delivery === "delivered_verified", JSON.stringify(r));
   }
   {
     const m = mk("Hello world", { AXSelectedTextRange: { location: 5, length: 0 } });
     m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "Hello" + v + " world"; };
     const r = m.ctx.opInsertText({ target: m.t, text: " big" });
-    check("CP: mac_type inserts over the selection → the value is before[0:loc] + text + the rest → delivered_verified",
+    check("mac_type inserts over the selection → the value is before[0:loc] + text + the rest → delivered_verified",
       r.ok === true && r.delivery === "delivered_verified", JSON.stringify(r));
   }
   {
-    // F4: the text was in the field before the write, and the value then changed in some other way
+    // The text was in the field before the write, and the value then changed in some other way
     const m = mk("hello", { AXSelectedTextRange: { location: 5, length: 0 } });
     m.tf.onSet = (name) => { if (name === "AXSelectedText") m.tf.value = "hello "; };
     const r = m.ctx.opInsertText({ target: m.t, text: "hello" });
-    check("CP (F4): text already in the field, value changed otherwise → delivered_unverified not_at_insertion_point, never verified",
+    check("text already in the field, value changed otherwise → delivered_unverified not_at_insertion_point, never verified",
       r.ok === true && r.delivery === "delivered_unverified" && r.reason === "not_at_insertion_point", JSON.stringify(r));
   }
   {
     const m = mk("abc");
     m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "abc" + v; };
     const r = m.ctx.opInsertText({ target: m.t, text: "def" });
-    check("CP: the insertion point cannot be read → delivered_unverified insertion_point_unreadable, even though the text shows",
+    check("the insertion point cannot be read → delivered_unverified insertion_point_unreadable, even though the text shows",
       r.ok === true && r.delivery === "delivered_unverified" && r.reason === "insertion_point_unreadable", JSON.stringify(r));
   }
   {
     const m = mk("same text");
     const r = m.ctx.opInsertText({ target: m.t, text: "same text", replace: true });
-    check("CP: mac_type replace with the text already there → not_delivered already, nothing written",
+    check("mac_type replace with the text already there → not_delivered already, nothing written",
       r.ok === true && r.delivery === "not_delivered" && r.reason === "already" && m.calls.length === 0, JSON.stringify(r));
   }
 }
@@ -2008,65 +2008,65 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   for (const v of ["", " "]) {
     const m = mk(0);
     const r = m.ctx.opSetValue({ target: m.t, value: v });
-    check(`CP R35: numeric field at 0, set_value ${JSON.stringify(v)} → neither already nor verified (an empty string is not the number 0)`,
+    check(`numeric field at 0, set_value ${JSON.stringify(v)} → neither already nor verified (an empty string is not the number 0)`,
       r.delivery !== "delivered_verified" && r.reason !== "already" && !m.calls.some((c) => typeof c[3] === "number"), `${say(r)} writes=${JSON.stringify(m.calls)}`);
   }
   {
     const m = mk(" hello ");
     const r = m.ctx.opSetValue({ target: m.t, value: "hello" });
-    check("CP R35: \" hello \" set to \"hello\" → not_delivered already, no AXValue write", r.delivery === "not_delivered" && r.reason === "already" && m.calls.length === 0, say(r));
+    check("\" hello \" set to \"hello\" → not_delivered already, no AXValue write", r.delivery === "not_delivered" && r.reason === "already" && m.calls.length === 0, say(r));
   }
   {
     const m = mk("hello world");
     const r = m.ctx.opSetValue({ target: m.t, value: "hello" });
-    check("CP R35: \"hello world\" set to \"hello\", the app ignores the write → not verified", r.delivery !== "delivered_verified", say(r));
+    check("\"hello world\" set to \"hello\", the app ignores the write → not verified", r.delivery !== "delivered_verified", say(r));
   }
   {
     const m = mk("abcd", { AXSelectedTextRange: { location: 1, length: 0 } });
     m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "a" + v + "bcd"; };
     const r = m.ctx.opInsertText({ target: m.t, text: "XY" });
-    check("CP R35: \"abcd\" at {1,0} + XY → \"aXYbcd\" → delivered_verified", r.delivery === "delivered_verified" && r.reason === undefined, say(r));
+    check("\"abcd\" at {1,0} + XY → \"aXYbcd\" → delivered_verified", r.delivery === "delivered_verified" && r.reason === undefined, say(r));
   }
   {
     const m = mk("abcd", { AXSelectedTextRange: { location: 1, length: 0 } });
     m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "abcd" + v; };
     const r = m.ctx.opInsertText({ target: m.t, text: "XY" });
-    check("CP R35: \"abcd\" at {1,0} + XY → \"abcdXY\" → delivered_unverified not_at_insertion_point", r.delivery === "delivered_unverified" && r.reason === "not_at_insertion_point", say(r));
+    check("\"abcd\" at {1,0} + XY → \"abcdXY\" → delivered_unverified not_at_insertion_point", r.delivery === "delivered_unverified" && r.reason === "not_at_insertion_point", say(r));
   }
   {
     const m = mk("abcd");
     m.tf.onSet = (name, v) => { if (name === "AXSelectedText") m.tf.value = "abcd" + v; };
     const r = m.ctx.opInsertText({ target: m.t, text: "XY" });
-    check("CP R35: no readable range, after equals before + text → delivered_unverified insertion_point_unreadable", r.delivery === "delivered_unverified" && r.reason === "insertion_point_unreadable", say(r));
+    check("no readable range, after equals before + text → delivered_unverified insertion_point_unreadable", r.delivery === "delivered_unverified" && r.reason === "insertion_point_unreadable", say(r));
   }
   {
     const m = mk("PAYLOAD", { AXSelectedTextRange: { location: 7, length: 0 } });
     const r = m.ctx.opInsertText({ target: m.t, text: "PAYLOAD" });
-    check("CP R35 (F4): value already PAYLOAD and still only PAYLOAD after the write → not verified", r.delivery !== "delivered_verified", say(r));
+    check("value already PAYLOAD and still only PAYLOAD after the write → not verified", r.delivery !== "delivered_verified", say(r));
   }
 }
 
 {
-  // R36: append through AXValue when the value cannot be read would replace it → refused, nothing written
+  // Append through AXValue when the value cannot be read would replace it → refused, nothing written
   const ctx = loadEngine(ENGINE);
   const tf = Object.assign(el("AXTextArea", { frame: [10, 10, 200, 80], settable: { AXValue: true } }), { label: "Area" });
   const win = el("AXWindow", { title: "W", frame: [0, 0, 300, 200], wid: 43 }, [tf]);
   const { calls } = installApp(ctx, { pid: 93, name: "T", windows: [win] });
   const res = snap(ctx, { app: "T" });
   const r = ctx.opInsertText({ target: targetOf(res, nodeAt(res, (n) => n.role === "AXTextArea")), text: "XY" });
-  check("CP R36: append path with an unreadable value → ACTION_NOT_SUPPORTED not_delivered, nothing written (no clobbering)",
+  check("append path with an unreadable value → ACTION_NOT_SUPPORTED not_delivered, nothing written (no clobbering)",
     r.ok === false && r.code === "ACTION_NOT_SUPPORTED" && r.delivery === "not_delivered" && calls.length === 0, JSON.stringify({ ok: r.ok, code: r.code, delivery: r.delivery, calls }));
 }
 
 {
-  // E2 run 2026-11-07 (T11): on macOS 27 the Dock is one full-display overlay window; a point over the strip
+  // Device run 2026-11-07: on macOS 27 the Dock is one full-display overlay window; a point over the strip
   // the Dock reserves must read as covered by the Dock, not as the window behind it
   const ctx = loadEngine(ENGINE);
   // AppKit coordinates: main 2560×1440 with a 66-pt Dock at the bottom; a second display on the left with no Dock
   const strips = ctx.dockStripsOf([{ f: [0, 0, 2560, 1440], v: [0, 66, 2560, 1349] }, { f: [-1728, 0, 1728, 1117], v: [-1728, 0, 1728, 1092] }]);
   const left = ctx.dockStripsOf([{ f: [0, 0, 1000, 800], v: [70, 0, 930, 775] }]);
   const right = ctx.dockStripsOf([{ f: [0, 0, 1000, 800], v: [0, 0, 930, 775] }]);
-  check("E2 T11: dockStripsOf — bottom Dock strip in top-left coordinates; no strip for a display without a Dock; left / right Docks",
+  check("dockStripsOf — bottom Dock strip in top-left coordinates; no strip for a display without a Dock; left / right Docks",
     JSON.stringify(strips) === "[[0,1374,2560,66]]" && JSON.stringify(left) === "[[0,25,70,775]]" && JSON.stringify(right) === "[[930,25,70,775]]",
     JSON.stringify({ strips, left, right }));
   // a fake window list, front to back: the Dock's full-display overlay, then a TextEdit window reaching into the strip
@@ -2079,16 +2079,16 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   ctx.dockStrips = () => [[0, 1374, 2560, 66]];
   ctx.dockDrawn = () => [];
   const under = ctx.cgTopAt(1280, 1407), beside = ctx.cgTopAt(1040, 1400), above = ctx.cgTopAt(1280, 1300);
-  check("E2 T11: cgTopAt — under the Dock strip → the Dock (also beside its platter); above it → the window",
+  check("cgTopAt — under the Dock strip → the Dock (also beside its platter); above it → the window",
     under?.owner === "Dock" && under?.layer === 20 && beside?.owner === "Dock" && above?.owner === "TextEdit",
     JSON.stringify({ under, beside, above }));
-  // E2 T10: a banner shows → Notification Center's full-display overlay sits on top; only the banner covers
+  // A banner shows → Notification Center's full-display overlay sits on top; only the banner covers
   rows.unshift(win("Notification Center", 11, 23, [0, 0, 2560, 1440], 40));
   ctx.ncDrawnRects = () => [[2186, 36, 368, 88]];
   const mid = ctx.cgTopAt(1280, 700), onBanner = ctx.cgTopAt(2400, 70), dock = ctx.cgTopAt(1280, 1407);
   ctx.ncDrawnRects = () => null; // the list is open, or the banner frames cannot be read
   const unsure = ctx.cgTopAt(1280, 700);
-  check("E2 T10: cgTopAt — Notification Center's overlay covers only its banners; when they cannot be told, everything",
+  check("cgTopAt — Notification Center's overlay covers only its banners; when they cannot be told, everything",
     mid === null && onBanner?.owner === "Notification Center" && dock?.owner === "Dock" && unsure?.owner === "Notification Center",
     JSON.stringify({ mid, onBanner, dock, unsure }));
 }
@@ -2115,7 +2115,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
 }
 
 {
-  // E2 T10: ncDrawnRects reads banner / alert frames from Notification Center's accessibility tree
+  // ncDrawnRects reads banner / alert frames from Notification Center's accessibility tree
   const ctx = loadEngine(ENGINE);
   const banner = el("AXGroup", { subrole: "AXNotificationCenterBanner", frame: [2190, 40, 360, 80] });
   const win = el("AXWindow", { title: "", frame: [0, 0, 2560, 1440], wid: 40 }, [el("AXGroup", {}, [banner])]);
@@ -2124,7 +2124,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const panelCtx = loadEngine(ENGINE);
   const panel = el("AXWindow", { title: "", frame: [0, 0, 2560, 1440], wid: 41 }, [el("AXGroup", { subrole: "AXNotificationCenterWidget", frame: [2100, 40, 400, 900] })]);
   installApp(panelCtx, { pid: 12, name: "Notification Center", bundle: "com.apple.notificationcenterui", windows: [panel] });
-  check("E2 T10: ncDrawnRects — a banner's frame (with a 4-pt margin); an open list or another NC element → null",
+  check("ncDrawnRects — a banner's frame (with a 4-pt margin); an open list or another NC element → null",
     JSON.stringify(rects) === "[[2186,36,368,88]]" && panelCtx.ncDrawnRects() === null, JSON.stringify({ rects, panel: panelCtx.ncDrawnRects() }));
 }
 {
@@ -2377,7 +2377,7 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   check("engine: a skeleton's button is gone and a twin sits deeper near the same place → stale, never the twin", gone.error && gone.error.code === "STALE_REF", tag(gone));
 }
 {
-  // R2 (2026-11-17): a skeleton stopped above a row's texts. The row's Delete is listed, but nothing in the
+  // 2026-11-17: a skeleton stopped above a row's texts. The row's Delete is listed, but nothing in the
   // snapshot tells it from another row's Delete: an action on it is refused (row_unread), while reading it and
   // drilling into the row still work — and so does an index from that drill.
   const ctx = loadEngine(ENGINE);
@@ -2391,13 +2391,13 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const t = node && targetOf(res, node);
   const acted = t ? ctx.opAct({ op: "act", target: t, action: "AXPress" }) : null;
   const read = t ? ctx.resolveTarget(t, 1000, true) : { error: { code: "NO_NODE" } };
-  check("engine: R2 — an element of a row a skeleton did not read in full is refused for an action (row_unread), nothing pressed; a read still finds it",
+  check("engine: an element of a row a skeleton did not read in full is refused for an action (row_unread), nothing pressed; a read still finds it",
     Boolean(t) && t.fp.rowcut === true && acted.ok === false && acted.code === "STALE_REF" && acted.details?.kind === "row_unread" && /drill into the row with root/.test(acted.message)
       && !read.error && read.el.label === "Delete of A", JSON.stringify({ fp: t && t.fp, acted }).slice(0, 300));
   // the row was replaced by another one of the same shape: never its Delete
   list.kids = [row("Delete of B", "Invoice B")]; reparent(list);
   const swapped = ctx.opAct({ op: "act", target: t, action: "AXPress" });
-  check("engine: R2 — the unread row replaced by another of the same shape: its Delete is never pressed", swapped.ok === false && swapped.details?.kind === "row_unread", JSON.stringify(swapped).slice(0, 200));
+  check("engine: the unread row replaced by another of the same shape: its Delete is never pressed", swapped.ok === false && swapped.details?.kind === "row_unread", JSON.stringify(swapped).slice(0, 200));
   // drilling into the row reads its texts: an index from the drill acts
   list.kids = [row("Delete of A", "Invoice A")]; reparent(list);
   const res2 = snap(ctx, { app: "T", skeleton: true });
@@ -2405,13 +2405,13 @@ const nodeAt = (res, pred) => res.nodes.find(pred);
   const d = ctx.opSnapshot({ op: "snapshot", root: targetOf(res2, rowNode) });
   const del2 = d.nodes && d.nodes.find((n) => n.role === "AXButton");
   const ok = del2 ? ctx.resolveTarget({ pid: 141, container: d.container, path: del2.path, fp: del2.fp }, 1000) : { error: { code: "NO_DRILL" } };
-  check("engine: R2 — drilling into the row with root gives an index that is not refused", Boolean(del2) && !del2.fp.rowcut && !ok.error && ok.el.label === "Delete of A", JSON.stringify(del2 && del2.fp).slice(0, 200));
+  check("engine: drilling into the row with root gives an index that is not refused", Boolean(del2) && !del2.fp.rowcut && !ok.error && ok.el.label === "Delete of A", JSON.stringify(del2 && del2.fp).slice(0, 200));
   // a button whose surroundings were read in full is not affected (the window and its toolbar are no items)
   const tb = el("AXToolbar", {}, [Object.assign(el("AXButton", { title: "New", actions: ["AXPress"] }), { label: "New" })]);
   win.kids = [tb, list]; reparent(win);
   const res3 = snap(ctx, { app: "T", skeleton: true });
   const nb = nodeAt(res3, (n) => n.title === "New");
-  check("engine: R2 — a toolbar button in the same skeleton is not marked", nb && !nb.fp.rowcut, JSON.stringify(nb && nb.fp));
+  check("engine: a toolbar button in the same skeleton is not marked", nb && !nb.fp.rowcut, JSON.stringify(nb && nb.fp));
 }
 {
   // one Delete per row. Beta's row stops answering (the app is busy with it) and another row that also reads

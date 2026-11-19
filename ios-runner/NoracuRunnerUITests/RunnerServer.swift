@@ -100,8 +100,7 @@ final class RunnerServer: @unchecked Sendable {
             return false
         }
         guard let rawId = obj["id"], !RunnerCommands.isBool(rawId), rawId is Int else {
-            // a missing id, or one that is not a whole number, cannot be matched to its request: the command is not
-            // run (pre-review P3 and P4)
+            // a missing id, or one that is not a whole number, cannot be matched to its request: the command is not run
             var no = RunnerCommands.fail(0, "invalid_args", "id must be a whole number", sent: RunnerCommands.inputOps.contains(obj["op"] as? String ?? "") ? false : nil)
             no["id"] = 0
             send(conn, no)

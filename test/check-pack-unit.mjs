@@ -5,7 +5,8 @@ import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MUST, commentsOf, labelled, verdict } from "../scripts/pack-rules.mjs";
+import * as rules from "../scripts/pack-rules.mjs";
+const { MUST, commentsOf, labelled, verdict } = rules;
 
 let n = 0;
 const check = (name, cond, detail = "") => { n++; if (!cond) { console.error(`❌ ${name}${detail ? ` | ${detail}` : ""}`); process.exitCode = 1; } };
@@ -32,10 +33,10 @@ check("a second README in the package folder is refused", verdict(full, ["README
   const py = ["def f():", "    \"\"\"Scroll and confirm (F20).", "", "    Y6: several labels are never tapped.", "    \"\"\"", "    x = \"F26: in a string\"  # R19: before the first event", "    return T15"].join("\n");
   const hits = labelled([{ path: "src/server.mjs", source: js }, { path: "imctl/src/imctl/cli.py", source: py }, { path: "docs/usage.md", source: "F25: not scanned" }, { path: "ios-runner/NoracuRunnerUITests/RunnerServer.swift", source: "// pre-review P3" }]);
   const at = hits.map((h) => h.split(": ")[0]);
-  check("labels are found in // comments, block comments, # comments and docstrings of shipped sources",
-    JSON.stringify(at) === JSON.stringify(["src/server.mjs:1", "src/server.mjs:3", "src/server.mjs:5", "imctl/src/imctl/cli.py:2", "imctl/src/imctl/cli.py:4", "imctl/src/imctl/cli.py:6"]), JSON.stringify(at));
-  check("code, strings and files outside src/ and imctl/src/ are not read for labels",
-    !hits.some((h) => /server\.mjs:(2|7):|usage\.md|ios-runner/.test(h)) && commentsOf("src/x.mjs", "const a = \"//not a comment\";").length === 0);
+  check("labels are found in // comments, block comments, # comments and docstrings of shipped sources, the runner's Swift sources included",
+    JSON.stringify(at) === JSON.stringify(["src/server.mjs:1", "src/server.mjs:3", "src/server.mjs:5", "imctl/src/imctl/cli.py:2", "imctl/src/imctl/cli.py:4", "imctl/src/imctl/cli.py:6", "ios-runner/NoracuRunnerUITests/RunnerServer.swift:1"]), JSON.stringify(at));
+  check("code, strings and files outside src/, imctl/src/ and the runner's sources are not read for labels",
+    !hits.some((h) => /server\.mjs:(2|7):|usage\.md/.test(h)) && commentsOf("src/x.mjs", "const a = \"//not a comment\";").length === 0);
 }
 
 {
@@ -56,6 +57,55 @@ check("a second README in the package folder is refused", verdict(full, ["README
   const at = labelled([{ path: "src/server.mjs", source: js }]).map((h) => h.split(": ")[0]);
   check("labels after a regular expression, in a block comment in the middle of a line, and the kinds added later are found",
     JSON.stringify(at) === JSON.stringify(["src/server.mjs:1", "src/server.mjs:2", "src/server.mjs:3", "src/server.mjs:4", "src/server.mjs:5", "src/server.mjs:7", "src/server.mjs:9"]), JSON.stringify(at));
+}
+
+// the public repository: every tracked JavaScript, Python and Swift source is read — the tests and the maintainer
+// scripts too, not only what ships — with the label forms the tests used; a label in a string stays data
+{
+  const js = [
+    "// B2: the action checks",
+    "// review (Claude): only the caret moved",
+    "// pre-review P5: what is refused starts nothing",
+    "const name = \"// F25: a fixture of the label check\";",
+    "// audit S5A-s2-D-2: a double click",
+    "// t07 review: typed text",
+    "// the release of the keys is audited here",
+  ].join("\n");
+  const py = ["# GH-1: quiet when the call left the queue", "x = 1  # the F-keys carry the Fn flag"].join("\n");
+  const files = [{ path: "test/e2e.mjs", source: js }, { path: "imctl/tests/test_smoke.py", source: py }, { path: "scripts/release-gate.mjs", source: "// EA-1: the version asked for" }];
+  const at = typeof rules.PUBLIC_SOURCE === "object" ? labelled(files, rules.PUBLIC_SOURCE).map((h) => h.split(": ")[0]) : [];
+  check("every tracked source file — tests and scripts too — is read for labels in comments, the forms the tests used included; strings are not",
+    JSON.stringify(at) === JSON.stringify(["test/e2e.mjs:1", "test/e2e.mjs:2", "test/e2e.mjs:3", "test/e2e.mjs:5", "test/e2e.mjs:6", "imctl/tests/test_smoke.py:1", "scripts/release-gate.mjs:1"]), JSON.stringify(at));
+  check("the public check reads every tracked JavaScript, Python and Swift source, and nothing else",
+    typeof rules.PUBLIC_SOURCE === "object"
+      && ["test/e2e.mjs", "test/fixtures/fake-ios.mjs", "imctl/tests/test_smoke.py", "scripts/release-gate.mjs", "src/server.mjs", "ios-runner/NoracuRunnerUITests/RunnerServer.swift"].every((f) => rules.PUBLIC_SOURCE.test(f))
+      && !["README.md", "docs/usage.md", "package.json", ".github/workflows/ci.yml"].some((f) => rules.PUBLIC_SOURCE.test(f)));
+  check("the pack check itself still reads only the shipped sources", labelled(files).length === 0);
+}
+
+// labels with a hyphen and a reviewer's tag in them, and a review named after whoever made it, are found in comments;
+// a test file is read whole — the names it prints and its assertion messages are public text — except the label
+// check's own test data in this file; the shipped sources keep key names in their strings
+{
+  const js = [
+    "// the other field remains elsewhere (G1-1 search step)",
+    "// 9. element_index 双模式（P0-2）：无效索引报 element_no_longer_valid",
+    "// review (Some Model 2): only the caret moved",
+    "// the user's text goes in at UTF-8 width",
+  ].join("\n");
+  const at = labelled([{ path: "test/e2e.mjs", source: js }], rules.PUBLIC_SOURCE).map((h) => h.split(": ")[0]);
+  check("hyphenated labels and a review named after its reviewer are found in comments; UTF-8 is not a label",
+    JSON.stringify(at) === JSON.stringify(["test/e2e.mjs:1", "test/e2e.mjs:2", "test/e2e.mjs:3"]), JSON.stringify(at));
+  const printed = [
+    { path: "test/engine-unit.mjs", source: ["check(\"engine: closed → stale (G1-1)\", ok);", "check(\"engine: drill uses the root's live path\", ok);"].join("\n") },
+    { path: "test/ios-session-unit.mjs", source: "ok(c, \"the text in a field that did not change does not count (P12-AGY-1)\");" },
+    { path: "imctl/tests/test_smoke.py", source: "assert res == 'gone', 'R37: the name at two spots'" },
+    { path: "test/check-pack-unit.mjs", source: "const js = [\"// F25: one line\"];" },
+    { path: "src/mac-ax.js", source: "const KEYS = { F5: 96, F6: 97 };" },
+  ];
+  const text = typeof rules.labelledText === "function" ? rules.labelledText(printed).map((h) => h.split(": ")[0]) : [];
+  check("a test file is read whole: a label in a printed name or an assertion message is found; the label check's own test data and the shipped sources' strings are not read",
+    JSON.stringify(text) === JSON.stringify(["test/engine-unit.mjs:1", "test/ios-session-unit.mjs:1", "imctl/tests/test_smoke.py:1"]), JSON.stringify(text));
 }
 
 // the script runs its check however its own path is spelled (through a symlink it used to print nothing and exit 0)

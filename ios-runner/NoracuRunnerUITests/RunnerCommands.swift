@@ -331,7 +331,7 @@ enum RunnerCommands {
         }
         func walk(_ s: XCUIElementSnapshot) {
             if shown(s) && s.elementType == .icon { icons += 1 }
-            // an alert only: a sheet's frame can cover the whole screen (pre-review P3)
+            // an alert only: a sheet's frame can cover the whole screen
             if shown(s) && s.elementType == .alert {
                 var b: [CGRect] = []
                 buttons(s, &b)
@@ -345,7 +345,7 @@ enum RunnerCommands {
 
     enum SBInput { case tap, press, drag, text }
 
-    // review S4A-s8-g-1: a system alert (a permission prompt, say) sits over the app in front while the app still reads
+    // A system alert (a permission prompt, say) sits over the app in front while the app still reads
     // "in front", and the app's own snapshot does not show it. Input named for an app is not sent while one is up: a tap
     // at the app's point would press the alert's button, and text would go to the alert's field. SpringBoard that
     // cannot be read fails closed. Returns the refusal, or nil.
@@ -362,7 +362,7 @@ enum RunnerCommands {
     // tap whose point lies on a button of one of SpringBoard's alerts (a system prompt). A sheet does not count
     // (its frame can cover the screen), and nothing else is sent: no long press, no drag, no text and no key —
     // text goes wherever the keyboard focus is, which the public API does not show, and a second Return would
-    // land on whatever the alert was covering (pre-review P3). Returns the refusal, or nil.
+    // land on whatever the alert was covering. Returns the refusal, or nil.
     @MainActor
     static func springboardRefusal(_ args: [String: Any], _ kind: SBInput, at point: CGPoint? = nil) -> [String: Any]? {
         guard let raw = args["springboard_only"] else { return nil }
@@ -452,7 +452,7 @@ enum RunnerCommands {
         case .tabBar: return "tabBar"
         case .table: return "table"
         case .textField: return "textField"
-        case .secureTextField: return "secureTextField"   // review S4A-s8-reviewer-1: it fell to "other"
+        case .secureTextField: return "secureTextField"   // it used to fall to "other"
         case .textView: return "textView"
         case .toggle: return "toggle"
         case .toolbar: return "toolbar"

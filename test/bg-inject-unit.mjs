@@ -11,7 +11,7 @@ process.env.NORACU_NO_BGPOST = "";  // bgCandidate tests need the layer on
 
 const { bgCandidate, postKeyToPid, postClickToPid, namedKeyCode, clickArgv, keyArgv, BG_SCRIPT, NOT_POSTED } = await import("../src/bg-inject.js");
 
-// --- review CR1/CR2 T3 (2026-11-09): click state, button number, count, and what may fall back ---
+// --- click state, button number, count, and what may fall back ---
 assert.deepEqual(clickArgv(42, 10, 20), ["click", "42", "10", "20", "1", "2", "1", "0"], "left single click");
 assert.deepEqual(clickArgv(42, 10, 20, { button: "middle", count: 2 }), ["click", "42", "10", "20", "25", "26", "2", "2"], "middle double click: other-mouse types, button 2");
 assert.deepEqual(clickArgv(42, 1, 2, { button: "right" }).slice(4), ["3", "4", "1", "1"], "right click: right-mouse types, button 1");
@@ -30,7 +30,7 @@ assert.deepEqual(clickArgv(42, null, "").slice(2, 4), ["NaN", "NaN"], "a missing
 assert.equal(clickArgv(42, 1, 2, { count: 0 })[6], "NaN", "count 0 is not one click");
 assert.ok(/pid > 2147483647\) return 'bad-pid'/.test(BG_SCRIPT) && /!Number\.isInteger\(flags\)/.test(BG_SCRIPT), "the script checks pid range and flags too");
 assert.ok(/\$\.CGEventSetFlags\(down, 0\); \$\.CGEventSetFlags\(up, 0\);/.test(BG_SCRIPT), "click events carry no modifier from the HID state");
-assert.ok(!/if \(flags\)/.test(BG_SCRIPT) && /\$\.CGEventSetFlags\(down, flags\); \$\.CGEventSetFlags\(up, flags\);/.test(BG_SCRIPT), "key flags are always set, 0 included: a held modifier does not ride along (A0)");
+assert.ok(!/if \(flags\)/.test(BG_SCRIPT) && /\$\.CGEventSetFlags\(down, flags\); \$\.CGEventSetFlags\(up, flags\);/.test(BG_SCRIPT), "key flags are always set, 0 included: a held modifier does not ride along");
 assert.deepEqual(keyArgv(7, 126, ["shift", "fn", "numpad"]), ["key", "7", "126", String((1 << 17) | (1 << 23) | (1 << 21))], "an arrow keeps its fn and numpad flags next to the chord's");
 {
   const at = (r) => postClickToPid(42, 1, 2, { run: async () => r });
@@ -49,7 +49,7 @@ assert.deepEqual(keyArgv(7, 126, ["shift", "fn", "numpad"]), ["key", "7", "126",
 assert.equal(bgCandidate("com.apple.finder", "Finder"), true, "native app is a bgpost candidate");
 assert.equal(bgCandidate(null, "Finder"), true, "no bundle id, plain name → candidate (tried and verified)");
 assert.equal(bgCandidate("com.google.Chrome", "Google Chrome"), false, "Chrome is not a candidate");
-assert.equal(bgCandidate("com.apple.Safari", "Safari"), false, "Safari keeps the cliclick path (S4A-s11-3)");
+assert.equal(bgCandidate("com.apple.Safari", "Safari"), false, "Safari keeps the cliclick path");
 assert.equal(bgCandidate("org.mozilla.firefox", "Firefox"), false, "Firefox keeps the cliclick path");
 assert.equal(bgCandidate("company.thebrowser.Browser", "Arc"), false, "Arc keeps the cliclick path");
 assert.equal(bgCandidate("com.tinyspeck.slackmacgap", "Slack"), false, "Electron app is not a candidate");
@@ -77,7 +77,7 @@ process.env.NORACU_NO_BGPOST = "";
 delete process.env.NORACU_APPROVAL_FILE;
 delete process.env.NORACU_DENY_APPS;
 {
-  const { evaluateApproval, stopFileBlocked, defaultDenyList, gateActive } = await import("../src/approval.js?fresh");
+  const { evaluateApproval, stopFileBlocked, defaultDenyList, gateActive, terminalFromPath } = await import("../src/approval.js?fresh");
   // refused either by a deny verdict or by the fail-closed error for an app that cannot be ruled out
   const refused = (r) => r.verdict === "deny" || /^input_denied/.test(r.error || "");
 
@@ -101,7 +101,7 @@ delete process.env.NORACU_DENY_APPS;
   assert.equal(evaluateApproval({ bundleId: "com.example.app" }).verdict, "deny", "none,<list>: the list alone");
   assert.equal(evaluateApproval({ bundleId: "com.apple.Terminal", appName: "Terminal" }).verdict, "allow", "none,<list> drops the default list");
   delete process.env.NORACU_DENY_APPS;
-  // empty identity is never allowed while a rule is in force (S4A-s11-4)
+  // empty identity is never allowed while a rule is in force
   assert.ok(refused(evaluateApproval({})), "no identity: refused");
   assert.ok(refused(evaluateApproval({ bundleId: "", appName: "" })), "blank identity: refused");
   // editions and terminals the list missed
@@ -109,11 +109,11 @@ delete process.env.NORACU_DENY_APPS;
     assert.equal(evaluateApproval({ bundleId: b, appName: n }).verdict, "deny", `${n} denied by default`);
   }
 
-  // review CR1/CR2 T6 (2026-11-09)
+  // the terminals on the default deny list, by bundle id
   for (const b of ["com.apple.Terminal", "com.googlecode.iterm2", "com.github.wez.wezterm", "com.mitchellh.ghostty", "dev.warp.Warp-Stable", "org.alacritty", "net.kovidgoyal.kitty", "co.zeit.hyper"]) {
     assert.equal(evaluateApproval({ bundleId: b, appName: "x" }).verdict, "deny", `default deny list covers ${b}`);
   }
-  // next-steps R3 (2026-11-12): IDEs with a built-in terminal are on the default list — by bundle id, by a
+  // IDEs with a built-in terminal are on the default list — by bundle id, by a
   // JetBrains bundle-id glob, and by name (an edition suffix, or a bundle id that is not on the list)
   for (const [b, n] of [["com.microsoft.VSCode", "Code"], ["com.todesktop.230313mzl4w4u92", "Cursor"], ["com.exafunction.windsurf", "Windsurf"], ["dev.zed.Zed", "Zed"], ["com.jetbrains.pycharm", "PyCharm"], ["com.google.android.studio", "Android Studio"]]) {
     const r = evaluateApproval({ bundleId: b, appName: n });
@@ -142,7 +142,7 @@ delete process.env.NORACU_DENY_APPS;
   assert.equal(evaluateApproval({ bundleId: null, appName: "Finder" }).verdict, "allow", "no rule in force: an app known by name is allowed");
   assert.ok(/could not be identified/.test(evaluateApproval({}).error || ""), "no rule in force, no identity: still refused");
   delete process.env.NORACU_DENY_APPS;
-  // cross-verification A0 (2026-11-09): terminals by name too; whether any rule is in force
+  // Terminals by name too; whether any rule is in force
   assert.ok(refused(evaluateApproval({ bundleId: null, appName: "Ghostty" })), "a terminal known only by name is refused by default");
   assert.equal(gateActive(), true, "the default deny list is a rule in force");
   process.env.NORACU_DENY_APPS = "none";
@@ -161,7 +161,7 @@ delete process.env.NORACU_DENY_APPS;
   assert.equal(evaluateApproval({ bundleId: "com.bad.one" }).verdict, "deny");
   assert.equal(evaluateApproval({ bundleId: "com.unlisted" }).verdict, "ask", "an approval file that does not list the app means ask");
 
-  // T6: an empty or non-string pattern is a broken file (it used to match every app without a bundle id)
+  // An empty or non-string pattern is a broken file (it used to match every app without a bundle id)
   writeFileSync(file, JSON.stringify({ allow: [""] }));
   assert.ok(/empty or non-string pattern/.test(evaluateApproval({ bundleId: "org.x", appName: "X" }).error || ""), "empty pattern fails closed");
   writeFileSync(file, JSON.stringify({ deny: [42] }));
@@ -169,7 +169,7 @@ delete process.env.NORACU_DENY_APPS;
   writeFileSync(file, JSON.stringify({ allow: ["com.good.*"] }));
   assert.equal(evaluateApproval({ bundleId: "org.other", appName: "com.good.thing" }).verdict, "allow", "a name can match a pattern");
   assert.ok(refused(evaluateApproval({ bundleId: "", appName: "" })), "nothing to match: refused, never allow");
-  // S4A-s11-me-1: set but blank is a broken setting, not "unset"
+  // set but blank is a broken setting, not "unset"
   process.env.NORACU_APPROVAL_FILE = "  ";
   assert.ok(/set but blank/.test(evaluateApproval({ bundleId: "com.good.app" }).error || ""), "a blank NORACU_APPROVAL_FILE fails closed");
   process.env.NORACU_DENY_APPS = "none";
@@ -177,11 +177,11 @@ delete process.env.NORACU_DENY_APPS;
   delete process.env.NORACU_DENY_APPS;
   process.env.NORACU_APPROVAL_FILE = file;
 
-  // audit S5A-s17-G-2: the rules see the trimmed bundle id and name, as the identity check before them does
+  // The rules see the trimmed bundle id and name, as the identity check before them does
   writeFileSync(file, JSON.stringify({ allow: ["com.good.*"], deny: ["com.bad.*"] }));
   assert.equal(evaluateApproval({ bundleId: " com.bad.one ", appName: "Bad" }).verdict, "deny", "whitespace around a bundle id does not slip past a deny rule");
   assert.equal(evaluateApproval({ bundleId: " com.apple.Terminal", appName: "Terminal " }).verdict, "deny", "nor past the default deny list");
-  // audit S5A-s17-G-4: a FIFO named as the approval file is refused at once (the open used to block until a writer came)
+  // A FIFO named as the approval file is refused at once (the open used to block until a writer came)
   const fifo = join(dir, "fifo.json");
   execFileSync("/usr/bin/mkfifo", ["-m", "600", fifo]);
   process.env.NORACU_APPROVAL_FILE = fifo;
@@ -190,6 +190,17 @@ delete process.env.NORACU_DENY_APPS;
   // Tabby, Rio and Wave by bundle id: denied under whatever name they show (they were on the list by name only)
   delete process.env.NORACU_APPROVAL_FILE;
   for (const bid of ["org.tabby", "com.raphaelamorim.rio", "dev.commandline.waveterm"]) assert.equal(evaluateApproval({ bundleId: bid, appName: "Renamed Terminal" }).verdict, "deny", `${bid} is on the default deny list by its bundle id`);
+  // Orca, an agent IDE whose terminals run a shell (a first install on 2026-11-19 ran its client in one and found Orca
+  // allowed): denied by bundle id and by name, and recognised as the host from any of its processes
+  for (const n of ["Orca", "Renamed"]) assert.equal(evaluateApproval({ bundleId: "com.stablyai.orca", appName: n }).verdict, "deny", `Orca denied by default (shown as ${n})`);
+  assert.ok(refused(evaluateApproval({ bundleId: null, appName: "Orca" })), "Orca known only by name is refused by default");
+  // the name rule itself (with no bundle id the call is refused before any list is read)
+  assert.equal(evaluateApproval({ bundleId: "com.example.orca-fork", appName: "Orca" }).verdict, "deny", "Orca by name, under a bundle id that is not on the list");
+  assert.equal(evaluateApproval({ bundleId: "com.example.slicer", appName: "OrcaSlicer" }).verdict, "allow", "a name that only starts like Orca's is not matched");
+  assert.deepEqual(terminalFromPath("/Applications/Orca.app/Contents/Frameworks/Orca Helper.app/Contents/MacOS/Orca Helper"), { bundle: "com.stablyai.orca" }, "a client in an Orca terminal: Orca's helper is recognised as the host");
+  assert.deepEqual(terminalFromPath("/Applications/Orca.app/Contents/MacOS/Orca"), { bundle: "com.stablyai.orca" }, "Orca's main process");
+  assert.equal(terminalFromPath("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer"), null, "another app whose name starts with Orca");
+  assert.equal(terminalFromPath("/bin/zsh"), null, "a shell is walked through");
   process.env.NORACU_APPROVAL_FILE = file;
   // a Mac app whose name cannot be read is refused while a rule that names apps is in force (the default deny list
   // has some); an iOS app, matched on its bundle id alone, is judged on that id as before
@@ -218,7 +229,7 @@ delete process.env.NORACU_DENY_APPS;
   writeFileSync(file, JSON.stringify({ allow: ["com.good.*"] }));
   assert.equal(evaluateApproval({ bundleId: "com.good.app" }).verdict, "allow", "a small file that is JSON is read as before");
 
-  // R4 (2026-11-17): an "allow" entry that names an app of the default deny list exactly lets that app through;
+  // 2026-11-17: an "allow" entry that names an app of the default deny list exactly lets that app through;
   // a wildcard does not, the file's own "deny" wins, and so does the user's NORACU_DENY_APPS
   writeFileSync(file, JSON.stringify({ allow: ["com.googlecode.iterm2", "Cursor", "com.jetbrains.*", "*"] }));
   const iterm = evaluateApproval({ bundleId: "com.googlecode.iterm2", appName: "iTerm2" });
@@ -241,7 +252,7 @@ delete process.env.NORACU_DENY_APPS;
   assert.ok(/naming it exactly/.test(evaluateApproval({ bundleId: "com.googlecode.iterm2", appName: "iTerm2" }).reason || ""), "without an approval file the refusal says how too");
   process.env.NORACU_APPROVAL_FILE = file;
 
-  // A0: once NORACU_APPROVAL_FILE is set, a missing file, a symlink or an unknown key fails closed
+  // Once NORACU_APPROVAL_FILE is set, a missing file, a symlink or an unknown key fails closed
   process.env.NORACU_APPROVAL_FILE = join(dir, "missing.json");
   assert.ok(/does not exist/.test(evaluateApproval({ bundleId: "com.good.app" }).error || ""), "a missing approval file fails closed");
   const link = join(dir, "link.json");
@@ -266,7 +277,7 @@ delete process.env.NORACU_DENY_APPS;
   process.env.NORACU_STOP_FILE = stop;
   assert.equal(stopFileBlocked(), null, "no stop file → not blocked");
   process.env.NORACU_STOP_FILE = "";
-  assert.ok(/^stop_check_error: NORACU_STOP_FILE is set but blank/.test(String(stopFileBlocked())), "a blank NORACU_STOP_FILE fails closed (S4A-s11-me-1)");
+  assert.ok(/^stop_check_error: NORACU_STOP_FILE is set but blank/.test(String(stopFileBlocked())), "a blank NORACU_STOP_FILE fails closed");
   process.env.NORACU_STOP_FILE = stop;
   writeFileSync(stop, "");
   assert.ok(String(stopFileBlocked()).startsWith("user_stopped"), "stop file blocks input");

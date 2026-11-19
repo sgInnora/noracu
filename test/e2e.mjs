@@ -19,10 +19,10 @@ process.on("exit", () => { try { suiteRm(SUITE_TMP, { recursive: true, force: tr
 // person's. The guard has its own block below, which turns it on for one server.
 if (process.env.NORACU_USER_IDLE_S === undefined) process.env.NORACU_USER_IDLE_S = "0";
 // 0.3.0: a NORACU_LAYERS left in the developer's shell would narrow every server of this suite; the
-// suite sets it itself where it tests it. S1 (next-steps R4): unset now means mac,browser, so every server
+// suite sets it itself where it tests it. Unset now means mac,browser, so every server
 // here runs with all three layers unless a block says otherwise; the layers block checks the default.
 process.env.NORACU_LAYERS = "mac,browser,iphone";
-// S1 (next-steps R3): browser_evaluate is off unless NORACU_ENABLE_EVAL=1. The browser blocks of this suite
+// browser_evaluate is off unless NORACU_ENABLE_EVAL=1. The browser blocks of this suite
 // set up and read their pages with it, so every server here runs with it on; one block below checks that
 // it is off by default.
 process.env.NORACU_ENABLE_EVAL = "1";
@@ -70,10 +70,10 @@ const results = [];
 const CI = process.env.NORACU_CI === "1"; // CI 模式：跳过依赖本机硬件/权限的用例（Mirroring/Screen Recording/Accessibility）
 function check(name, cond, detail = "") { results.push({ name, pass: Boolean(cond) }); console.log(`${cond ? "✅" : "❌"} ${name}${detail ? " | " + String(detail).slice(0, 90) : ""}`); }
 function checkHW(name, cond, detail = "") { if (CI) { results.push({ name, pass: true }); console.log(`⏭ ${name} | skipped (CI: needs local hardware/permissions)`); return; } check(name, cond, detail); }
-// G8-1 (0.2.0): in CI mode nothing may touch the desktop — a block that clicks, types, pastes or writes
+// 0.2.0: in CI mode nothing may touch the desktop — a block that clicks, types, pastes or writes
 // the clipboard runs only locally (checkHW alone only skipped the assertion, not the action)
 const LOCAL = !CI;
-// R31 (0.2.4): a local case this environment cannot run (e.g. a Focus mode holds banners back) is skipped
+// 0.2.4: a local case this environment cannot run (e.g. a Focus mode holds banners back) is skipped
 // with the reason and left out of the count — it is neither a pass nor a failure
 function skipEnv(name, why) { console.log(`⏭ ${name} | not run: ${why}`); }
 const focusMode = () => {
@@ -84,7 +84,7 @@ const focusMode = () => {
   } catch { return null; }
 };
 function skipLocal(...names) { for (const n of names) { results.push({ name: n, pass: true }); console.log(`⏭ ${n} | skipped (CI: acts on the desktop)`); } }
-// G12（F10）：phone 硬件用例 —— imctl 不可用（无 pyobjc / 未安装 / Mirroring 离线）时跳过而非失败，兑现"优雅降级"承诺
+// phone 硬件用例 —— imctl 不可用（无 pyobjc / 未安装 / Mirroring 离线）时跳过而非失败，兑现"优雅降级"承诺
 function checkPhone(name, result, cond, detail = "") {
   if (CI) { results.push({ name, pass: true }); console.log(`⏭ ${name} | skipped (CI)`); return; }
   const txt = String(result?.content?.[0]?.text || "");
@@ -99,7 +99,7 @@ async function call(name, args = {}) {
   return r.result;
 }
 
-// G1：起第二个 server 进程（自定义 env）验证行为关门；用完 finally kill
+// 起第二个 server 进程（自定义 env）验证行为关门；用完 finally kill
 async function spawnServer(env = {}, serverPath = new URL("../src/server.mjs", import.meta.url).pathname, callTimeoutMs = CALL_TIMEOUT_MS) {
   const p = spawn("node", [serverPath], {
     stdio: ["pipe", "pipe", "inherit"],
@@ -138,7 +138,7 @@ async function spawnServer(env = {}, serverPath = new URL("../src/server.mjs", i
 // 1. initialize
 const init = await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test" } });
 check("initialize", init.result?.serverInfo?.name === "noracu", init.result?.serverInfo?.name);
-check("B4：initialize 带使用说明 instructions", typeof init.result?.instructions === "string" && init.result.instructions.includes("element_index") && init.result.instructions.includes("retry=safe"), String(init.result?.instructions).slice(0, 60));
+check("initialize 带使用说明 instructions", typeof init.result?.instructions === "string" && init.result.instructions.includes("element_index") && init.result.instructions.includes("retry=safe"), String(init.result?.instructions).slice(0, 60));
 
 // the handshake answers in the revision the client asked for when this server speaks it
 {
@@ -162,7 +162,7 @@ check("默认后端（mirror）不列出任何 ios_* 工具", tools.every((t) =>
 const byLayer = { mac: 0, browser: 0, phone: 0 };
 for (const t of tools) { if (t.name.startsWith("mac_")) byLayer.mac++; else if (t.name.startsWith("browser_")) byLayer.browser++; else if (t.name.startsWith("phone_")) byLayer.phone++; }
 check("三层分布", byLayer.mac === EXPECT_TOOLS.mac && byLayer.browser === EXPECT_TOOLS.browser && byLayer.phone === EXPECT_TOOLS.phone, JSON.stringify(byLayer));
-// 0.2.5 hints（Y5，P2-annotations.md）：47 × 4 全部锁死 —— readOnly / destructive / idempotent / openWorld，1 = true
+// 0.2.5 hints：47 × 4 全部锁死 —— readOnly / destructive / idempotent / openWorld，1 = true
 const EXPECT_HINTS = {
   mac_status: "1010",
   mac_apps: "1010",
@@ -222,15 +222,15 @@ for (const t of tools) {
 }
 check("0.2.5 hints：47 个工具的 4 个 annotation 与规格表逐一相同", tools.length === Object.keys(EXPECT_HINTS).length && hintBad.length === 0, hintBad.join(" ") || "47 × 4 ok");
 console.log(`   hints got: ${tools.map((t) => `${t.name}=${HINT_KEYS.map((k) => (t.annotations?.[k] === true ? 1 : t.annotations?.[k] === false ? 0 : "?")).join("")}`).join(" ")}`);
-// R32 反例抽查：四键齐全（false 也要写出）、按行为标而不是按 READ_ONLY_TOOLS、待测项保持 false
+// 反例抽查：四键齐全（false 也要写出）、按行为标而不是按 READ_ONLY_TOOLS、待测项保持 false
 const ann = (n) => tools.find((t) => t.name === n)?.annotations || {};
-check("0.2.5 hints：反例抽查（R32）",
+check("0.2.5 hints：反例抽查",
   HINT_KEYS.every((k) => typeof ann("mac_status")[k] === "boolean") && ann("mac_status").destructiveHint === false && ann("mac_status").openWorldHint === false
     && ann("mac_clipboard_read").readOnlyHint === true && ann("mac_click").destructiveHint === false && ann("mac_key").destructiveHint === true
     && ["browser_launch", "browser_fill", "phone_home", "phone_launch"].every((n) => ann(n).idempotentHint === false)
     && ann("phone_launch").openWorldHint === false && ann("phone_home").openWorldHint === true,
   JSON.stringify({ mac_status: ann("mac_status"), mac_key: ann("mac_key"), phone_launch: ann("phone_launch") }));
-// R32：TOOL_HINTS 缺一个工具名 → server 启动即失败（源码复制到临时目录，删掉 mac_status 那一行）
+// TOOL_HINTS 缺一个工具名 → server 启动即失败（源码复制到临时目录，删掉 mac_status 那一行）
 {
   const { mkdtempSync, cpSync, writeFileSync: wfs } = await import("node:fs");
   const dir = mkdtempSync(`${process.env.TMPDIR || "/tmp/"}noracu-hints-`.replace(/\/\/+/g, "/"));
@@ -268,22 +268,22 @@ check("0.2.5 hints：反例抽查（R32）",
   const br = await ask("browser", "mac_status");
   check("NORACU_LAYERS=browser：只列出 browser_*，说明不提 mac_* / phone_* / ios_*", br.names.length === EXPECT_TOOLS.browser && n(br.names, "browser_") === EXPECT_TOOLS.browser && br.probe.startsWith("unknown tool: mac_status — the mac layer is off") && /browser_snapshot/.test(br.ins) && !/mac_|phone_|ios_/.test(br.ins), `got ${br.names.length}`);
   const iosOff = await ask("  ", "ios_tap");
-  check("S1：默认（镜像后端、iPhone 层关）调 ios_tap → 只说 unknown tool，不提示开 iPhone 层（那是另一个后端的工具）", iosOff.probe === "unknown tool: ios_tap", iosOff.probe.slice(0, 120));
+  check("默认（镜像后端、iPhone 层关）调 ios_tap → 只说 unknown tool，不提示开 iPhone 层（那是另一个后端的工具）", iosOff.probe === "unknown tool: ios_tap", iosOff.probe.slice(0, 120));
   const blank = await ask("  ", "phone_status");
-  check("S1：NORACU_LAYERS 没设 / 空白 = 默认 mac,browser —— iPhone 层不列出，调 phone_status 说明怎么打开，使用说明不提 phone_* / ios_*",
+  check("NORACU_LAYERS 没设 / 空白 = 默认 mac,browser —— iPhone 层不列出，调 phone_status 说明怎么打开，使用说明不提 phone_* / ios_*",
     blank.names.length === EXPECT_TOOLS.mac + EXPECT_TOOLS.browser && n(blank.names, "phone_") === 0
       && blank.probe.startsWith("unknown tool: phone_status — the iphone layer is off on this server (NORACU_LAYERS is unset: mac,browser); add iphone, e.g. NORACU_LAYERS=mac,browser,iphone")
       && blank.ins === mb.ins && !/phone_|ios_/.test(blank.ins),
     `got ${blank.names.length} | ${blank.probe.slice(0, 100)}`);
   const all3 = await ask("mac,browser,iphone", "no_such_tool");
-  check("S1：NORACU_LAYERS=mac,browser,iphone 列出三层，使用说明与本套件的主 server 相同", all3.names.length === EXPECT_TOTAL && all3.ins === init.result?.instructions && all3.probe === "unknown tool: no_such_tool", `got ${all3.names.length}`);
+  check("NORACU_LAYERS=mac,browser,iphone 列出三层，使用说明与本套件的主 server 相同", all3.names.length === EXPECT_TOTAL && all3.ins === init.result?.instructions && all3.probe === "unknown tool: no_such_tool", `got ${all3.names.length}`);
   const server = new URL("../src/server.mjs", import.meta.url).pathname;
   const bad = ["ipone", "mac,phone", ",", "all"].map((v) => spawnSync("node", [server], { input: "", encoding: "utf8", timeout: 15000, env: { ...process.env, NORACU_LAYERS: v } }));
   check("NORACU_LAYERS 层名写错（ipone / mac,phone / , / all）→ 不启动：exit 2、stderr 说明可用的三个名字、stdout 无输出",
     bad.every((r) => r.status === 2 && /NORACU_LAYERS="[^"]*" is not valid: use a comma-separated list of mac, browser, iphone/.test(r.stderr) && /not starting/.test(r.stderr) && r.stdout === ""),
     bad.map((r) => r.status).join(","));
 }
-// F23（0.3.0 起看整个 src/）：进程启动后 src/ 里任何一个源文件在磁盘上变了（不只 server.mjs / mac-ax.js），
+// 0.3.0 起看整个 src/：进程启动后 src/ 里任何一个源文件在磁盘上变了（不只 server.mjs / mac-ax.js），
 // 下一个工具结果的第一行提示重启并点名文件；内容改回原样（只有修改时间变）不算；多出一个文件也算。
 // 源码复制到临时目录里跑，探针是一个不存在的工具名（unknown tool 也走统一出口），不碰桌面
 {
@@ -301,7 +301,7 @@ check("0.2.5 hints：反例抽查（R32）",
     const f = `${dir}/src/approval.js`, was = readFileSync(f, "utf8");
     wfs(f, `${was}\n// changed on disk\n`);
     changed = await probe();
-    // a result whose first text block is JSON: the note is a block of its own after it (audit S5A-s8-G-2)
+    // a result whose first text block is JSON: the note is a block of its own after it
     const st = (await s.call("mac_status", {}))?.content || [];
     jsonStale = { n: st.length, first: st[0]?.text, last: st[st.length - 1]?.text };
     wfs(f, was);
@@ -309,16 +309,16 @@ check("0.2.5 hints：反例抽查（R32）",
     wfs(`${dir}/src/extra.js`, "export {};\n");
     added = await probe();
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
-  check("F23：刚启动、磁盘没变 → 没有提示", clean === "unknown tool: no_such_tool", String(clean).slice(0, 80));
-  check("F23：src/approval.js 在磁盘上变了 → 结果第一行提示重启并点名这个文件",
+  check("刚启动、磁盘没变 → 没有提示", clean === "unknown tool: no_such_tool", String(clean).slice(0, 80));
+  check("src/approval.js 在磁盘上变了 → 结果第一行提示重启并点名这个文件",
     /^noracu: this server process is stale: it loaded \S+ at \S+, but the files on disk are \S+ \(changed: src\/approval\.js\)\. Restart the MCP client to load them\.\nunknown tool: no_such_tool$/.test(changed), String(changed).slice(0, 90));
-  check("审计 S5A：第一个 text 块是 JSON 时，重启提示单独放在结尾一个块里，JSON 块原样可解析",
+  check("第一个 text 块是 JSON 时，重启提示单独放在结尾一个块里，JSON 块原样可解析",
     (() => { try { JSON.parse(jsonStale.first); return jsonStale.n >= 2 && /^noracu: this server process is stale: /.test(jsonStale.last); } catch { return false; } })(),
     JSON.stringify(jsonStale).slice(0, 160));
-  check("F23：内容改回原样（只有修改时间变了）→ 不再提示", back === "unknown tool: no_such_tool", String(back).slice(0, 80));
-  check("F23：src/ 里多出一个文件 → 同样提示", /\(changed: src\/extra\.js\)\. Restart the MCP client/.test(added), String(added).slice(0, 90));
+  check("内容改回原样（只有修改时间变了）→ 不再提示", back === "unknown tool: no_such_tool", String(back).slice(0, 80));
+  check("src/ 里多出一个文件 → 同样提示", /\(changed: src\/extra\.js\)\. Restart the MCP client/.test(added), String(added).slice(0, 90));
 }
-// schema lint（G4 + t10 §4）：GLM-safe schema — properties 每个值必须含字符串 type；每个非 `?` 参数都在 required 中且一致
+// schema lint：GLM-safe schema — properties 每个值必须含字符串 type；每个非 `?` 参数都在 required 中且一致
 const schemaBad = [];
 const serverSrcForSchema = readFileSync(new URL("../src/server.mjs", import.meta.url), "utf8");
 const expectedReqByTool = new Map();
@@ -342,7 +342,7 @@ for (const t of tools) {
   if (wantReq.length === 0 && "required" in (t.inputSchema || {})) schemaBad.push(`${t.name}: empty required array present`);
 }
 check("schema lint (types + derived required arrays)", schemaBad.length === 0, schemaBad.slice(0, 3).join("; "));
-// G6：phone_* 公开层标注 — 所有 phone 工具 description 必须以 EXPERIMENTAL. 开头
+// phone_* 公开层标注 — 所有 phone 工具 description 必须以 EXPERIMENTAL. 开头
 const phoneNoExp = tools.filter(t => t.name.startsWith("phone_") && !String(t.description || "").startsWith("EXPERIMENTAL."));
 check("phone desc EXPERIMENTAL 前缀", phoneNoExp.length === 0, phoneNoExp.map(t => t.name).join(","));
 
@@ -359,7 +359,7 @@ if (!CI) {
   spawnSync("/usr/bin/open", ["-a", "TextEdit"], { timeout: 10000 });
   await sleepMs(1500);
   // a test document left open by an earlier run that stopped early (same name) would make the window lookups
-  // below ambiguous: close it, unsaved, first (P17 triage). Only documents named for this suite are touched.
+  // below ambiguous: close it, unsaved, first. Only documents named for this suite are touched.
   spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to close (every document whose name contains "${TE_DOC}") saving no`], { timeout: 10000 });
   spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to make new document with properties {name:"${TE_DOC}", text:"${TE_TEXT}"}`, "-e", 'tell application "TextEdit" to activate'], { timeout: 10000 });
   await sleepMs(1000);
@@ -377,7 +377,7 @@ const TE_READY = () => {
 // 4. mac_screenshot（Mac 层）
 const ms = await call("mac_screenshot");
 checkHW("mac_screenshot", ms?.content?.[0]?.type === "image" && ms.content[0].data.length > 10000, `img ${(ms?.content?.[0]?.data?.length / 1024).toFixed(0)}KB`);
-// G3：mac_screenshot meta — 主屏 scale/logical_size（DPR 元数据，随 image 以 text 内容附带）
+// mac_screenshot meta — 主屏 scale/logical_size（DPR 元数据，随 image 以 text 内容附带）
 let msMeta = {};
 try { msMeta = JSON.parse(ms?.content?.find(c => c.type === "text")?.text || "{}"); } catch {}
 checkHW("mac_screenshot meta.scale ≥ 1", Number(msMeta.scale) >= 1, `scale=${msMeta.scale} logical_size=${JSON.stringify(msMeta.logical_size)}`);
@@ -386,77 +386,77 @@ checkHW("mac_screenshot meta.scale ≥ 1", Number(msMeta.scale) >= 1, `scale=${m
 const ax = await call("mac_ax_state", { depth: 3 });
 checkHW("mac_ax_state", ax?.content?.[0]?.text?.includes("role"), String(ax?.content?.[0]?.text).slice(0, 70));
 
-// 6. mac_paste 剪贴板保存/还原（G2/E4）：哨兵 → paste → 400ms 后剪贴板应还原为哨兵
+// 6. mac_paste 剪贴板保存/还原：哨兵 → paste → 400ms 后剪贴板应还原为哨兵
 // （cmd-v 会粘进前台 app，本机运行时需 TextEdit 前台；CI 跳过）
 if (LOCAL && TE_READY()) {
   spawnSync("/usr/bin/osascript", ["-e", 'tell application "TextEdit" to activate'], { timeout: 10000 });
   await sleepMs(400);
-  // the developer's clipboard (text) is set aside and put back after this check (E2 run 2026-11-07: it was lost)
+  // the developer's clipboard (text) is set aside and put back after this check (device run 2026-11-07: it was lost)
   const devClip = spawnSync("/usr/bin/pbpaste", { timeout: 5000 }).stdout?.toString() ?? "";
   spawnSync("/usr/bin/pbcopy", { input: "noracu-sentinel", timeout: 5000 });
   const mp = await call("mac_paste", { text: "x", app: "TextEdit" });
   await new Promise(r => setTimeout(r, 400));
   const after = spawnSync("/usr/bin/pbpaste", { timeout: 5000 }).stdout?.toString() ?? "";
   spawnSync("/usr/bin/pbcopy", { input: devClip, timeout: 5000 });
-  check("G2：mac_paste 还原剪贴板", after === "noracu-sentinel", `${String(mp?.content?.[0]?.text).slice(0, 60)} | pbpaste=${JSON.stringify(after.slice(0, 20))}`);
-} else skipLocal("G2：mac_paste 还原剪贴板");
+  check("mac_paste 还原剪贴板", after === "noracu-sentinel", `${String(mp?.content?.[0]?.text).slice(0, 60)} | pbpaste=${JSON.stringify(after.slice(0, 20))}`);
+} else skipLocal("mac_paste 还原剪贴板");
 
-// 6b. G7（F3）：mac_type 焦点守卫 — app 不匹配必须在合成输入之前拒绝（CI 安全：不会真的敲键）
+// 6b. mac_type 焦点守卫 — app 不匹配必须在合成输入之前拒绝（CI 安全：不会真的敲键）
 {
   const fg = await call("mac_type", { text: "x", app: "__noracu_no_such_app__", mechanism: "physical" });
-  check("G7：mac_type 焦点守卫拒绝（物理路径）", fg?.isError && /focus_(lost|unknown)/.test(String(fg?.content?.[0]?.text)), String(fg?.content?.[0]?.text).slice(0, 80));
+  check("mac_type 焦点守卫拒绝（物理路径）", fg?.isError && /focus_(lost|unknown)/.test(String(fg?.content?.[0]?.text)), String(fg?.content?.[0]?.text).slice(0, 80));
   const fs = await call("mac_type", { text: "x", app: "__noracu_no_such_app__" });
-  check("B2：mac_type 语义路径找不到 app 时什么都不发", fs?.isError && /app_not_found/.test(String(fs?.content?.[0]?.text)) && /delivery=not_delivered/.test(String(fs?.content?.[0]?.text)), String(fs?.content?.[0]?.text).slice(0, 90));
+  check("mac_type 语义路径找不到 app 时什么都不发", fs?.isError && /app_not_found/.test(String(fs?.content?.[0]?.text)) && /delivery=not_delivered/.test(String(fs?.content?.[0]?.text)), String(fs?.content?.[0]?.text).slice(0, 90));
 }
 
-// 6c. G8（F6）：mac_key 非法键名被校验层拒 — cliclick kp: 不接受修饰键组合，
+// 6c. mac_key 非法键名被校验层拒 — cliclick kp: 不接受修饰键组合，
 // 错误 chord 必须在合成输入之前拒绝（CI 安全：不会真的敲键）
 {
   const bad1 = await call("mac_key", { key: "cmd-escape-foo" });
-  check("G8：mac_key 拒未知键名（chord）", bad1?.isError && String(bad1?.content?.[0]?.text).includes("unknown key"), String(bad1?.content?.[0]?.text).slice(0, 80));
+  check("mac_key 拒未知键名（chord）", bad1?.isError && String(bad1?.content?.[0]?.text).includes("unknown key"), String(bad1?.content?.[0]?.text).slice(0, 80));
   const bad2 = await call("mac_key", { key: "bogus-key-name" });
-  check("G8：mac_key 拒未知键名（bogus）", bad2?.isError && String(bad2?.content?.[0]?.text).includes("unknown key"), String(bad2?.content?.[0]?.text).slice(0, 80));
+  check("mac_key 拒未知键名（bogus）", bad2?.isError && String(bad2?.content?.[0]?.text).includes("unknown key"), String(bad2?.content?.[0]?.text).slice(0, 80));
 }
 
-// B1：AX 引擎（src/mac-ax.js）—— CI 安全部分：status / apps / windows 的形状与参数校验
+// AX 引擎（src/mac-ax.js）—— CI 安全部分：status / apps / windows 的形状与参数校验
 {
   const st = jsonOf(await call("mac_status"));
-  check("B1：mac_status 报告权限与显示器", "accessibility" in st && Array.isArray(st.displays), JSON.stringify(st).slice(0, 90));
+  check("mac_status 报告权限与显示器", "accessibility" in st && Array.isArray(st.displays), JSON.stringify(st).slice(0, 90));
   const ap = jsonOf(await call("mac_apps", {}));
-  check("B1：mac_apps 列出运行中的应用", Array.isArray(ap.apps) && ap.apps.length > 0, `${ap.apps?.length} apps`);
+  check("mac_apps 列出运行中的应用", Array.isArray(ap.apps) && ap.apps.length > 0, `${ap.apps?.length} apps`);
   const wn = jsonOf(await call("mac_windows", {}));
-  check("B1：mac_windows 返回 windows 与 displays", Array.isArray(wn.windows) && Array.isArray(wn.displays), `${wn.windows?.length} windows, ${wn.displays?.length} displays`);
+  check("mac_windows 返回 windows 与 displays", Array.isArray(wn.windows) && Array.isArray(wn.displays), `${wn.windows?.length} windows, ${wn.displays?.length} displays`);
   const bf = await call("mac_find", { app: "Finder" });
-  check("B1：mac_find 无条件被校验层拒", bf?.isError && String(bf?.content?.[0]?.text).includes("at least one"), String(bf?.content?.[0]?.text).slice(0, 80));
+  check("mac_find 无条件被校验层拒", bf?.isError && String(bf?.content?.[0]?.text).includes("at least one"), String(bf?.content?.[0]?.text).slice(0, 80));
   const bsurf = await call("mac_ax_state", { surface: "nonsense" });
-  check("B1：mac_ax_state 非法 surface 被拒", bsurf?.isError && String(bsurf?.content?.[0]?.text).includes("surface must be"), String(bsurf?.content?.[0]?.text).slice(0, 80));
+  check("mac_ax_state 非法 surface 被拒", bsurf?.isError && String(bsurf?.content?.[0]?.text).includes("surface must be"), String(bsurf?.content?.[0]?.text).slice(0, 80));
   const bg = await call("mac_get", { element_index: 99999 });
-  check("B1：mac_get 无效索引报 element_no_longer_valid", bg?.isError && String(bg?.content?.[0]?.text).includes("element_no_longer_valid"), String(bg?.content?.[0]?.text).slice(0, 80));
+  check("mac_get 无效索引报 element_no_longer_valid", bg?.isError && String(bg?.content?.[0]?.text).includes("element_no_longer_valid"), String(bg?.content?.[0]?.text).slice(0, 80));
 }
-// B1 本机：在测试自建的 TextEdit 文档上 快照 → 查找 → 读取 → 骨架下钻（CI 跳过）
+// 本机：在测试自建的 TextEdit 文档上 快照 → 查找 → 读取 → 骨架下钻（CI 跳过）
 if (LOCAL && TE_READY()) {
   const st = jsonOf(await call("mac_ax_state", { app: "TextEdit", window: TE_DOC, interactive: true }));
   const area = (st.elements || []).find((e) => e.role === "AXTextArea");
-  checkHW("B1：mac_ax_state（AX 引擎）读到 TextEdit 正文", area && String(area.value).includes(TE_TEXT) && st.snapshot_id, `${st.elements?.length} elements, ${st.snapshot_id}`);
+  checkHW("mac_ax_state（AX 引擎）读到 TextEdit 正文", area && String(area.value).includes(TE_TEXT) && st.snapshot_id, `${st.elements?.length} elements, ${st.snapshot_id}`);
   const fd = jsonOf(await call("mac_find", { app: "TextEdit", window: TE_DOC, role: "textarea" }));
   const m = fd.matches?.[0];
-  checkHW("B1：mac_find role=textarea 找到正文", m && Number.isInteger(m.i), JSON.stringify(m || fd).slice(0, 90));
+  checkHW("mac_find role=textarea 找到正文", m && Number.isInteger(m.i), JSON.stringify(m || fd).slice(0, 90));
   const gt = m ? jsonOf(await call("mac_get", { element_index: m.i })) : {};
-  checkHW("B1：mac_get 现读正文值", String(gt.value).includes(TE_TEXT) && gt.settable?.selected_text === true, JSON.stringify(gt).slice(0, 90));
+  checkHW("mac_get 现读正文值", String(gt.value).includes(TE_TEXT) && gt.settable?.selected_text === true, JSON.stringify(gt).slice(0, 90));
   const sk = jsonOf(await call("mac_ax_state", { app: "TextEdit", window: TE_DOC, skeleton: true, interactive: true, depth: 1 }));
   const cut = (sk.elements || []).find((e) => e.children_count > 0 && Number.isInteger(e.i));
   const dr = cut ? jsonOf(await call("mac_ax_state", { root: cut.i })) : {};
-  checkHW("B1：骨架 + root 下钻扩展同一快照", cut && dr.snapshot_id === sk.snapshot_id && (dr.elements || []).length > 0 && dr.elements.every((e) => e.i === undefined || e.i > cut.i), `cut i=${cut?.i} children=${cut?.children_count}, drill ${dr.elements?.length} elements`);
-} else skipLocal("B1：mac_ax_state（AX 引擎）读到 TextEdit 正文", "B1：mac_find role=textarea 找到正文", "B1：mac_get 现读正文值", "B1：骨架 + root 下钻扩展同一快照");
+  checkHW("骨架 + root 下钻扩展同一快照", cut && dr.snapshot_id === sk.snapshot_id && (dr.elements || []).length > 0 && dr.elements.every((e) => e.i === undefined || e.i > cut.i), `cut i=${cut?.i} children=${cut?.children_count}, drill ${dr.elements?.length} elements`);
+} else skipLocal("mac_ax_state（AX 引擎）读到 TextEdit 正文", "mac_find role=textarea 找到正文", "mac_get 现读正文值", "骨架 + root 下钻扩展同一快照");
 
-// B2：动作 —— CI 安全部分：危险组合键、参数校验（不会真的发键）
+// 动作 —— CI 安全部分：危险组合键、参数校验（不会真的发键）
 {
   for (const key of ["cmd-q", "cmd-shift-delete", "cmd-alt-esc", "ctrl-cmd-q", "alt-cmd-Q", "fn-cmd-q", "cmd-Q", "alt-cmd-q", "cmd-alt-delete"]) {
     const r = await call("mac_key", { key });
-    check(`B2：mac_key 拒 ${key}（未传 force）`, r?.isError && String(r?.content?.[0]?.text).includes("policy_denied"), String(r?.content?.[0]?.text).slice(0, 80));
+    check(`mac_key 拒 ${key}（未传 force）`, r?.isError && String(r?.content?.[0]?.text).includes("policy_denied"), String(r?.content?.[0]?.text).slice(0, 80));
   }
   const mm = await call("mac_menu_command", { app: "TextEdit", command: "Select All", force: "yes" });
-  check("B2：mac_menu_command 非法 force 被拒", mm?.isError && String(mm?.content?.[0]?.text).includes("force must be a boolean"), String(mm?.content?.[0]?.text).slice(0, 80));
+  check("mac_menu_command 非法 force 被拒", mm?.isError && String(mm?.content?.[0]?.text).includes("force must be a boolean"), String(mm?.content?.[0]?.text).slice(0, 80));
   const dp = await call("mac_ax_state", { depth: 2.5 });
   check("mac_ax_state: a depth that is not a whole number is refused", dp?.isError && String(dp?.content?.[0]?.text).includes("depth integer 1-40"), String(dp?.content?.[0]?.text).slice(0, 80));
   const rootWith = [];
@@ -464,11 +464,11 @@ if (LOCAL && TE_READY()) {
   check("mac_ax_state: root with app, window, window_id or surface is refused before anything is read (they were not looked at)",
     rootWith.every((x) => x?.isError && String(x?.content?.[0]?.text).includes("without app, window, window_id or surface")), rootWith.map((x) => String(x?.content?.[0]?.text).slice(0, 60)).join(" | "));
   const sv = await call("mac_set_value", { element_index: 0 });
-  check("B2：mac_set_value 缺 value 被拒", sv?.isError && String(sv?.content?.[0]?.text).includes("value"), String(sv?.content?.[0]?.text).slice(0, 80));
+  check("mac_set_value 缺 value 被拒", sv?.isError && String(sv?.content?.[0]?.text).includes("value"), String(sv?.content?.[0]?.text).slice(0, 80));
   const mc = await call("mac_click", { element_index: 0, mechanism: "bogus" });
-  check("B2：mac_click 非法 mechanism 被拒", mc?.isError && String(mc?.content?.[0]?.text).includes("mechanism"), String(mc?.content?.[0]?.text).slice(0, 80));
+  check("mac_click 非法 mechanism 被拒", mc?.isError && String(mc?.content?.[0]?.text).includes("mechanism"), String(mc?.content?.[0]?.text).slice(0, 80));
 }
-// B2 本机：在测试文档里 语义输入（中文，不经输入法）→ 幂等勾选 → 弹出菜单选项 → 语义点击 → 物理点击（命中检测）
+// 本机：在测试文档里 语义输入（中文，不经输入法）→ 幂等勾选 → 弹出菜单选项 → 语义点击 → 物理点击（命中检测）
 if (LOCAL && TE_READY()) {
   spawnSync("/usr/bin/osascript", ["-e", 'tell application "TextEdit" to activate'], { timeout: 10000 });
   await sleepMs(500);
@@ -477,58 +477,58 @@ if (LOCAL && TE_READY()) {
   const ta = idx((e) => e.role === "AXTextArea"), bold = idx((e) => e.title === "bold"), ls = idx((e) => e.title === "line spacing"), center = idx((e) => e.title === "align center");
   const say = (r) => String(r?.content?.[0]?.text);
   // every control must be found in the test document — never fall back to some other index
-  check("B2：测试文档里找到正文与格式控件", [ta, bold, ls, center].every(Number.isInteger), JSON.stringify({ ta, bold, ls, center }));
+  check("测试文档里找到正文与格式控件", [ta, bold, ls, center].every(Number.isInteger), JSON.stringify({ ta, bold, ls, center }));
   if ([ta, bold, ls, center].every(Number.isInteger)) {
   // physical first: TextEdit can raise a "duplicate this document" sheet after format changes, and a
   // sheet over the text area makes the hit test refuse the click (correctly) — so click before those
   const c2 = await call("mac_click", { element_index: ta });
-  checkHW("B2：mac_click 无语义动作 → 物理点击（命中检测通过）", /via physical click/.test(say(c2)) && !c2?.isError, say(c2).slice(0, 90));
+  checkHW("mac_click 无语义动作 → 物理点击（命中检测通过）", /via physical click/.test(say(c2)) && !c2?.isError, say(c2).slice(0, 90));
   const t1 = await call("mac_type", { element_index: ta, text: " 你好 noracu zz" });
   const v1 = jsonOf(await call("mac_get", { element_index: ta }));
-  checkHW("B2：mac_type 语义输入中文（IME 无关）并验证", /delivery=delivered_verified/.test(say(t1)) && String(v1.value).includes("你好 noracu zz"), say(t1).slice(0, 90));
+  checkHW("mac_type 语义输入中文（IME 无关）并验证", /delivery=delivered_verified/.test(say(t1)) && String(v1.value).includes("你好 noracu zz"), say(t1).slice(0, 90));
   const b1 = await call("mac_set_value", { element_index: bold, value: "true" });
   const b2 = await call("mac_set_value", { element_index: bold, value: "true" });
   const b3 = await call("mac_set_value", { element_index: bold, value: "false" });
-  checkHW("B2：mac_set_value 勾选幂等（已是 → 不发送）", /delivered_verified/.test(say(b1)) && /not_delivered/.test(say(b2)) && /delivered_verified/.test(say(b3)), `${say(b1).slice(-40)} | ${say(b2).slice(-40)}`);
+  checkHW("mac_set_value 勾选幂等（已是 → 不发送）", /delivered_verified/.test(say(b1)) && /not_delivered/.test(say(b2)) && /delivered_verified/.test(say(b3)), `${say(b1).slice(-40)} | ${say(b2).slice(-40)}`);
   const p1 = await call("mac_set_value", { element_index: ls, value: "1.5" });
   const p2 = await call("mac_set_value", { element_index: ls, value: "1.0" });
-  checkHW("B2：mac_set_value 选弹出菜单选项", /delivered_verified/.test(say(p1)) && /delivered_verified/.test(say(p2)), say(p1).slice(0, 90));
+  checkHW("mac_set_value 选弹出菜单选项", /delivered_verified/.test(say(p1)) && /delivered_verified/.test(say(p2)), say(p1).slice(0, 90));
   const c1 = await call("mac_click", { element_index: center });
-  checkHW("B2：mac_click 语义 AXPress 并验证", /via semantic AXPress/.test(say(c1)) && /delivered_verified/.test(say(c1)), say(c1).slice(0, 90));
+  checkHW("mac_click 语义 AXPress 并验证", /via semantic AXPress/.test(say(c1)) && /delivered_verified/.test(say(c1)), say(c1).slice(0, 90));
   }
-} else skipLocal("B2：本机动作（物理点击 / 语义输入 / 勾选 / 弹出菜单 / 语义点击）");
+} else skipLocal("本机动作（物理点击 / 语义输入 / 勾选 / 弹出菜单 / 语义点击）");
 
-// B3：等待 / 应用 / 窗口 / 剪贴板 / 通知 / CDP —— CI 安全部分（不碰桌面）
+// 等待 / 应用 / 窗口 / 剪贴板 / 通知 / CDP —— CI 安全部分（不碰桌面）
 {
   const say = (r) => String(r?.content?.[0]?.text);
   const w1 = await call("mac_wait", { condition: "app_gone", app: "__noracu_no_such_app__", timeout_ms: 1000 });
-  check("B3：mac_wait app_gone 立即满足", !w1?.isError && say(w1).startsWith("app_gone met"), say(w1).slice(0, 80));
+  check("mac_wait app_gone 立即满足", !w1?.isError && say(w1).startsWith("app_gone met"), say(w1).slice(0, 80));
   const w2 = await call("mac_wait", { condition: "bogus" });
-  check("B3：mac_wait 非法 condition 被拒", w2?.isError && say(w2).includes("condition must be"), say(w2).slice(0, 80));
+  check("mac_wait 非法 condition 被拒", w2?.isError && say(w2).includes("condition must be"), say(w2).slice(0, 80));
   const q = await call("mac_app", { action: "quit", app: "Finder" });
-  check("B3：mac_app 拒绝退出 Finder（会话进程）", q?.isError && say(q).includes("policy_denied"), say(q).slice(0, 90));
+  check("mac_app 拒绝退出 Finder（会话进程）", q?.isError && say(q).includes("policy_denied"), say(q).slice(0, 90));
   const cd = await call("mac_app", { action: "launch", app: "Google Chrome", cdp_port: 0 });
-  check("B3：mac_app cdp_port 需 NORACU_ALLOW_CDP=1", cd?.isError && say(cd).includes("NORACU_ALLOW_CDP"), say(cd).slice(0, 90));
+  check("mac_app cdp_port 需 NORACU_ALLOW_CDP=1", cd?.isError && say(cd).includes("NORACU_ALLOW_CDP"), say(cd).slice(0, 90));
   const bc = await call("browser_launch", { cdp_port: 9222 });
-  check("B3：browser_launch cdp_port 需 NORACU_ALLOW_CDP=1", bc?.isError && say(bc).includes("NORACU_ALLOW_CDP"), say(bc).slice(0, 90));
+  check("browser_launch cdp_port 需 NORACU_ALLOW_CDP=1", bc?.isError && say(bc).includes("NORACU_ALLOW_CDP"), say(bc).slice(0, 90));
   const mw = await call("mac_window", { action: "move", x: 1, y: 1 });
-  check("B3：mac_window 缺 window_id/app 被拒", mw?.isError && say(mw).includes("window_id"), say(mw).slice(0, 80));
+  check("mac_window 缺 window_id/app 被拒", mw?.isError && say(mw).includes("window_id"), say(mw).slice(0, 80));
   const nd = await call("mac_notifications", { action: "dismiss", index: 1 });
-  check("B3：mac_notifications 按序号操作必须带指纹", nd?.isError && say(nd).includes("expected_app"), say(nd).slice(0, 90));
+  check("mac_notifications 按序号操作必须带指纹", nd?.isError && say(nd).includes("expected_app"), say(nd).slice(0, 90));
 }
-// B3 本机：等待、窗口、窗口截图、剪贴板、通知（CI 跳过）
+// 本机：等待、窗口、窗口截图、剪贴板、通知（CI 跳过）
 if (LOCAL && TE_READY()) {
   const say = (r) => String(r?.content?.[0]?.text);
   const ww = await call("mac_wait", { condition: "window", app: "TextEdit", title: TE_DOC, timeout_ms: 5000 });
   const wt = await call("mac_wait", { condition: "text", app: "TextEdit", window: TE_DOC, text: "noracu", timeout_ms: 5000 });
-  checkHW("B3：mac_wait window / text 满足", say(ww).startsWith("window met") && say(wt).startsWith("text met"), `${say(ww).slice(0, 40)} | ${say(wt).slice(0, 40)}`);
+  checkHW("mac_wait window / text 满足", say(ww).startsWith("window met") && say(wt).startsWith("text met"), `${say(ww).slice(0, 40)} | ${say(wt).slice(0, 40)}`);
   const mv = await call("mac_window", { action: "move", app: "TextEdit", window: TE_DOC, x: 240, y: 160 });
   const rs = await call("mac_window", { action: "resize", app: "TextEdit", window: TE_DOC, width: 640, height: 480 });
-  checkHW("B3：mac_window move/resize 并验证位置尺寸", /delivered_verified/.test(say(mv)) && say(mv).includes("[240,160,") && say(rs).includes(",640,480]"), `${say(mv).slice(-70)} | ${say(rs).slice(-60)}`);
+  checkHW("mac_window move/resize 并验证位置尺寸", /delivered_verified/.test(say(mv)) && say(mv).includes("[240,160,") && say(rs).includes(",640,480]"), `${say(mv).slice(-70)} | ${say(rs).slice(-60)}`);
   const wl = jsonOf(await call("mac_windows", { app: "TextEdit" }));
   const wid = (wl.windows || []).find((w) => w.title === TE_DOC)?.id;
   const shot = wid ? await call("mac_screenshot", { window_id: wid }) : null;
-  checkHW("B3：mac_screenshot window_id 截单个窗口", shot?.content?.[0]?.type === "image" && String(shot?.content?.[1]?.text).includes(`window ${wid}`), shot ? String(shot?.content?.[1]?.text).slice(0, 80) : `no window titled ${TE_DOC}: ${JSON.stringify((wl.windows || []).map((w) => [w.id, w.title, w.bounds]))}`);
+  checkHW("mac_screenshot window_id 截单个窗口", shot?.content?.[0]?.type === "image" && String(shot?.content?.[1]?.text).includes(`window ${wid}`), shot ? String(shot?.content?.[1]?.text).slice(0, 80) : `no window titled ${TE_DOC}: ${JSON.stringify((wl.windows || []).map((w) => [w.id, w.title, w.bounds]))}`);
   // 0.2.5: mac_scroll without element_index — the frontmost app's front window, scrolled at its center only after
   // the top-window check (the TextEdit test document is frontmost here)
   if (LOCAL) {
@@ -542,18 +542,18 @@ if (LOCAL && TE_READY()) {
     spawnSync("/usr/bin/pbcopy", { input: "noracu-clip 剪贴板", timeout: 5000, env: { ...process.env, LANG: "en_US.UTF-8" } });
     const cr = jsonOf(await call("mac_clipboard_read", {}));
     spawnSync("/usr/bin/pbcopy", { input: saved ?? "", timeout: 5000, env: { ...process.env, LANG: "en_US.UTF-8" } });
-    checkHW("B3：mac_clipboard_read 读文本（含中文）", cr.type === "text" && cr.text === "noracu-clip 剪贴板", JSON.stringify(cr).slice(0, 90));
+    checkHW("mac_clipboard_read 读文本（含中文）", cr.type === "text" && cr.text === "noracu-clip 剪贴板", JSON.stringify(cr).slice(0, 90));
     spawnSync("/usr/bin/osascript", ["-e", 'display notification "noracu e2e body" with title "noracu-e2e-note"'], { timeout: 10000 });
     await sleepMs(1200);
-  } else checkHW("B3：mac_clipboard_read 读文本（含中文）", true);
+  } else checkHW("mac_clipboard_read 读文本（含中文）", true);
   const nl = jsonOf(await call("mac_notifications", { text: "noracu e2e body" }));
   const nid = nl.notifications?.[0]?.id;
   const ndm = nid ? await call("mac_notifications", { action: "dismiss", id: nid }) : null;
   const focusOn = CI ? null : focusMode();
-  if (focusOn && !nid) skipEnv("B3：mac_notifications 列出并按 id 关闭横幅", `a Focus mode is on (${focusOn}), banners are held back; ${nl.count} listed`);
-  else checkHW("B3：mac_notifications 列出并按 id 关闭横幅", nid && /delivered_verified/.test(say(ndm)), `${nl.count} listed; ${say(ndm).slice(0, 70)}`);
-} else skipLocal("B3：本机等待 / 窗口 / 截图 / 剪贴板 / 通知");
-// B3 本机：CDP 全链路 —— 用 Playwright 自带的 Chrome for Testing（不碰用户自己的应用）
+  if (focusOn && !nid) skipEnv("mac_notifications 列出并按 id 关闭横幅", `a Focus mode is on (${focusOn}), banners are held back; ${nl.count} listed`);
+  else checkHW("mac_notifications 列出并按 id 关闭横幅", nid && /delivered_verified/.test(say(ndm)), `${nl.count} listed; ${say(ndm).slice(0, 70)}`);
+} else skipLocal("本机等待 / 窗口 / 截图 / 剪贴板 / 通知");
+// 本机：CDP 全链路 —— 用 Playwright 自带的 Chrome for Testing（不碰用户自己的应用）
 {
   const { readdirSync, existsSync: ex } = await import("node:fs");
   const { homedir } = await import("node:os");
@@ -566,8 +566,8 @@ if (LOCAL && TE_READY()) {
     }
   } catch { /* no playwright cache */ }
   if (CI || !cft) {
-    checkHW("B3：CDP 全链路（mac_app cdp_port → browser_launch → 断开 → 退出）", true);
-    checkHW("t07：CDP 隔离（尾斜杠判重 / 0700 目录 / 禁止复用为普通浏览器 / CSS 缩放截图 / 退出后禁连）", true);
+    checkHW("CDP 全链路（mac_app cdp_port → browser_launch → 断开 → 退出）", true);
+    checkHW("CDP 隔离（尾斜杠判重 / 0700 目录 / 禁止复用为普通浏览器 / CSS 缩放截图 / 退出后禁连）", true);
   } else {
     const { statSync } = await import("node:fs");
     const s = await spawnServer({ NORACU_ALLOW_CDP: "1" });
@@ -589,9 +589,9 @@ if (LOCAL && TE_READY()) {
       const qt = await s.call("mac_app", { action: "quit", app: cft, force: true });
       const deadAttach = port ? await s.call("browser_launch", { cdp_port: port }) : null;
       port = null;
-      check("B3：CDP 全链路（mac_app cdp_port → browser_launch → 断开 → 退出）", Boolean(at) && say(at).includes("attached") && say(nv).includes("example.com") && say(cl).includes("keeps running") && (still.apps || []).length > 0 && /delivered_verified/.test(say(qt)),
+      check("CDP 全链路（mac_app cdp_port → browser_launch → 断开 → 退出）", Boolean(at) && say(at).includes("attached") && say(nv).includes("example.com") && say(cl).includes("keeps running") && (still.apps || []).length > 0 && /delivered_verified/.test(say(qt)),
         `${say(cl).slice(0, 40)} | ${say(qt).slice(0, 60)}`);
-      check("t07：CDP 隔离（尾斜杠判重 / 0700 目录 / 禁止复用为普通浏览器 / CSS 缩放截图 / 退出后禁连）",
+      check("CDP 隔离（尾斜杠判重 / 0700 目录 / 禁止复用为普通浏览器 / CSS 缩放截图 / 退出后禁连）",
         dupSlash?.isError && say(dupSlash).includes("cdp_requires_fresh_launch")
           && modeRoot === 0o700 && modeProf === 0o700
           && reuseBlocked?.isError && say(reuseBlocked).includes("cdp_session_active")
@@ -607,7 +607,7 @@ if (LOCAL && TE_READY()) {
   }
 }
 
-// B4：mac_menu_command 走 AX 引擎（本机：测试文档里 Edit > Select All；不存在的命令报错）
+// mac_menu_command 走 AX 引擎（本机：测试文档里 Edit > Select All；不存在的命令报错）
 {
   const say = (r) => String(r?.content?.[0]?.text);
   // menu items are enabled for the app's key window: bring the test document forward first
@@ -615,10 +615,10 @@ if (LOCAL && TE_READY()) {
     spawnSync("/usr/bin/osascript", ["-e", 'tell application "TextEdit" to activate'], { timeout: 10000 }); await sleepMs(600);
     const m1 = await call("mac_menu_command", { app: "TextEdit", command: "Edit > Select All" });
     const m2 = await call("mac_menu_command", { app: "TextEdit", command: "No Such Menu Item 123" });
-    check("B4：mac_menu_command 按路径执行 / 不存在时报错", !m1?.isError && say(m1).includes("Select All") && m2?.isError && say(m2).includes("no menu item"), `${say(m1).slice(0, 60)} | ${say(m2).slice(0, 50)}`);
-  } else skipLocal("B4：mac_menu_command 按路径执行 / 不存在时报错");
+    check("mac_menu_command 按路径执行 / 不存在时报错", !m1?.isError && say(m1).includes("Select All") && m2?.isError && say(m2).includes("no menu item"), `${say(m1).slice(0, 60)} | ${say(m2).slice(0, 50)}`);
+  } else skipLocal("mac_menu_command 按路径执行 / 不存在时报错");
 }
-// B4 + t10 §3：NORACU_TRACE 只记 { ts, tool, args(shape), ms, error, code }，不记参数值、结果文本或错误消息；0600 + O_NOFOLLOW 拒绝符号链接
+// NORACU_TRACE 只记 { ts, tool, args(shape), ms, error, code }，不记参数值、结果文本或错误消息；0600 + O_NOFOLLOW 拒绝符号链接
 {
   const { mkdtempSync, readFileSync: rf, writeFileSync: wf, symlinkSync, statSync: st, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -633,7 +633,7 @@ if (LOCAL && TE_READY()) {
     const lines = raw.trim().split("\n").map((l) => JSON.parse(l));
     const mode = st(file).mode & 0o777;
     const keysOk = lines.every((l) => JSON.stringify(Object.keys(l)) === JSON.stringify(["ts", "tool", "args", "ms", "error", "code"]) && !("result" in l));
-    check("B4/t10：NORACU_TRACE 仅记 code 不记结果与错误文本，权限 0600",
+    check("NORACU_TRACE 仅记 code 不记结果与错误文本，权限 0600",
       lines.length === 2 && keysOk && mode === 0o600
         && lines[0].tool === "mac_type" && lines[0].args.text === "string(12)" && lines[0].error === true && lines[0].code === "focus_lost"
         && lines[1].tool === "mac_status" && lines[1].error === false && lines[1].code === null
@@ -648,7 +648,7 @@ if (LOCAL && TE_READY()) {
   const s2 = await spawnServer({ NORACU_TRACE: link });
   try {
     const stRes = await s2.call("mac_status");
-    check("t10：NORACU_TRACE 使用 O_NOFOLLOW 拒绝符号链接且不影响工具调用", !stRes?.isError && rf(target, "utf8") === "untouched", rf(target, "utf8"));
+    check("NORACU_TRACE 使用 O_NOFOLLOW 拒绝符号链接且不影响工具调用", !stRes?.isError && rf(target, "utf8") === "untouched", rf(target, "utf8"));
   } finally { s2.proc.kill(); rmSync(dir2, { recursive: true, force: true }); }
   // a call refused before the tool runs gets its line too: unknown tool, invalid arguments, read-only mode, stop file
   const dir3 = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
@@ -693,7 +693,7 @@ if (LOCAL && TE_READY()) {
     const s = await spawnServer({ NORACU_USER_IDLE_S: "2" });
     const s0 = await spawnServer({ NORACU_USER_IDLE_S: "0" });
     try {
-      // "the person": zero-distance mouse moves from this test process, for 3.5 s — one move alone is waited out (R3)
+      // "the person": zero-distance mouse moves from this test process, for 3.5 s — one move alone is waited out
       const mover = spawn("/bin/bash", ["-c", `for i in $(seq 1 14); do "${cc}" m:+0,+0; sleep 0.25; done`], { stdio: "ignore" });
       await sleepMs(300);
       const busy = await s.call("mac_key", NOAPP);
@@ -707,7 +707,7 @@ if (LOCAL && TE_READY()) {
       await sleepMs(2300);
       const calm = await s.call("mac_key", NOAPP);
       check("0.2.7：静止 2 s 后同一调用照常执行", calm?.isError && /focus_lost/.test(say(calm)) && !/user_active/.test(say(calm)), say(calm).slice(0, 80));
-      // a document of its own: the shared test document may carry a sheet by now (B2's format changes)
+      // a document of its own: the shared test document may carry a sheet by now (the format changes of the action checks)
       spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to make new document with properties {name:"${YIELD_DOC}", text:"pointer test"}`, "-e", 'tell application "TextEdit" to activate'], { timeout: 10000 });
       await sleepMs(800);
       const ta = jsonOf(await s.call("mac_find", { app: "TextEdit", window: YIELD_DOC, role: "textarea" })).matches?.[0]?.i;
@@ -722,7 +722,7 @@ if (LOCAL && TE_READY()) {
           && next?.isError && /focus_lost/.test(say(next)) && !scr?.isError,
         `${say(clk).slice(0, 50)} | pointer ${p1} → ${p2} → ${p3} | ${say(next).slice(0, 30)} | ${say(scr).slice(0, 40)}`);
       const ta0 = jsonOf(await s0.call("mac_find", { app: "TextEdit", window: YIELD_DOC, role: "textarea" })).matches?.[0]?.i;
-      // the pointer starts away from where the click lands (P17 triage): when it already sat there, "stays where
+      // the pointer starts away from where the click lands: when it already sat there, "stays where
       // it clicked" could not be told from "went back". A point on the menu bar — never a screen corner, which
       // can be a hot corner — and it is put back afterwards.
       const q0 = pointerAt();
@@ -741,7 +741,7 @@ if (LOCAL && TE_READY()) {
   } else skipLocal("0.2.7：刚有人动过键鼠 → user_active", "0.2.7：静止 2 s 后照常执行", "0.2.7：光标回到原处", "0.2.7：=0 时光标留在点击处");
 }
 
-// B5（0.2.0）：假 AX 引擎（NORACU_AX_ENGINE）—— 不需要 macOS 权限即可检验 server 侧的 Mac 逻辑（CI 安全）
+// 0.2.0：假 AX 引擎（NORACU_AX_ENGINE）—— 不需要 macOS 权限即可检验 server 侧的 Mac 逻辑（CI 安全）
 // The fake speaks the engine protocol: one JSON request on stdin, one JSON reply on stdout. Actions echo
 // the fingerprint name of the element they were asked to act on, so a test can see which one it was.
 const FAKE_AX = `#!/usr/bin/env node
@@ -871,25 +871,25 @@ echo "home gesture sent"
     const one = a.elements?.find((e) => e.title === "One")?.i;
     const f = jsonOf(await s.call("mac_find", { app: "Fake", role: "button" }));
     const three = f.matches?.find((e) => e.title === "Three")?.i;
-    check("B5：索引跨快照唯一（mac_find 不复用旧编号）", Number.isInteger(one) && Number.isInteger(three) && one !== three && a.snapshot_id !== f.snapshot_id, `One=${one} (${a.snapshot_id}) Three=${three} (${f.snapshot_id})${Number.isInteger(one) ? "" : ` | mac_ax_state: ${say(a0).slice(0, 160)}`}`);
-    if (!Number.isInteger(one) || !Number.isInteger(three)) throw new Error("fake engine snapshot failed — later B5 calls would run without an element_index");
+    check("索引跨快照唯一（mac_find 不复用旧编号）", Number.isInteger(one) && Number.isInteger(three) && one !== three && a.snapshot_id !== f.snapshot_id, `One=${one} (${a.snapshot_id}) Three=${three} (${f.snapshot_id})${Number.isInteger(one) ? "" : ` | mac_ax_state: ${say(a0).slice(0, 160)}`}`);
+    if (!Number.isInteger(one) || !Number.isInteger(three)) throw new Error("fake engine snapshot failed — later calls would run without an element_index");
     const c1 = await s.call("mac_click", { element_index: one });
-    check("B5：旧快照的索引在新快照之后仍指向原元素（C1-3）", !c1?.isError && /"One"/.test(say(c1)), say(c1).slice(0, 90));
+    check("旧快照的索引在新快照之后仍指向原元素", !c1?.isError && /"One"/.test(say(c1)), say(c1).slice(0, 90));
     const c2 = await s.call("mac_click", { element_index: one, snapshot_id: f.snapshot_id });
-    check("B5：snapshot_id 与索引不符 → element_no_longer_valid", c2?.isError && /element_no_longer_valid/.test(say(c2)) && /belongs to snapshot/.test(say(c2)), say(c2).slice(0, 90));
+    check("snapshot_id 与索引不符 → element_no_longer_valid", c2?.isError && /element_no_longer_valid/.test(say(c2)) && /belongs to snapshot/.test(say(c2)), say(c2).slice(0, 90));
     // physical mac_type: the click goes out, but when another app is in front afterwards no keystroke does
     const two = a.elements?.find((e) => e.title === "Two")?.i;
     const ty = await s.call("mac_type", { element_index: one, text: "s3cret", mechanism: "physical" });
-    check("B5：mac_type 物理路径点击后前台不是目标应用 → 不发键（focus_lost）", ty?.isError && /focus_lost/.test(say(ty)) && /c:5,5/.test(sent()) && !/t:s3cret/.test(sent()), `${say(ty).slice(0, 70)} | cliclick: ${JSON.stringify(sent())}`);
+    check("mac_type 物理路径点击后前台不是目标应用 → 不发键（focus_lost）", ty?.isError && /focus_lost/.test(say(ty)) && /c:5,5/.test(sent()) && !/t:s3cret/.test(sent()), `${say(ty).slice(0, 70)} | cliclick: ${JSON.stringify(sent())}`);
     // mac_drag: a covered drop target refuses the whole drag (invariant 6 for both ends)
     const dg = await s.call("mac_drag", { from_index: one, to_index: two });
-    check("B5：mac_drag 落点被遮挡 → 整个拖动不发送", dg?.isError && /drop target/.test(say(dg)) && /occluded/.test(say(dg)) && !/dd:/.test(sent()), `${say(dg).slice(0, 80)} | cliclick: ${JSON.stringify(sent())}`);
+    check("mac_drag 落点被遮挡 → 整个拖动不发送", dg?.isError && /drop target/.test(say(dg)) && /occluded/.test(say(dg)) && !/dd:/.test(sent()), `${say(dg).slice(0, 80)} | cliclick: ${JSON.stringify(sent())}`);
     // 0.2.1: raw x,y clicks ask the window server whose window is on top at the point before sending
     const rx1 = await s.call("mac_click", { x: 100, y: 100 });
     check("0.2.1：x,y 点击处最上层是前台应用的窗口 → 发送并写明顶层窗口", !rx1?.isError && /top window: "Other"/.test(say(rx1)) && /c:100,100/.test(sent()), `${say(rx1).slice(0, 90)} | cliclick: ${JSON.stringify(sent())}`);
     const rx2 = await s.call("mac_click", { x: 600, y: 100 });
     check("0.2.1：x,y 点击处被别的应用（通知横幅）盖住 → occluded，不发送", rx2?.isError && /^ERROR: occluded: 600,100 is covered by "NotificationCenter" \(window layer 23\), not "Other" \(the frontmost app\)/.test(say(rx2)) && /delivery=not_delivered, retry=safe/.test(say(rx2)) && !/c:600,100/.test(sent()), `${say(rx2).slice(0, 120)} | cliclick: ${JSON.stringify(sent())}`);
-    // review R39: mac_scroll's refusal uses scroll wording — it takes no force and no app
+    // mac_scroll's refusal uses scroll wording — it takes no force and no app
     // two ways to name the target at once, or a snapshot_id with nothing it could be checked against
     const twoWays = [
       await s.call("mac_click", { element_index: one, x: 5, y: 5 }),
@@ -921,7 +921,7 @@ echo "home gesture sent"
     check("mac_app activate pid:12: that process is brought forward through the engine, not by open -a",
       !actPid?.isError && /^activated "Twin"/.test(say(actPid)), say(actPid).slice(0, 120));
     const sc0 = await s.call("mac_scroll", { direction: "down" });
-    check("0.2.6（R39）：mac_scroll 中心被盖住 → occluded，提示只指向 element_index，不出现 force:true / pass app",
+    check("0.2.6：mac_scroll 中心被盖住 → occluded，提示只指向 element_index，不出现 force:true / pass app",
       sc0?.isError && /^ERROR: occluded: 600,200 is covered by "NotificationCenter" \(window layer 23\), not "Other" \(the frontmost app\)/.test(say(sc0))
         && /pass element_index to scroll a specific element$/.test(say(sc0)) && !/force:true|pass app:/.test(say(sc0)) && /delivery=not_delivered, retry=safe/.test(say(sc0)),
       say(sc0).slice(0, 200));
@@ -932,7 +932,7 @@ echo "home gesture sent"
     const tyOther = await s.call("mac_type", { element_index: idxFake, app: "Other", text: "hi" });
     check("mac_type with element_index and an app the element does not belong to: refused on the accessibility path too, nothing written",
       Number.isInteger(idxFake) && tyOther?.isError && /belongs to another app than "Other"/.test(say(tyOther)) && /delivery=not_delivered/.test(say(tyOther)), say(tyOther).slice(0, 160));
-    // review 0.2.6 #2: mac_type into the focused element names the app; an app with no focused element
+    // mac_type into the focused element names the app; an app with no focused element
     // gets keystrokes only when app names it; a text view accessibility cannot write still gets them
     const ty1 = await s.call("mac_type", { text: "hello" });
     const ty2 = await s.call("mac_type", { text: "NOFOCUS" });
@@ -998,10 +998,10 @@ echo "home gesture sent"
       `${say(k1).slice(0, 60)} | engine: ${JSON.stringify(kr)} | cliclick: ${JSON.stringify(sent()).slice(-80)}`);
     // mutating vs read-only engine timeout labels (NORACU_AX_TIMEOUT_MS=1500)
     const sv = await s.call("mac_set_value", { element_index: one, value: "x" });
-    check("B5：mac_set_value 超时 → ax_timeout 带 delivery=unknown, retry=unsafe", sv?.isError && /ax_timeout:/.test(say(sv)) && /\(delivery=unknown, retry=unsafe\)/.test(say(sv)), say(sv).slice(0, 100));
+    check("mac_set_value 超时 → ax_timeout 带 delivery=unknown, retry=unsafe", sv?.isError && /ax_timeout:/.test(say(sv)) && /\(delivery=unknown, retry=unsafe\)/.test(say(sv)), say(sv).slice(0, 100));
     const gt = await s.call("mac_get", { element_index: one });
-    check("B5：只读 mac_get 超时 → ax_timeout 不报 retry=unsafe", gt?.isError && /ax_timeout:/.test(say(gt)) && !/retry=unsafe/.test(say(gt)) && !/delivery=/.test(say(gt)), say(gt).slice(0, 100));
-    // t06 phone validateArgs: bad x, bad swipe bounds/ms, bad direction, bad key, overlong text — never reach imctl
+    check("只读 mac_get 超时 → ax_timeout 不报 retry=unsafe", gt?.isError && /ax_timeout:/.test(say(gt)) && !/retry=unsafe/.test(say(gt)) && !/delivery=/.test(say(gt)), say(gt).slice(0, 100));
+    // phone validateArgs: bad x, bad swipe bounds/ms, bad direction, bad key, overlong text — never reach imctl
     const badTap = await s.call("phone_tap", { x: 1.5, y: 0.5 });
     const badSwipe1 = await s.call("phone_swipe", { from: [-0.1, 0.5], to: [0.5, 0.5] });
     const badSwipe2 = await s.call("phone_swipe", { from: [0.5, 0.8], to: [0.5, 0.2], ms: 10 });
@@ -1009,23 +1009,23 @@ echo "home gesture sent"
     const badKey = await s.call("phone_key", { key: "cmd-q" });
     const badFind = await s.call("phone_find", { text: "x".repeat(201) });
     const badType = await s.call("phone_type", { text: "x".repeat(2001) });
-    check("B5/t06：phone_* 校验层拦截越界坐标 / 非法方向 / 非法键名 / 超长文本，且不启动 imctl",
+    check("phone_* 校验层拦截越界坐标 / 非法方向 / 非法键名 / 超长文本，且不启动 imctl",
       [badTap, badSwipe1, badSwipe2, badScroll, badKey, badFind, badType].every((r) => r?.isError) && imctlSent() === "",
       `${say(badTap).slice(0, 40)} | ${say(badKey).slice(0, 40)} | imctl=${JSON.stringify(imctlSent())}`);
-    // t06 mirrorMenu: menu_item_disabled / TIMEOUT / delivered_unverified — none may fall back to imctl
+    // mirrorMenu: menu_item_disabled / TIMEOUT / delivered_unverified — none may fall back to imctl
     writeFileSync(menuReply, JSON.stringify({ ok: false, code: "ACTION_FAILED", details: { kind: "menu_item_disabled" } }));
     const mhDis = await s.call("phone_home");
-    check("B5/t06：mirrorMenu 菜单项禁用 → mirror_not_live 且不回退 imctl",
+    check("mirrorMenu 菜单项禁用 → mirror_not_live 且不回退 imctl",
       mhDis?.isError && /mirror_not_live/.test(say(mhDis)) && menuReqs().at(-1)?.require_enabled === true && imctlSent() === "",
       `${say(mhDis).slice(0, 80)} | imctl=${JSON.stringify(imctlSent())}`);
     writeFileSync(menuReply, JSON.stringify({ ok: false, code: "TIMEOUT", delivery: "unknown" }));
     const mhTo = await s.call("phone_home");
-    check("B5/t06：mirrorMenu 超时（delivery=unknown）→ menu_unknown 且不回退 imctl",
+    check("mirrorMenu 超时（delivery=unknown）→ menu_unknown 且不回退 imctl",
       mhTo?.isError && /menu_unknown/.test(say(mhTo)) && /retry=unsafe/.test(say(mhTo)) && imctlSent() === "",
       `${say(mhTo).slice(0, 80)} | imctl=${JSON.stringify(imctlSent())}`);
     writeFileSync(menuReply, JSON.stringify({ ok: true, delivery: "delivered_unverified", path: "View > Home Screen", app: "iPhone Mirroring" }));
     const mhOk = await s.call("phone_home");
-    check("B5/t06：mirrorMenu 成功 → 文案声明 screen not verified 且不启动 imctl",
+    check("mirrorMenu 成功 → 文案声明 screen not verified 且不启动 imctl",
       !mhOk?.isError && /screen not verified/.test(say(mhOk)) && /delivery=delivered_unverified, retry=unsafe/.test(say(mhOk)) && imctlSent() === "",
       `${say(mhOk).slice(0, 90)} | imctl=${JSON.stringify(imctlSent())}`);
     // menu_item_absent (non-English macOS) still falls back to imctl; `--` separates positionals; non-import Traceback → imctl_error
@@ -1034,10 +1034,10 @@ echo "home gesture sent"
     await s.call("phone_find", { text: "--exact" });
     await s.call("phone_open", { app: "-Settings" });
     await s.call("phone_key", { key: "return", expect: "Home" });
-    await s.call("phone_key", { key: "return", expect: "--replace" }); // R19: one --expect=… token, never read as an option
+    await s.call("phone_key", { key: "return", expect: "--replace" }); // One --expect=… token, never read as an option
     const psBoom = await s.call("phone_status");
     const logAfter = imctlSent();
-    // R19: phone_open had already gone Home and searched Spotlight; a capture failure while checking --expect sent nothing
+    // phone_open had already gone Home and searched Spotlight; a capture failure while checking --expect sent nothing
     const nf = await s.call("phone_open", { app: "NoSuchApp" });
     const cf = await s.call("phone_tap", { x: 0.5, y: 0.5, expect: "CapFail" });
     // device run 2026-11-10: a tap aimed at the mirror window's margin is refused by imctl; the line passes through as it is
@@ -1047,14 +1047,14 @@ echo "home gesture sent"
       say(oos).slice(0, 200));
     // device run 2026-11-06: a paste only the frame diff saw is reported unverified
     const tu = await s.call("phone_type", { text: "X" });
-    check("B5/device：phone_type 只有画面变化、OCR 读不回 → delivered_unverified",
+    check("phone_type 只有画面变化、OCR 读不回 → delivered_unverified",
       !tu?.isError && /OCR cannot read this text back/.test(say(tu)) && /delivery=delivered_unverified, retry=unsafe/.test(say(tu)), say(tu).slice(-70));
     // 0.2.5: only a sighting in the field confirms phone_type; phone_scroll never claims verified
     const tY = await s.call("phone_type", { text: "Y" });
     const tL = await s.call("phone_type", { text: "LATEtext" });
     const tS = await s.call("phone_type", { text: "Seen here" });
     const sc = await s.call("phone_scroll", { direction: "down" });
-    check("0.2.5：phone_type 单字符、迟到（R38：不论看到在哪）→ delivered_unverified；在输入处看到 → delivered_verified；phone_scroll → delivered_unverified",
+    check("0.2.5：phone_type 单字符、迟到（不论看到在哪）→ delivered_unverified；在输入处看到 → delivered_verified；phone_scroll → delivered_unverified",
       /delivery=delivered_unverified/.test(say(tY)) && /showed up late/.test(say(tL)) && /delivery=delivered_unverified/.test(say(tL)) && /delivery=delivered_verified/.test(say(tS)) && /delivery=delivered_unverified/.test(say(sc)),
       [say(tY), say(tL), say(tS), say(sc)].map((t) => t.slice(-40)).join(" | "));
     // a line that comes with exit code 0 and is not the driver's confirmed one is not read as verified
@@ -1074,12 +1074,12 @@ echo "home gesture sent"
     check("0.2.6（#5）：phone_type 遇到 Mac 键盘布局不符 → keyboard_layout 原样透传，not_delivered / retry=safe",
       tK?.isError && /^ERROR: keyboard_layout: the Mac keyboard layout types "q"/.test(say(tK)) && /delivery=not_delivered, retry=safe/.test(say(tK)),
       say(tK).slice(0, 200));
-    check("B5/R19：phone_open app not found → delivered_unverified；--expect 截图失败 → not_delivered",
+    check("phone_open app not found → delivered_unverified；--expect 截图失败 → not_delivered",
       nf?.isError && /app not found/.test(say(nf)) && /delivery=delivered_unverified, retry=safe/.test(say(nf))
         && cf?.isError && /capture_failed/.test(say(cf)) && /delivery=not_delivered, retry=safe/.test(say(cf)),
       `${say(nf).slice(-60)} | ${say(cf).slice(-60)}`);
-    // R18: find / open text goes in on stdin ("-" in argv), never in the process list
-    check("B5/t06：menu_item_absent 回退 imctl；find/open 文本经 stdin（argv 只有 `-- -`）；key 带 `--`；非导入异常报 imctl_error",
+    // Find / open text goes in on stdin ("-" in argv), never in the process list
+    check("menu_item_absent 回退 imctl；find/open 文本经 stdin（argv 只有 `-- -`）；key 带 `--`；非导入异常报 imctl_error",
       !mhFb?.isError && /-m imctl\.cli home/.test(logAfter) && /find -- -\n/.test(logAfter) && /stdin:--exact/.test(logAfter) && /open -- -\n/.test(logAfter) && /stdin:-Settings/.test(logAfter) && !/cli (find|open) -- (--exact|-Settings)/.test(logAfter) && /key --expect=Home -- return/.test(logAfter) && /key --expect=--replace -- return/.test(logAfter) && psBoom?.isError && /imctl_error: RuntimeError: synthetic boom/.test(say(psBoom)) && !/imctl unavailable/.test(say(psBoom)),
       `${say(psBoom).slice(0, 60)} | log=${JSON.stringify(logAfter.trim())}`);
     // a name with a line break or another control character is refused before imctl is started
@@ -1093,7 +1093,7 @@ echo "home gesture sent"
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-// 0.3.0 输入门（review CR1/CR2 + device run 2026-11-09，CI 安全）：
+// 0.3.0 输入门（CI 安全）：
 //   stop file 在输入队列入口拦下所有 mac/phone 输入（含不发事件的语义路径）；
 //   审批按收到输入的 app 判（元素的 pid / 指定的 app / 点上最上层窗口的 app），不按前台；
 //   识别不出 app → 拒发；默认拒绝列表按 bundle id 生效（引擎给的是 bundle，不是 bundle_id）
@@ -1139,16 +1139,16 @@ echo "home gesture sent"
     const rs = [];
     for (const [n, a] of calls) rs.push([n, await s.call(n, a)]);
     const stopped = rs.every(([, r]) => r?.isError && /^ERROR: user_stopped: /.test(say(r)) && /delivery=not_delivered, retry=safe/.test(say(r)));
-    check("0.3.0（CR1/CR2 T1）：stop file 存在时语义点击、物理点击（bgpost 关）、set_value、drag、type、key、scroll、phone_tap 全部 user_stopped；引擎、cliclick、imctl 一次都没被调用",
+    check("0.3.0：stop file 存在时语义点击、物理点击（bgpost 关）、set_value、drag、type、key、scroll、phone_tap 全部 user_stopped；引擎、cliclick、imctl 一次都没被调用",
       Number.isInteger(one) && stopped && read(opsLog) === "" && read(clickLog) === "" && read(imctlLog) === "",
       rs.filter(([, r]) => !/user_stopped/.test(say(r))).map(([n, r]) => `${n}: ${say(r).slice(0, 80)}`).join(" | ") + ` | ops=${JSON.stringify(read(opsLog))} click=${JSON.stringify(read(clickLog))} imctl=${JSON.stringify(read(imctlLog))}`);
     const obs = await s.call("mac_ax_state", { app: "Fake" });
-    check("0.3.0（T1）：stop file 不挡观察类工具", !obs?.isError && /snapshot_id/.test(say(obs)), say(obs).slice(0, 80));
+    check("0.3.0：stop file 不挡观察类工具", !obs?.isError && /snapshot_id/.test(say(obs)), say(obs).slice(0, 80));
     // the browser's input tools stop too; its observation tools do not
     const bs = [];
     for (const [n, a] of [["browser_navigate", { url: "https://example.com" }], ["browser_click", { selector: "a" }], ["browser_type", { text: "x" }], ["browser_tabs", { action: "new" }]]) bs.push([n, await s.call(n, a)]);
     const bList = await s.call("browser_tabs", { action: "list" });
-    check("S4A：stop file 存在时 browser 输入工具（navigate/click/type/tabs new）也 user_stopped；browser_tabs list 不受影响",
+    check("stop file 存在时 browser 输入工具（navigate/click/type/tabs new）也 user_stopped；browser_tabs list 不受影响",
       bs.every(([, r]) => r?.isError && /^ERROR: user_stopped: /.test(say(r))) && !/user_stopped/.test(say(bList)),
       bs.map(([n, r]) => `${n}: ${say(r).slice(0, 50)}`).join(" | ") + ` | list: ${say(bList).slice(0, 50)}`);
     rmSync(stopFile, { force: true });
@@ -1159,7 +1159,7 @@ echo "home gesture sent"
     const qOne = await idx("Nameless");
     clear();
     const nn = await s.call("mac_click", { element_index: qOne });
-    check("审计：读不到名字、只有 bundle id 的 app，在按名字写的规则生效时（默认拒绝列表就有）→ input_denied，不发",
+    check("读不到名字、只有 bundle id 的 app，在按名字写的规则生效时（默认拒绝列表就有）→ input_denied，不发",
       nn?.isError && /^ERROR: input_denied: the name of the app that would receive the input could not be read/.test(say(nn)) && !ACTION_OPS.test(read(opsLog)), say(nn).slice(0, 140));
     clear();
     const nb = await s.call("mac_click", { element_index: pOne });
@@ -1194,14 +1194,14 @@ echo "home gesture sent"
     const dk = await s2.call("mac_click", { x: 300, y: 300, force: true });
     check("0.3.0：force 点在空桌面上 → 按 Finder 判（这里 Finder 被拒）→ input_denied，不按前台 app 放行",
       dk?.isError && /^ERROR: input_denied: "Finder" — denied by NORACU_DENY_APPS \("com\.apple\.finder"\)/.test(say(dk)) && !/c:300,300/.test(read(clickLog)), say(dk).slice(0, 140));
-    check("0.3.0（CR1/CR2 T1）：审批按目标 app 判 —— 前台 Other 允许，后台被拒的 Fake（test.fake）的 set_value、语义点击、drag、菜单命令、type 都 input_denied 且没有动作请求；Other 上的 x,y 点击与按键照常",
+    check("0.3.0：审批按目标 app 判 —— 前台 Other 允许，后台被拒的 Fake（test.fake）的 set_value、语义点击、drag、菜单命令、type 都 input_denied 且没有动作请求；Other 上的 x,y 点击与按键照常",
       rs.every((r) => r?.isError && /^ERROR: input_denied: "Fake" — denied by NORACU_DENY_APPS \("test\.fake"\)/.test(say(r))) && !ACTION_OPS.test(read(opsLog))
         && !ok1?.isError && !ok2?.isError && /c:100,100/.test(read(clickLog)) && /kd:shift t:z ku:shift/.test(read(clickLog)),
       [...rs, ok1, ok2].map((r) => say(r).slice(0, 80)).join(" | ") + ` | ops=${JSON.stringify(read(opsLog).trim().split("\n").join(","))} click=${JSON.stringify(read(clickLog))}`);
   } finally { s2.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-// 0.3.0 screenshot_id（review CR1/CR2 T2，CI 安全）：截图像素 → 窗口原点 + 像素 ÷ 窗口所在屏的 scale；越界 invalid_args；
+// 0.3.0 screenshot_id（CI 安全）：截图像素 → 窗口原点 + 像素 ÷ 窗口所在屏的 scale；越界 invalid_args；
 // 缓存满了只淘汰最旧的。假引擎的窗口 5 属于 Other（pid 777），bounds [400,100,400,200]；假 screencapture 写出 800×400 的 PNG 头
 {
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
@@ -1240,12 +1240,12 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
       c5?.isError && /^ERROR: occluded: 410,110 is covered by another window of "Other" \(window 6\), not the screenshot's window 5/.test(say(c5)) && !/c:410,110/.test(read(clickLog))
         && !c6?.isError && /c:799,299/.test(read(clickLog)),
       `${say(c5).slice(0, 130)} | ${say(c6).slice(0, 80)} | click=${JSON.stringify(read(clickLog))}`);
-    check("0.3.0（CR1/CR2 T2）：screenshot_id 点击加上窗口原点（像素 100,100 @2x → 点 450,150）；超出截图 → invalid_args 不发；scale 按窗口算；缓存满了只淘汰最旧的（第 3 张仍有效，第 1 张失效）",
+    check("0.3.0：screenshot_id 点击加上窗口原点（像素 100,100 @2x → 点 450,150）；超出截图 → invalid_args 不发；scale 按窗口算；缓存满了只淘汰最旧的（第 3 张仍有效，第 1 张失效）",
       m.scale === 2 && JSON.stringify(m.logical_size) === "[400,200]" && !c1?.isError && /@ 450,150/.test(say(c1)) && /c:450,150/.test(read(clickLog))
         && c2?.isError && /^ERROR: invalid_args: 2000,100 is outside the screenshot \(800×400 pixels\)/.test(say(c2)) && !/c:1400/.test(read(clickLog))
         && !c3?.isError && /c:405,110/.test(read(clickLog)) && c4?.isError && /^ERROR: stale: screenshot_id/.test(say(c4)),
       [JSON.stringify({ scale: m.scale, ls: m.logical_size, id: m.screenshot_id }), say(c1).slice(0, 90), say(c2).slice(0, 90), say(c3).slice(0, 60), say(c4).slice(0, 60), `click=${JSON.stringify(read(clickLog))}`].join(" | "));
-    // review CR1/CR2 T4/T5: the new arguments are validated; a drag whose waits exceed 10 s sends nothing
+    // The new arguments are validated; a drag whose waits exceed 10 s sends nothing
     const one = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
     const four = jsonOf(await s.call("mac_find", { app: "Fake", role: "button" })).matches?.find((e) => e.title === "Four")?.i;
     writeFileSync(clickLog, "");
@@ -1258,7 +1258,7 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
       await s.call("mac_drag", { from_index: one, to_index: four, hold_ms: 1.5 }),
     ];
     const long = await s.call("mac_drag", { from_index: one, to_index: four, step_ms: 500 });
-    check("0.3.0（CR1/CR2 T4/T5）：screenshot_id 类型、与 element_index / app 同传、hold_ms / step_ms 越界或非整数 → 参数错误；holds + steps 超过 10 s 的拖动 → invalid_args，一个事件都不发",
+    check("0.3.0：screenshot_id 类型、与 element_index / app 同传、hold_ms / step_ms 越界或非整数 → 参数错误；holds + steps 超过 10 s 的拖动 → invalid_args，一个事件都不发",
       /screenshot_id must be the id string/.test(say(v[0])) && /cannot be combined with element_index/.test(say(v[1])) && /leave app out/.test(say(v[2]))
         && /hold_ms must be an integer 0-2000/.test(say(v[3])) && /step_ms must be an integer 1-500/.test(say(v[4])) && /hold_ms must be an integer 0-2000/.test(say(v[5]))
         && v.every((r) => r?.isError && /delivery=not_delivered, retry=safe/.test(say(r)))
@@ -1267,7 +1267,7 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-// 0.3.0 bgpost（review CR1/CR2 T3，CI 安全）：只有确定什么都没发出（脚本在建事件前就拒绝：bad-pid）才改走真实指针，
+// 0.3.0 bgpost（CI 安全）：只有确定什么都没发出（脚本在建事件前就拒绝：bad-pid）才改走真实指针，
 // 结果写明 route；mechanism physical 一律走真实指针（不试 bgpost）。"Neg" 的 pid 是 -7：真 osascript 跑 bgpost 脚本，返回 bad-pid，不发任何事件
 {
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
@@ -1292,14 +1292,14 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
     const b1 = await s.call("mac_click", { element_index: one, count: 2 });
     const after1 = read(clickLog);
     const b2 = await s.call("mac_click", { element_index: one, count: 2, mechanism: "physical" });
-    check("0.3.0（CR1/CR2 T3）：bgpost 确定没发出（bad-pid）→ 改走真实指针，route 写明；mechanism physical 直接走真实指针",
+    check("0.3.0：bgpost 确定没发出（bad-pid）→ 改走真实指针，route 写明；mechanism physical 直接走真实指针",
       !b1?.isError && /\(route: cliclick \(bgpost not posted\)\)/.test(say(b1)) && /^dc:6,6$/m.test(after1)
         && !b2?.isError && /\(route: cliclick\)/.test(say(b2)) && !/bgpost not posted/.test(say(b2)),
       `${say(b1).slice(-120)} | ${say(b2).slice(-80)} | click=${JSON.stringify(read(clickLog))}`);
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-// B6（0.2.0 #9）：协议与生命周期 —— 每项各起独立 server（CI 安全）
+// 0.2.0：协议与生命周期 —— 每项各起独立 server（CI 安全）
 {
   const raw = (proc) => { let b = ""; const lines = []; proc.stdout.on("data", (d) => { b += d; let nl; while ((nl = b.indexOf("\n")) !== -1) { lines.push(b.slice(0, nl)); b = b.slice(nl + 1); } }); return lines; };
   const waitFor = async (pred, ms) => { const end = Date.now() + ms; while (Date.now() < end) { if (pred()) return true; await sleepMs(50); } return pred(); };
@@ -1314,7 +1314,7 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
       const got = await waitFor(() => lines.length >= 2, 5000);
       const msgs = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } });
       const pong = await s.rpc("ping");
-      check("B6：坏 JSON → -32700、批量 → -32600（id null），之后照常应答",
+      check("坏 JSON → -32700、批量 → -32600（id null），之后照常应答",
         got && msgs[0]?.error?.code === -32700 && msgs[0]?.id === null && msgs[1]?.error?.code === -32600 && pong?.result !== undefined, JSON.stringify(msgs).slice(0, 120));
     } finally { s.proc.kill(); }
   }
@@ -1346,7 +1346,7 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
     const t0 = Date.now();
     s.proc.stdin.end();
     const done = await Promise.race([exited(s.proc), sleepMs(5000).then(() => false)]);
-    check("B6：客户端关闭 stdin → server 自行退出（≤ 3 s）", done === true && Date.now() - t0 < 4500, `exit=${s.proc.exitCode} after ${Date.now() - t0} ms`);
+    check("客户端关闭 stdin → server 自行退出（≤ 3 s）", done === true && Date.now() - t0 < 4500, `exit=${s.proc.exitCode} after ${Date.now() - t0} ms`);
     if (!done) s.proc.kill("SIGKILL");
   }
   // SIGTERM → exit within the shutdown budget
@@ -1356,7 +1356,7 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
     const t0 = Date.now();
     s.proc.kill("SIGTERM");
     const done = await Promise.race([exited(s.proc), sleepMs(5000).then(() => false)]);
-    check("B6：SIGTERM → 有序退出（≤ 3 s）", done === true && Date.now() - t0 < 4500, `code=${s.proc.exitCode} signal=${s.proc.signalCode} after ${Date.now() - t0} ms`);
+    check("SIGTERM → 有序退出（≤ 3 s）", done === true && Date.now() - t0 < 4500, `code=${s.proc.exitCode} signal=${s.proc.signalCode} after ${Date.now() - t0} ms`);
     if (!done) s.proc.kill("SIGKILL");
   }
   // SIGTERM with a browser open: the browser is closed (profile unlocked) and the server exits in time
@@ -1375,7 +1375,7 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
     const done = await Promise.race([exited(s.proc), sleepMs(6000).then(() => false)]);
     const after = lockTarget();
     const locked = after !== null && after !== before;
-    check("B6：开着浏览器收到 SIGTERM → 关闭浏览器（profile 解锁）并在 3 s 内退出",
+    check("开着浏览器收到 SIGTERM → 关闭浏览器（profile 解锁）并在 3 s 内退出",
       /browser_id/.test(String(bl?.content?.[0]?.text)) && done === true && Date.now() - t0 < 4000 && !locked, `exit after ${Date.now() - t0} ms, lock=${locked}${before ? ` (a lock was there before: ${before})` : ""}, launch=${String(bl?.content?.[0]?.text).slice(0, 40)}`);
     if (!done) s.proc.kill("SIGKILL");
   }
@@ -1415,7 +1415,7 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
       const pingMs = Date.now() - t0;
       const snap = await s.call("mac_ax_state", { app: "Fake" });
       await click;
-      check("B6：慢输入进行中 ping 立即应答；随后的观察排在它之后（不读到点击前状态）",
+      check("慢输入进行中 ping 立即应答；随后的观察排在它之后（不读到点击前状态）",
         pong?.result !== undefined && pingMs < 500 && !snap?.isError && order().join(",") === "act,snapshot", `ping ${pingMs} ms, order ${order().join(",")}`);
       // a slow observation does not hold up an input that comes after it
       const fastIdx = jsonOf(await s.call("mac_find", { app: "Fake", text: "quick" })).matches?.[0]?.i;
@@ -1424,7 +1424,7 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
       await sleepMs(100);
       const c2 = await s.call("mac_click", { element_index: fastIdx });
       await slowFind;
-      check("B6：慢观察不阻塞其后的输入（观察不进输入队列）", Number.isInteger(fastIdx) && !c2?.isError && order().join(",") === "act-fast,find", `idx ${fastIdx} order ${order().join(",")} ${String(c2?.content?.[0]?.text).slice(0, 60)}`);
+      check("慢观察不阻塞其后的输入（观察不进输入队列）", Number.isInteger(fastIdx) && !c2?.isError && order().join(",") === "act-fast,find", `idx ${fastIdx} order ${order().join(",")} ${String(c2?.content?.[0]?.text).slice(0, 60)}`);
     } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
   }
 }
@@ -1433,10 +1433,10 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
 const bl = await call("browser_launch", { headless: true });
 check("browser_launch", bl?.content?.[0]?.text?.includes("browser_id"), bl?.content?.[0]?.text?.slice(0, 50));
 {
-  // pre-review P7: the blank tab browser_launch started with may be the active page — it takes over again when
+  // The blank tab browser_launch started with may be the active page — it takes over again when
   // the active tab is closed (a blank tab that a page opened may not; see 7a)
   const T = (r) => String(r?.content?.[0]?.text);
-  // pre-review P12: the first tab is not judged from inside — noracu sends it to about:blank itself at launch
+  // The first tab is not judged from inside — noracu sends it to about:blank itself at launch
   const r0 = await call("browser_read");
   check("the session's first tab, sent to about:blank by noracu at launch, is the blank page the session was opened on: it is read", !r0?.isError, T(r0).slice(0, 80));
   const t0 = JSON.parse(T(await call("browser_tabs"))).tabs;
@@ -1454,7 +1454,7 @@ const br = await call("browser_read");
 check("browser_read", br?.content?.[0]?.text?.toLowerCase?.().includes("example"), String(br?.content?.[0]?.text).slice(0, 50));
 const bss = await call("browser_screenshot");
 check("browser_screenshot", bss?.content?.[0]?.type === "image", `img ${(bss?.content?.[0]?.data?.length / 1024).toFixed(0)}KB`);
-// browser element_index 双模式（R2）：snapshot 索引列表 → 按索引点击（点击会导航离开，放在 screenshot 之后）
+// browser element_index 双模式：snapshot 索引列表 → 按索引点击（点击会导航离开，放在 screenshot 之后）
 const elText = String(bs?.content?.[0]?.text);
 check("browser_snapshot 元素索引列表", elText.includes("[clickable elements"), elText.split("[clickable")[1]?.slice(0, 40));
 const mIdx = elText.match(/\[(\d+)\] a "/);
@@ -1488,7 +1488,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   const tclose = await call("browser_tabs", { action: "close", tab_id: mine?.tab_id });
   const t4 = await tabs();
   check("browser_tabs close: a tab it opened is closed; the active page stays", !tclose?.isError && T(tclose).includes(`closed tab ${mine?.tab_id}`) && t4.length === 2 && t4.find((t) => t.active)?.tab_id === first.tab_id, T(tclose).slice(0, 120));
-  // pre-review P6 — the active tab is the one closed: the first open tab takes its place and the result names it
+  // The active tab is the one closed: the first open tab takes its place and the result names it
   await call("browser_tabs", { action: "new" });
   const own2 = (await tabs()).find((t) => t.opened_by_browser_tabs);
   await call("browser_snapshot");
@@ -1498,7 +1498,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
     own2?.active === true && !cl2?.isError && T(cl2).includes(`the active page is tab ${first.tab_id} (`) && (await tabs()).find((t) => t.active)?.tab_id === first.tab_id && stale2?.isError === true && T(stale2).includes("element_no_longer_valid"), `${T(cl2).slice(0, 110)} | ${T(stale2).slice(0, 50)}`);
   // the active page closes itself (a tab the page opened may), then another tab is closed: the active page is
   // the first open tab — never "none" while a tab is open
-  // (pre-review P7) a blank tab that the page opened shares that page's origin and can read it: listed, never
+  // a blank tab that the page opened shares that page's origin and can read it: listed, never
   // selected. A web page the page opened can be selected — and, opened by a script, it can close itself
   const selBlank = await call("browser_tabs", { action: "select", tab_id: popup?.tab_id });
   check("browser_tabs select: a blank tab that the page opened is not made the active page (tab_not_selectable)",
@@ -1531,7 +1531,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   const cl4 = await call("browser_tabs", { action: "close", tab_id: own4?.tab_id });
   check("browser_tabs list: a tab whose page does not answer has title null, the others keep theirs, and it can still be closed",
     withHung.find((t) => t.tab_id === own4?.tab_id)?.title === null && typeof withHung.find((t) => t.tab_id === first.tab_id)?.title === "string" && !cl4?.isError && T(cl4).includes(`closed tab ${own4?.tab_id}`) && T(cl4).includes(`the active page is tab ${first.tab_id} (`), `${JSON.stringify(withHung).slice(0, 150)} | ${T(cl4).slice(0, 80)}`);
-  // pre-review P7 — the tab that takes over when the active tab goes is never one select would refuse. With the
+  // The tab that takes over when the active tab goes is never one select would refuse. With the
   // first tab on a blob: page (beside the blank popup and the blob popup), closing the active tab leaves no
   // active page: the page tools say so and read nothing, and browser_tabs still lists, refuses, and opens a tab
   await call("browser_evaluate", { js: "location.href = URL.createObjectURL(new Blob(['<title>t1b</title><p>FIRST-TAB-BLOB</p>'], { type: 'text/html' })); 1" });
@@ -1549,7 +1549,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   const new5 = await call("browser_tabs", { action: "new", url: "https://example.com" });
   const read6 = await call("browser_read");
   check("… and browser_tabs new gives the session an active page again", !new5?.isError && T(new5).includes("it is the active page now") && !read6?.isError && T(read6).toLowerCase().includes("example"), `${T(new5).slice(0, 80)} | ${T(read6).slice(0, 40)}`);
-  // pre-review P8 — what a tab must show to become the active page it must show to be read: the active tab takes
+  // What a tab must show to become the active page it must show to be read: the active tab takes
   // itself to a blob it made (a page can; a local file or chrome:// it cannot reach — measured). It stays the
   // active page, every page tool but browser_navigate refuses with nothing read and nothing sent (the blob page
   // would leave for another address on any input), and browser_navigate takes the tab back to a page
@@ -1578,7 +1578,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   check("a load that failed: browser_navigate says navigate_failed, the page tools return active_page_not_allowed and name a load that failed, and browser_navigate works on the tab again",
     navDead?.isError === true && T(navDead).includes("navigate_failed") && Boolean(errTab) && readDead?.isError === true && T(readDead).startsWith(`ERROR: active_page_not_allowed: the active tab ${own6?.tab_id} shows chrome-error://chromewebdata/ (a load that failed) — `) && T(readDead).endsWith("(delivery=not_delivered, retry=safe)") && !navBack?.isError && T(navBack).includes("navigated: https://example.com"),
     `${T(navDead).slice(0, 70)} | ${T(readDead).slice(0, 110)} | ${T(navBack).slice(0, 40)}`);
-  // pre-review P10 — in the moment after the failed load the tab's address still reads as the old one, and a
+  // In the moment after the failed load the tab's address still reads as the old one, and a
   // snapshot or a screenshot taken then would be of the page that is arriving (measured: the check at the start
   // of the call passed 60 times out of 60). Each is asked for with no pause, and neither is handed over
   const navDead2 = await call("browser_navigate", { url: `http://127.0.0.1:${deadPort}/` });
@@ -1588,7 +1588,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   check("right after a load that failed, with no pause: browser_snapshot and browser_screenshot are not answered from the page that is arriving",
     snapDead?.isError === true && !T(snapDead).includes("[clickable elements") && navDead2?.isError === true && shotDead?.isError === true && shotDead?.content?.[0]?.type === "text" && !navBack2?.isError && T(navBack2).includes("navigated: https://example.com"),
     `${T(snapDead).slice(0, 120)} | ${T(shotDead).slice(0, 120)}`);
-  // pre-review P8 — the active tab closes itself and the very next call is a click by element_index (no
+  // The active tab closes itself and the very next call is a click by element_index (no
   // browser_tabs call in between): the index is refused, and the tab that took over — the same page, the same
   // element in the same place — is not clicked
   await call("browser_evaluate", { js: "window.open(location.href); 1" });
@@ -1606,7 +1606,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   check("the active tab closed itself and the next call is browser_click with an element_index read on it: refused (element_no_longer_valid), and the tab that took over — on the same page — was not clicked",
     Boolean(twin2) && !sel7?.isError && Boolean(link7) && stale7?.isError === true && T(stale7).includes("element_no_longer_valid") && T(stale7).includes("delivery=not_delivered") && !now7.some((t) => t.tab_id === twin2?.tab_id)
     && now7.find((t) => t.active)?.tab_id === own6?.tab_id && /^https:\/\/example\.com\/?$/.test(String(now7.find((t) => t.active)?.url)), `${T(stale7).slice(0, 110)} | ${JSON.stringify(now7.map((t) => [t.tab_id, String(t.url).slice(0, 24), t.active]))}`);
-  // pre-review P10 — what a read returns is handed over only if the active page still passes when the read is
+  // What a read returns is handed over only if the active page still passes when the read is
   // done: the page goes to a blob it made half a second after a read that waits for a selector has started, and
   // the selector exists only on the blob — the read is answered by the blob page and must not be returned
   await call("browser_evaluate", { js: "setTimeout(() => { location.href = URL.createObjectURL(new Blob(['<title>late</title><p id=late>LATE-BLOB-TEXT</p>'], { type: 'text/html' })); }, 500); 1" });
@@ -1615,7 +1615,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   check("a read that was answered by a page the tools refuse (the tab changed while it waited for a selector) is not handed over: active_page_not_allowed, none of that page's text",
     late10?.isError === true && T(late10).startsWith(`ERROR: active_page_not_allowed: the active tab ${own6?.tab_id} shows blob:`) && T(late10).includes("it changed while the page was being read, and what came back is not handed over") && !T(late10).includes("LATE-BLOB-TEXT") && !nav10?.isError,
     `${T(late10).slice(0, 200)} | ${T(nav10).slice(0, 40)}`);
-  // pre-review P11 — the second look also asks where the tab has been, not only what it shows at the end: while a
+  // The second look also asks where the tab has been, not only what it shows at the end: while a
   // read waits for a selector the page goes to a blob and from there back to an http page that has the element.
   // The tab ends on a page the tools read, and which page answered is not known — the read is not handed over
   await call("browser_evaluate", { js: "document.querySelectorAll('a').forEach((x) => x.remove()); setTimeout(() => { location.href = URL.createObjectURL(new Blob(['<title>via</title><script>setTimeout(() => { location.href = `https://example.com/`; }, 60);</script>'], { type: 'text/html' })); }, 400); 1" });
@@ -1640,7 +1640,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
     [ev11, th11, rd11].every((r) => r?.isError === true && T(r).includes("active_page_not_allowed") && T(r).includes("is not handed over")) && !T(ev11).includes("HASH-RESULT") && T(ev11).includes("while the script ran") && T(ev11).endsWith("(delivery=delivered_unverified, retry=unsafe)")
     && !T(th11).includes("THROWN-PAYLOAD") && T(th11).endsWith("(delivery=unknown, retry=unsafe)") && !T(rd11).includes("GETTER-PAYLOAD") && T(rd11).endsWith("(delivery=not_delivered, retry=safe)") && closed11.every((r) => !r?.isError) && (await tabs()).find((t) => t.active)?.tab_id === own6?.tab_id,
     `${T(ev11).slice(0, 150)} | ${T(th11).slice(0, 150)} | ${T(rd11).slice(0, 150)}`);
-  // pre-reviews P12, P13 — a snapshot's tree, element list and address are read one after the other. When the page
+  // a snapshot's tree, element list and address are read one after the other. When the page
   // navigates in between — here it puts a fragment on its address, then calls history.pushState, while its
   // elements are being listed — the parts may be of two pages, and nothing is returned
   await call("browser_evaluate", { js: "(() => { const a = document.querySelector('a'); a.getAttribute = function (n) { const go = window.__go; window.__go = null; if (go) go(); return Element.prototype.getAttribute.call(this, n); }; })(); window.__go = () => { location.hash = 'frag'; }; 1" });
@@ -1649,11 +1649,11 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   const moved12 = await call("browser_snapshot");
   const stale12 = await call("browser_click", { element_index: 0 });
   // … and when listing the elements is cut short by a move to another document — Playwright's error for that,
-  // thrown here by the page's hook — the snapshot says page_changed, not "elements unavailable" (pre-review P14)
+  // thrown here by the page's hook — the snapshot says page_changed, not "elements unavailable"
   await call("browser_evaluate", { js: "window.__go = () => { throw new Error('Execution context was destroyed, most likely because of a navigation'); }; 1" });
   const gone14 = await call("browser_snapshot");
   const again12 = await call("browser_snapshot");
-  // pre-review P15 — a snapshot whose element list could not be read (here the page's hook throws) says so, and
+  // A snapshot whose element list could not be read (here the page's hook throws) says so, and
   // leaves no list from the snapshot before it to click by
   await call("browser_evaluate", { js: "window.__go = () => { throw new Error('WALK-FAILED-15'); }; 1" });
   const walk15 = await call("browser_snapshot");
@@ -1672,7 +1672,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   await call("browser_evaluate", { js: "Object.defineProperty(document.body, 'innerText', { configurable: true, get() { delete document.body.innerText; history.replaceState({}, '', '/later2'); return 'WHOLE13-TEXT'; } }); 1" });
   const whole13 = await call("browser_read");
   const wholeAgain13 = await call("browser_read");
-  // pre-review P14 — a read of the whole page that ends in an error because the page navigated says page_changed
+  // A read of the whole page that ends in an error because the page navigated says page_changed
   // as well: by the count (the page calls history.replaceState, then throws), and by Playwright's message for a
   // read that a move to another document cut short — thrown here by the page; measured: such a read is rejected
   // before the navigation is reported. An error with no navigation behind it is handed over as it is
@@ -1688,12 +1688,12 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
     && thrownGone14?.isError === true && T(thrownGone14) === "ERROR: page_changed: the page navigated while it was being read, so the read was not finished — call browser_read again (delivery=not_delivered, retry=safe)"
     && thrownPlain14?.isError === true && T(thrownPlain14).includes("PLAIN-THROWN-14") && !T(thrownPlain14).includes("page_changed"),
     `${T(thrownNav14).slice(0, 120)} | ${T(thrownGone14).slice(0, 90)} | ${T(thrownPlain14).slice(0, 90)}`);
-  // pre-review P15 — a script's result and a screenshot name no page: they are handed over when the page navigated
+  // A script's result and a screenshot name no page: they are handed over when the page navigated
   // between pages the tools read while they were made, with a note that says so (for the screenshot the page
   // changes its address every 15 ms for a second and a half)
   const ev15 = await call("browser_evaluate", { js: "history.pushState({}, '', '/ev15'); 'EV15-VALUE'" });
   const evPlain15 = await call("browser_evaluate", { js: "'EV15-PLAIN'" });
-  // pre-review P16 — the note says so when the page navigated more than once, and a script that threw carries it too
+  // The note says so when the page navigated more than once, and a script that threw carries it too
   const evTwice16 = await call("browser_evaluate", { js: "history.pushState({}, '', '/a16'); history.pushState({}, '', '/b16'); 'EV16-VALUE'" });
   const evThrew16 = await call("browser_evaluate", { js: "history.pushState({}, '', '/c16'); throw new Error('BOOM-16')" });
   await call("browser_evaluate", { js: "(() => { const end = Date.now() + 1500; const t = setInterval(() => { if (Date.now() > end) { clearInterval(t); return; } history.replaceState({}, '', '/tick' + (Date.now() % 1000)); }, 15); })(); 1" });
@@ -1720,7 +1720,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
     && !twiceRead14?.isError && T(twiceRead14).startsWith("[the page navigated 2 times while this was read: it showed https://example.com/later when the read began and shows https://example.com/end14 now — the text may be of either, or of a page in between]\n") && T(twiceRead14).includes("LATE14-TEXT")
     && whole13?.isError === true && T(whole13).startsWith("ERROR: page_changed: the page navigated while it was being read (it shows https://example.com/later2 now)") && T(whole13).endsWith("(delivery=not_delivered, retry=safe)") && !T(whole13).includes("WHOLE13-TEXT") && !wholeAgain13?.isError && T(wholeAgain13).includes("LATE12-TEXT") && !T(wholeAgain13).startsWith("["),
     `${T(movedRead12).slice(0, 150)} | ${T(plainRead12).slice(0, 30)} | ${T(whole13).slice(0, 120)} | ${T(wholeAgain13).slice(0, 30)}`);
-  // pre-review P13 — an element_index is not used after any navigation of the page: a reload leaves the address
+  // An element_index is not used after any navigation of the page: a reload leaves the address
   // as it was, and the link in the same place
   const link13 = T(await call("browser_snapshot")).match(/\[(\d+)\] a "/);
   await call("browser_evaluate", { js: "window.__old = 1; location.reload(); 1" });
@@ -1734,7 +1734,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   const after13 = (await tabs()).find((t) => t.active);
   check("an element_index read before a reload of the same address is not used after it: element_no_longer_valid (page navigated since snapshot), nothing clicked",
     Boolean(link13) && reloaded13 && stale13?.isError === true && T(stale13).includes("element_no_longer_valid: page navigated since snapshot") && /^https:\/\/example\.com\/?$/.test(String(after13?.url)), `${T(stale13).slice(0, 110)} | ${String(after13?.url).slice(0, 40)}`);
-  // pre-review P12 — a refusal that a tool throws reaches the client whole, delivery marker included (the address is
+  // A refusal that a tool throws reaches the client whole, delivery marker included (the address is
   // shown up to 60 characters), and a read that fails once the page stopped passing is answered with the refusal —
   // not with the error the page threw
   const fd = await fresh();
@@ -1749,7 +1749,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
     && thrown12?.isError === true && T(thrown12).startsWith(`ERROR: active_page_not_allowed: the active tab ${fe?.tab_id} shows about:blank#q now — it changed while the page was being read`) && !T(thrown12).includes("GETTER-THROWN") && T(thrown12).endsWith("(delivery=not_delivered, retry=safe)")
     && closed12.every((r) => !r?.isError) && (await tabs()).find((t) => t.active)?.tab_id === own6?.tab_id,
     `${T(long12).slice(0, 130)} | ${T(thrown12).slice(0, 170)}`);
-  // pre-review P13 — any navigation that a tab on its first blank page reports ends its standing, also one whose
+  // Any navigation that a tab on its first blank page reports ends its standing, also one whose
   // address is about:blank again (measured: history.back() to a blank page a local file had reached is one)
   const ff = await fresh();
   const push13 = await call("browser_evaluate", { js: "history.pushState(null, '', 'about:blank'); 'PUSH-RESULT'" });
@@ -1759,7 +1759,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
     push13?.isError === true && T(push13).startsWith(`ERROR: active_page_not_allowed: the active tab ${ff?.tab_id} shows about:blank (not the blank page noracu opened the tab on) now — it changed while the script ran`) && !T(push13).includes("PUSH-RESULT")
     && read13?.isError === true && T(read13).startsWith(`ERROR: active_page_not_allowed: the active tab ${ff?.tab_id} shows about:blank (not the blank page noracu opened the tab on) — `) && !closed13?.isError && (await tabs()).find((t) => t.active)?.tab_id === own6?.tab_id,
     `${T(push13).slice(0, 150)} | ${T(read13).slice(0, 110)}`);
-  // pre-review P9 — an element_index read before the active tab went to a page the tools refuse is not used once
+  // An element_index read before the active tab went to a page the tools refuse is not used once
   // the tab is back, even when only browser_tabs was called in between (the blob page goes back by itself)
   const link9 = T(await call("browser_snapshot")).match(/\[(\d+)\] a "/);
   await call("browser_evaluate", { js: "location.href = URL.createObjectURL(new Blob(['<title>back</title><script>setTimeout(() => history.back(), 1500);</script>'], { type: 'text/html' })); 1" });
@@ -1770,7 +1770,7 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   const after9 = (await tabs()).find((t) => t.active);
   check("an element_index read before the active tab went to a page the tools refuse is not used once the tab is back: element_no_longer_valid, nothing clicked",
     Boolean(link9) && Boolean(away9) && Boolean(back9) && stale9?.isError === true && T(stale9).includes("element_no_longer_valid") && /^https:\/\/example\.com\/?$/.test(String(after9?.url)), `${T(stale9).slice(0, 100)} | ${String(after9?.url).slice(0, 40)}`);
-  // pre-review P9 — a blank page counts only while it is the one noracu opened the tab on. The active tab (opened
+  // A blank page counts only while it is the one noracu opened the tab on. The active tab (opened
   // with browser_tabs, has loaded a page) takes itself to about:blank: refused like any page the tools do not
   // read, not selectable, and not the tab that takes over — while a tab still on its first blank page is read
   await call("browser_evaluate", { js: "location.href = 'about:blank'; 1" });
@@ -1822,7 +1822,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
   const fixtureUrl = pathToFileURL(fixturePath).href;
   const popupUrl = pathToFileURL(popupPath).href;
   const manyUrl = pathToFileURL(manyPath).href;
-  // review 0.2.6 #8: a page longer than every cap
+  // a page longer than every cap
   const longPath = join(dir, "long.html");
   writeFileSync(longPath, `<!doctype html><html><head><meta charset='utf-8'><title>Long Page</title></head><body>${Array.from({ length: 600 }, (_, i) => `<p>Paragraph number ${i} of the long fixture page.</p>`).join("")}<p>LAST-LINE-MARKER</p></body></html>`);
   const longUrl = pathToFileURL(longPath).href;
@@ -1832,15 +1832,15 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
     await s.call("browser_launch", { headless: true });
     await s.call("browser_navigate", { url: fixtureUrl });
     const navSame = await s.call("browser_navigate", { url: `${fixtureUrl}#sec` });
-    check("t07：同文档导航回报 no response 与 delivery", !navSame?.isError && say(navSame).includes("no response") && say(navSame).includes("delivery="), say(navSame).slice(0, 80));
+    check("同文档导航回报 no response 与 delivery", !navSame?.isError && say(navSame).includes("no response") && say(navSame).includes("delivery="), say(navSame).slice(0, 80));
 
     const snapText = say(await s.call("browser_snapshot"));
-    check("t07：不同 placeholder 的两个 input 获得不同名称", snapText.includes('input "Alpha placeholder"') && snapText.includes('input "Beta placeholder"'), snapText.split("[clickable")[1]?.slice(0, 90));
-    // t07 review: typed text never becomes an element's name (stable identity); a submit input is named by its value
+    check("不同 placeholder 的两个 input 获得不同名称", snapText.includes('input "Alpha placeholder"') && snapText.includes('input "Beta placeholder"'), snapText.split("[clickable")[1]?.slice(0, 90));
+    // Typed text never becomes an element's name (stable identity); a submit input is named by its value
     await s.call("browser_fill", { selector: "#in3", value: "typed-xyz-123" });
     const snapTyped = say(await s.call("browser_snapshot"));
     const elPart = snapTyped.split("[clickable")[1] || "";
-    check("t07 复核：输入的文字不进入元素名；submit 按 value 命名", elPart.length > 0 && !elPart.includes("typed-xyz-123") && elPart.includes('input "Send Form"'), elPart.slice(0, 120));
+    check("输入的文字不进入元素名；submit 按 value 命名", elPart.length > 0 && !elPart.includes("typed-xyz-123") && elPart.includes('input "Send Form"'), elPart.slice(0, 120));
     // a fill without `value` (a client that passes `text`, as the typing tools take) must not clear the field and
     // call that verified
     const noValue = await s.call("browser_fill", { selector: "#in3", text: "other" });
@@ -1855,7 +1855,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
     const mUnder = snapText.match(/\[(\d+)\] button "Covered Action"/);
     const clickUnder = mUnder ? await s.call("browser_click", { element_index: Number(mUnder[1]) }) : null;
     const evalUnder = await s.call("browser_evaluate", { js: "window.__underClicked" });
-    check("t07：被遮挡按钮点击报 occluded/not_actionable 且不触发 onclick",
+    check("被遮挡按钮点击报 occluded/not_actionable 且不触发 onclick",
       Boolean(mUnder) && clickUnder?.isError && /\b(occluded|not_actionable):/.test(say(clickUnder))
         && say(clickUnder).includes("delivery=not_delivered, retry=safe")
         && /^false$/m.test(say(evalUnder)) && say(evalUnder).includes("delivery="),
@@ -1863,13 +1863,13 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
 
     const mDis = snapText.match(/\[(\d+)\] button "Disabled Action"/);
     const clickDis = mDis ? await s.call("browser_click", { element_index: Number(mDis[1]) }) : null;
-    check("t07：disabled 按钮点击报 not_actionable", Boolean(mDis) && clickDis?.isError && say(clickDis).includes("not_actionable:") && say(clickDis).includes("delivery=not_delivered, retry=safe"), say(clickDis).slice(0, 80));
+    check("disabled 按钮点击报 not_actionable", Boolean(mDis) && clickDis?.isError && say(clickDis).includes("not_actionable:") && say(clickDis).includes("delivery=not_delivered, retry=safe"), say(clickDis).slice(0, 80));
 
     const opened = await s.call("browser_evaluate", { js: `Boolean(window.open(${JSON.stringify(popupUrl)}, "_blank"))` });
     await sleepMs(400);
     const titleAfter = await s.call("browser_evaluate", { js: "document.title" });
     const snapAfterPopup = say(await s.call("browser_snapshot"));
-    check("t07：window.open 打开新页后活动页不变",
+    check("window.open 打开新页后活动页不变",
       /^true$/m.test(say(opened)) && say(titleAfter).includes("Noracu Fixture Main")
         && !say(titleAfter).includes("Popup Second Page")
         && snapAfterPopup.includes("Covered Action") && !snapAfterPopup.includes("Popup Only Button"),
@@ -1877,7 +1877,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
 
     await s.call("browser_navigate", { url: manyUrl });
     const snapMany = say(await s.call("browser_snapshot"));
-    check("t07：超过 100 个可交互元素时提示 truncated 与遗漏数", snapMany.includes("truncated") && snapMany.includes("25 left out"), snapMany.slice(-90));
+    check("超过 100 个可交互元素时提示 truncated 与遗漏数", snapMany.includes("truncated") && snapMany.includes("25 left out"), snapMany.slice(-90));
 
     await s.call("browser_navigate", { url: longUrl });
     const snapLong = say(await s.call("browser_snapshot"));
@@ -1891,7 +1891,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
     const scDown = await s.call("browser_scroll", { direction: "down", pages: 1 });
     await s.call("browser_scroll", { direction: "up", pages: 2 });
     const scTop = await s.call("browser_scroll", { direction: "up", pages: 1 });
-    check("t07：browser_scroll 回报 scrollY 变化与 did not move",
+    check("browser_scroll 回报 scrollY 变化与 did not move",
       !scDown?.isError && /scrollY 0 → [1-9]\d*/.test(say(scDown)) && say(scDown).includes("delivery=delivered_verified")
         && !scTop?.isError && say(scTop).includes("did not move") && say(scTop).includes("delivery=delivered_unverified"),
       `${say(scDown).slice(0, 50)} | ${say(scTop).slice(0, 50)}`);
@@ -2025,7 +2025,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
           && t1.length === 2 && t1.some((t) => /\/b$/.test(t.url)) && nt.startsWith("opened tab") && t2.length === 3
           && [...t0, ...t1, ...t2].every((t) => !String(t.url).includes("/user") && !String(t.url).startsWith("chrome://")),
         `${l.slice(0, 60)} | t0=${t0.length} t1=${t1.length} t2=${t2.length} | ${nt.slice(0, 50)}`);
-      // pre-review P22: a blank tab from browser_tabs new is quick, readable and selectable again, and leaves no stray tab;
+      // A blank tab from browser_tabs new is quick, readable and selectable again, and leaves no stray tab;
       // the window browser_launch opened is not closed with browser_tabs close
       const t5 = Date.now();
       const nb = say(await s.call("browser_tabs", { action: "new" }));
@@ -2036,7 +2036,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
       const again = say(await s.call("browser_tabs", { action: "select", tab_id: nbId }));
       const firstClose = say(await s.call("browser_tabs", { action: "close", tab_id: t0[0].tab_id }));
       const during = await pages();
-      check("chrome:true（P22）：browser_tabs new 不带网址 —— 很快开好、能读、切走再切回能选中；不多出别的标签；browser_launch 开的那个窗口不能用 browser_tabs close 关",
+      check("chrome:true：browser_tabs new 不带网址 —— 很快开好、能读、切走再切回能选中；不多出别的标签；browser_launch 开的那个窗口不能用 browser_tabs close 关",
         nb.startsWith("opened tab") && dt < 5000 && !snapBlank?.isError && back.includes("is the active page now") && again.includes("is the active page now")
           && firstClose.includes("tab_not_owned") && during.length === yoursAtStart.length + 4,
         `${nb.slice(0, 40)} ${dt}ms | ${say(snapBlank).slice(0, 40)} | ${again.slice(0, 40)} | ${firstClose.slice(0, 30)} | pages=${during.length} (yours ${yoursAtStart.length})`);
@@ -2051,7 +2051,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
         `${close.slice(0, 110)} | ${againL.slice(0, 50)} | pages after: ${after.map((t) => t.url.replace(base, "")).join(",")}`);
     } finally { await stop(s); }
     // the person quits Chrome while noracu is attached: browser_close (no browser_id) says the connection ended and
-    // that noracu's tabs may still be open — not "no such browser", not a clean close (pre-review P25)
+    // that noracu's tabs may still be open — not "no such browser", not a clean close
     {
       const dir2 = mkdtempSync(join(tmpdir(), "noracu-fakechrome2-"));
       const proc2 = spawn(chromium.executablePath(), ["--headless=new", `--user-data-dir=${dir2}`, "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: "ignore" });
@@ -2066,7 +2066,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
         again = say(await q.call("browser_launch", { chrome: true }));
       } finally { await stop(q); try { proc2.kill("SIGKILL"); } catch {} try { rmSync(dir2, { recursive: true, force: true }); } catch {} }
       const lostId = (attached.match(/"browser_id":"([^"]+)"/) || [])[1];
-      check("chrome:true（P25）：attach 后 Chrome 被退出 —— browser_close（不带 id）报 chrome_disconnected、点名那个会话、说标签可能还开着；之后可以重新 attach（这里 Chrome 已退，所以报 chrome_not_reachable）",
+      check("chrome:true：attach 后 Chrome 被退出 —— browser_close（不带 id）报 chrome_disconnected、点名那个会话、说标签可能还开着；之后可以重新 attach（这里 Chrome 已退，所以报 chrome_not_reachable）",
         attached.includes('"attached":true') && gone.includes("chrome_disconnected") && lostId && gone.includes(lostId) && gone.includes("may still be open")
           && (again.includes("chrome_not_reachable") || again.includes("chrome_attach_failed")) && !again.includes("already open"),
         `${attached.slice(0, 40)} | ${gone.slice(0, 120)} | ${again.slice(0, 60)}`);
@@ -2074,7 +2074,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
     // NORACU_CHROME_TABS=all: your http(s) tabs are listed, selectable and read; still never closed by noracu
     const a = await spawnServer({ NORACU_ALLOW_CHROME: "1", NORACU_CHROME_DIR: dir, NORACU_CHROME_TABS: "all", NORACU_ENABLE_EVAL: "1", NORACU_ALLOW_FILE_URL: "1" });
     try {
-      // two attaches at once: one session (pre-review P22)
+      // two attaches at once: one session
       const both = (await Promise.all([a.call("browser_launch", { chrome: true }), a.call("browser_launch", { chrome: true })])).map(say);
       const la = both.find((x) => x.includes('"attached":true')) || "";
       const ta = JSON.parse(say(await a.call("browser_tabs", { action: "list" })) || "{}").tabs || [];
@@ -2120,7 +2120,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
         moved = pg2.url();
         await cb2.close();
       } catch (e) { moved = `error ${String(e).slice(0, 60)}`; }
-      await a.call("browser_tabs", { action: "list" });   // a call that only lists does not move the active page (P24)
+      await a.call("browser_tabs", { action: "list" });   // a call that only lists does not move the active page
       const navAfter = say(await a.call("browser_navigate", { url: `${base}/x` }));
       const ta2 = JSON.parse(say(await a.call("browser_tabs", { action: "list" })) || "{}").tabs || [];
       const versions = (await pages()).filter((t) => String(t.url).startsWith("chrome://version")).length;
@@ -2128,7 +2128,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
       const byeAgain = say(await a.call("browser_close", {}));
       await sleepMs(500);
       const left = await pages();
-      check("chrome:true + all（P22）：选中你的标签时 browser_tabs new 也由 noracu 自己的标签打开（opener 不是你的标签）；关掉它后当前页回到 noracu 的标签而不是你的；你把选中的标签换到 chrome:// 后它不再是当前页、browser_navigate 不覆盖它；browser_close 后你的标签都还在",
+      check("chrome:true + all：选中你的标签时 browser_tabs new 也由 noracu 自己的标签打开（opener 不是你的标签）；关掉它后当前页回到 noracu 的标签而不是你的；你把选中的标签换到 chrome:// 后它不再是当前页、browser_navigate 不覆盖它；browser_close 后你的标签都还在",
         nn.startsWith("opened tab") && opUrl === "about:blank" && nnClose.includes("closed tab") && !nnClose.includes("/user")
           && sel2.includes("is the active page now") && moved.startsWith("chrome://version") && navAfter.includes("left http(s)") && navAfter.includes("nothing was done") && !navAfter.includes("version")
           && versions === 2 && ta2.every((x) => !String(x.url).includes("/user2")) && ta2.find((x) => x.active)?.noracu_tab === true
@@ -2147,7 +2147,7 @@ check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.
 const po = await call("phone_ocr");
 checkPhone("phone_ocr", po, !po?.isError, String(po?.content?.[0]?.text).slice(0, 70));
 
-// 8. 注入回归（panel P0 验收判据）：恶意载荷不得执行
+// 8. 注入回归（验收判据）：恶意载荷不得执行
 const PWN = "/tmp/noracu-pwned";
 try { unlinkSync(PWN); } catch {}
 const inj1 = await call("mac_menu_command", { app: 'x"); do shell script "touch /tmp/noracu-pwned"; //', command: "test" });
@@ -2160,38 +2160,38 @@ const badClick = await call("mac_click", { x: "not-a-number", y: 100 });
 check("校验层：非法坐标被拒", badClick?.isError && String(badClick?.content?.[0]?.text).includes("finite numbers"), badClick?.content?.[0]?.text?.slice(0, 60));
 const badNav = await call("browser_navigate", { url: "javascript:alert(1)" });
 check("校验层：javascript: URL 被拒", badNav?.isError, badNav?.content?.[0]?.text?.slice(0, 60));
-// 9. element_index 双模式（P0-2）：无效索引报 element_no_longer_valid（成功路径已受控实测验证）
+// 9. element_index 双模式：无效索引报 element_no_longer_valid（成功路径已受控实测验证）
 const badIdx = await call("mac_click", { element_index: 99999 });
 check("element_index：无效索引报错", badIdx?.isError && String(badIdx?.content?.[0]?.text).includes("element_no_longer_valid"), badIdx?.content?.[0]?.text?.slice(0, 70));
 const badNeg = await call("mac_click", { element_index: -1 });
 check("element_index：负数被校验层拒", badNeg?.isError && String(badNeg?.content?.[0]?.text).includes("non-negative"), badNeg?.content?.[0]?.text?.slice(0, 60));
 
-// 10. 行为关门（G1）：file:// 默认拒 / READ_ONLY 名单 / DISABLE_EVAL —— 各起独立 server 进程验证
+// 10. 行为关门：file:// 默认拒 / READ_ONLY 名单 / DISABLE_EVAL —— 各起独立 server 进程验证
 {
   const s = await spawnServer();
   try {
     const r = await s.call("browser_navigate", { url: "file:///etc/hosts" });
-    check("G1：file:// 默认被拒", r?.isError && String(r?.content?.[0]?.text).includes("NORACU_ALLOW_FILE_URL"), r?.content?.[0]?.text?.slice(0, 80));
+    check("file:// 默认被拒", r?.isError && String(r?.content?.[0]?.text).includes("NORACU_ALLOW_FILE_URL"), r?.content?.[0]?.text?.slice(0, 80));
   } finally { s.proc.kill(); }
 }
 {
   const s = await spawnServer({ NORACU_READ_ONLY: "1" });
   try {
     const r1 = await s.call("mac_click", { x: 100, y: 100 });
-    check("G1：READ_ONLY 拒 mac_click", r1?.isError && String(r1?.content?.[0]?.text).includes("NORACU_READ_ONLY"), r1?.content?.[0]?.text?.slice(0, 80));
+    check("READ_ONLY 拒 mac_click", r1?.isError && String(r1?.content?.[0]?.text).includes("NORACU_READ_ONLY"), r1?.content?.[0]?.text?.slice(0, 80));
     const r2 = await s.call("phone_launch");
-    check("G1：READ_ONLY 拒 phone_launch", r2?.isError && String(r2?.content?.[0]?.text).includes("NORACU_READ_ONLY"), r2?.content?.[0]?.text?.slice(0, 80));
+    check("READ_ONLY 拒 phone_launch", r2?.isError && String(r2?.content?.[0]?.text).includes("NORACU_READ_ONLY"), r2?.content?.[0]?.text?.slice(0, 80));
   } finally { s.proc.kill(); }
 }
 {
   const s = await spawnServer({ NORACU_DISABLE_EVAL: "1" });
   try {
     const r = await s.call("browser_evaluate", { js: "1" });
-    check("G1：DISABLE_EVAL 拒 browser_evaluate", r?.isError && String(r?.content?.[0]?.text).includes("NORACU_DISABLE_EVAL"), r?.content?.[0]?.text?.slice(0, 80));
+    check("DISABLE_EVAL 拒 browser_evaluate", r?.isError && String(r?.content?.[0]?.text).includes("NORACU_DISABLE_EVAL"), r?.content?.[0]?.text?.slice(0, 80));
   } finally { s.proc.kill(); }
 }
 {
-  // S1 (next-steps R3): without NORACU_ENABLE_EVAL=1 browser_evaluate is refused before anything runs (no
+  // Without NORACU_ENABLE_EVAL=1 browser_evaluate is refused before anything runs (no
   // browser needed: the check comes first); the tool stays listed and mac_status says it is off
   const s = await spawnServer({ NORACU_ENABLE_EVAL: "" });
   try {
@@ -2199,7 +2199,7 @@ check("element_index：负数被校验层拒", badNeg?.isError && String(badNeg?
     const t = String(r?.content?.[0]?.text || "");
     await s.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "eval-off" } });
     const listed = (await s.rpc("tools/list"))?.result?.tools?.some((x) => x.name === "browser_evaluate");
-    check("S1：browser_evaluate 默认关 —— 未设 NORACU_ENABLE_EVAL=1 时 eval_disabled，什么都不跑；工具仍列出",
+    check("browser_evaluate 默认关 —— 未设 NORACU_ENABLE_EVAL=1 时 eval_disabled，什么都不跑；工具仍列出",
       r?.isError && t.startsWith("ERROR: eval_disabled: browser_evaluate is off by default") && t.includes("NORACU_ENABLE_EVAL=1") && t.includes("delivery=not_delivered, retry=safe") && listed === true,
       t.slice(0, 110));
   } finally { s.proc.kill(); }
@@ -2252,7 +2252,7 @@ check("element_index：负数被校验层拒", badNeg?.isError && String(badNeg?
     check("attached over a DevTools port: a DevTools window is never the active page (the test could not run)", false, String(e?.message || e).split("\n")[0].slice(0, 200));
   } finally { s.proc.kill(); if (app) await app.close().catch(() => {}); }
 }
-// Browser results that were reported from another page, or with more certainty than there was (audit, the browser layer).
+// Browser results that were reported from another page, or with more certainty than there was.
 {
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -2461,13 +2461,13 @@ check("element_index：负数被校验层拒", badNeg?.isError && String(badNeg?
     // (more checks of this block go above this line)
   } finally { s.proc.kill(); web.close(); try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 }
-// 10b. t07 CI 安全门禁（各起独立 server 进程）：READ_ONLY 优先拒 cdp_port / 未记录端口需 ALLOW_CDP=any / browser_scroll direction 校验
+// 10b. CI 安全门禁（各起独立 server 进程）：READ_ONLY 优先拒 cdp_port / 未记录端口需 ALLOW_CDP=any / browser_scroll direction 校验
 {
   const s = await spawnServer({ NORACU_READ_ONLY: "1", NORACU_ALLOW_CDP: "1" });
   try {
     const r = await s.call("browser_launch", { cdp_port: 9 });
     const txt = String(r?.content?.[0]?.text || "");
-    check("t07：READ_ONLY + ALLOW_CDP=1 拒绝 browser_launch cdp_port", r?.isError && txt.includes("blocked by NORACU_READ_ONLY=1") && txt.includes("delivery=not_delivered, retry=safe"), txt.slice(0, 90));
+    check("READ_ONLY + ALLOW_CDP=1 拒绝 browser_launch cdp_port", r?.isError && txt.includes("blocked by NORACU_READ_ONLY=1") && txt.includes("delivery=not_delivered, retry=safe"), txt.slice(0, 90));
   } finally { s.proc.kill(); }
 }
 {
@@ -2475,7 +2475,7 @@ check("element_index：负数被校验层拒", badNeg?.isError && String(badNeg?
   try {
     const r = await s.call("browser_launch", { cdp_port: 9222 });
     const txt = String(r?.content?.[0]?.text || "");
-    check("t07：ALLOW_CDP=1 拒绝未由本进程打开的 cdp_port（提示 NORACU_ALLOW_CDP=any）", r?.isError && txt.includes("NORACU_ALLOW_CDP=any") && txt.includes("delivery=not_delivered, retry=safe"), txt.slice(0, 90));
+    check("ALLOW_CDP=1 拒绝未由本进程打开的 cdp_port（提示 NORACU_ALLOW_CDP=any）", r?.isError && txt.includes("NORACU_ALLOW_CDP=any") && txt.includes("delivery=not_delivered, retry=safe"), txt.slice(0, 90));
   } finally { s.proc.kill(); }
 }
 {
@@ -2483,14 +2483,14 @@ check("element_index：负数被校验层拒", badNeg?.isError && String(badNeg?
   try {
     const r = await s.call("browser_scroll", { direction: "sideways" });
     const txt = String(r?.content?.[0]?.text || "");
-    check("t07：validateArgs 拒绝 browser_scroll 非法 direction", r?.isError && txt.includes("up|down|left|right") && txt.includes("delivery=not_delivered, retry=safe"), txt.slice(0, 90));
-    // t07 review: browser_type is capped at 2000 chars so its time budget always covers the 20 ms/key typing
+    check("validateArgs 拒绝 browser_scroll 非法 direction", r?.isError && txt.includes("up|down|left|right") && txt.includes("delivery=not_delivered, retry=safe"), txt.slice(0, 90));
+    // browser_type is capped at 2000 chars so its time budget always covers the 20 ms/key typing
     const t = await s.call("browser_type", { text: "x".repeat(2001) });
     const tt = String(t?.content?.[0]?.text || "");
-    check("t07 复核：browser_type 超过 2000 字符被校验层拒（指向 browser_fill）", t?.isError && tt.includes("1-2000") && tt.includes("browser_fill") && tt.includes("delivery=not_delivered, retry=safe"), tt.slice(0, 90));
+    check("browser_type 超过 2000 字符被校验层拒（指向 browser_fill）", t?.isError && tt.includes("1-2000") && tt.includes("browser_fill") && tt.includes("delivery=not_delivered, retry=safe"), tt.slice(0, 90));
   } finally { s.proc.kill(); }
 }
-// 10c. t10 CI 安全门禁（各起独立 server 进程）：READ_ONLY 通知与 web_accessibility 门禁、通知空串校验、AXSecureTextField 不回显、全量 validateArgs
+// 10c. CI 安全门禁（各起独立 server 进程）：READ_ONLY 通知与 web_accessibility 门禁、通知空串校验、AXSecureTextField 不回显、全量 validateArgs
 {
   const { mkdtempSync, writeFileSync, readFileSync: rf, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -2516,12 +2516,12 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
     const axSt = await s.call("mac_ax_state", { app: "Fake", web_accessibility: true });
     const axFd = await s.call("mac_find", { app: "Fake", role: "button", web_accessibility: true });
     const logged = rf(axLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    check("t10：READ_ONLY 拒绝 mac_wait notification / mac_notifications / mac_clipboard_read",
+    check("READ_ONLY 拒绝 mac_wait notification / mac_notifications / mac_clipboard_read",
       wNotif?.isError && say(wNotif).includes("NORACU_READ_ONLY")
         && nList?.isError && say(nList).includes("NORACU_READ_ONLY")
         && cRead?.isError && say(cRead).includes("NORACU_READ_ONLY"),
       `${say(wNotif).slice(0, 45)} | ${say(nList).slice(0, 40)}`);
-    check("t10：READ_ONLY 下 mac_ax_state / mac_find 强制 web_accessibility=false（不改目标应用无障碍模式）",
+    check("READ_ONLY 下 mac_ax_state / mac_find 强制 web_accessibility=false（不改目标应用无障碍模式）",
       !axSt?.isError && !axFd?.isError && logged.length === 2 && logged.every((x) => x.web_accessibility === false),
       JSON.stringify(logged));
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
@@ -2541,10 +2541,10 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
     const badBClip = await s.call("browser_screenshot", { clip: { x: 0, y: 0, width: 0, height: 10 } });
     const badBRead = await s.call("browser_read", { selector: "" });
     const badWebAx = await s.call("mac_ax_state", { web_accessibility: "yes" });
-    check("t10：validateArgs 拒绝 mac_notifications 空 id / expected_app / expected_title",
+    check("validateArgs 拒绝 mac_notifications 空 id / expected_app / expected_title",
       nEmptyId?.isError && nEmptyApp?.isError && nEmptyTitle?.isError && /non-empty string/.test(say(nEmptyId)),
       say(nEmptyId).slice(0, 80));
-    check("t10：validateArgs 覆盖截图裁剪 / 缺省键名 / 滚动页数 / 窗口空 app / 浏览器截图与读取参数",
+    check("validateArgs 覆盖截图裁剪 / 缺省键名 / 滚动页数 / 窗口空 app / 浏览器截图与读取参数",
       [badRegion, badKeyMissing, badScrollPages, badWinApp, badBShot, badBClip, badBRead, badWebAx].every((r) => r?.isError),
       `${say(badRegion).slice(0, 40)} | ${say(badBShot).slice(0, 40)}`);
   } finally { s.proc.kill(); }
@@ -2573,7 +2573,7 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
     const sv = await s.call("mac_set_value", { element_index: pwIdx, value: "top-secret-pw-99" });
     const nf = await s.call("mac_notifications", { action: "dismiss", id: "gone-1" });
     const cliPy = readFileSync(new URL("../imctl/src/imctl/cli.py", import.meta.url), "utf8");
-    check("t10：mac_set_value 密码框不回显明文（显示 secure field — value not shown）；imctl type 不回显文本；消失通知报 notification_not_found",
+    check("mac_set_value 密码框不回显明文（显示 secure field — value not shown）；imctl type 不回显文本；消失通知报 notification_not_found",
       !sv?.isError && say(sv).includes("(secure field — value not shown)") && !say(sv).includes("top-secret-pw-99")
         && nf?.isError && say(nf).startsWith("ERROR: notification_not_found:")
         && !cliPy.includes("typed {args.text!r}") && cliPy.includes("typed {len(args.text)} chars"),
@@ -2584,21 +2584,21 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
 // 11a. 0.1.1：imctl 随包附带 —— 包内 imctl/src/imctl/cli.py 必须存在（CI 安全：只查文件系统）
 check("imctl bundled (imctl/src/imctl/cli.py)", existsSync(new URL("../imctl/src/imctl/cli.py", import.meta.url)));
 
-// 11. G10（F9 dogfooding）：iPhone 层失败必须是工具错误 —— imctl 缺失时 phone_status 报 isError（CI 安全：不碰真实硬件）
+// 11. iPhone 层失败必须是工具错误 —— imctl 缺失时 phone_status 报 isError（CI 安全：不碰真实硬件）
 {
   const s = await spawnServer({ NORACU_IMCTL_DIR: "/nonexistent" });
   try {
     const r = await s.call("phone_status");
-    check("G10：imctl 缺失时 phone_status 报 isError", r?.isError && String(r?.content?.[0]?.text).includes("ERROR"), r?.content?.[0]?.text?.slice(0, 80));
-    // R17 §2: a phone input that could not run says nothing was sent
+    check("imctl 缺失时 phone_status 报 isError", r?.isError && String(r?.content?.[0]?.text).includes("ERROR"), r?.content?.[0]?.text?.slice(0, 80));
+    // A phone input that could not run says nothing was sent
     const t = await s.call("phone_tap", { x: 0.5, y: 0.5 });
-    check("R17：phone_tap 无法运行 imctl → delivery=not_delivered, retry=safe", t?.isError && /delivery=not_delivered, retry=safe/.test(String(t?.content?.[0]?.text)), String(t?.content?.[0]?.text).slice(-90));
+    check("phone_tap 无法运行 imctl → delivery=not_delivered, retry=safe", t?.isError && /delivery=not_delivered, retry=safe/.test(String(t?.content?.[0]?.text)), String(t?.content?.[0]?.text).slice(-90));
   } finally { s.proc.kill(); }
 }
 
 // 11b–11f run a fake python as imctl; CI sets NORACU_IMCTL_DIR=/nonexistent for the whole run,
 // so each of them points it at its own temp dir (the fake ignores the module path; only the cwd must exist).
-// 11b. F39：imctl 子进程卡死（忽略 SIGTERM）时 server 仍须响应 —— 假 python：pyobjc 探测通过，
+// 11b. imctl 子进程卡死（忽略 SIGTERM）时 server 仍须响应 —— 假 python：pyobjc 探测通过，
 // 每次 imctl 调用都挂起且忽略 SIGTERM。旧实现（execFileSync）下连 ping 都无响应（CI 安全：不碰硬件）
 {
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
@@ -2614,7 +2614,7 @@ check("imctl bundled (imctl/src/imctl/cli.py)", existsSync(new URL("../imctl/src
     await new Promise((r) => setTimeout(r, 500)); // the hung imctl child is running now
     const t0 = Date.now();
     const pong = await Promise.race([s.rpc("ping"), new Promise((r) => setTimeout(() => r(null), 3000))]);
-    check("F39：imctl 卡死时 server 仍响应 ping", pong?.result !== undefined && !statusDone, pong ? `${Date.now() - t0} ms, phone_status still pending` : "no reply within 3 s");
+    check("imctl 卡死时 server 仍响应 ping", pong?.result !== undefined && !statusDone, pong ? `${Date.now() - t0} ms, phone_status still pending` : "no reply within 3 s");
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
@@ -2654,7 +2654,7 @@ check("imctl bundled (imctl/src/imctl/cli.py)", existsSync(new URL("../imctl/src
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-// 11c. F40：并发的 phone_* 调用必须串行执行（不交错点击/粘贴/剪贴板）—— 假 python 记录每次 imctl
+// 11c. 并发的 phone_* 调用必须串行执行（不交错点击/粘贴/剪贴板）—— 假 python 记录每次 imctl
 // 调用的起止时刻；两个调用同时发出，第二个必须在第一个结束后才开始（CI 安全：不碰硬件）
 {
   const { mkdtempSync, writeFileSync, readFileSync: rf, rmSync } = await import("node:fs");
@@ -2669,11 +2669,11 @@ check("imctl bundled (imctl/src/imctl/cli.py)", existsSync(new URL("../imctl/src
     await Promise.all([s.call("phone_status"), s.call("phone_status")]);
     const ev = rf(log, "utf8").trim().split("\n").map((l) => l.split(" "));
     const ok = ev.length === 4 && ev[0][0] === "start" && ev[1][0] === "end" && ev[2][0] === "start" && ev[3][0] === "end" && Number(ev[2][1]) >= Number(ev[1][1]);
-    check("F40：并发 phone_* 调用串行执行", ok, ev.map((e) => e.join(" ")).join(" | "));
+    check("并发 phone_* 调用串行执行", ok, ev.map((e) => e.join(" ")).join(" | "));
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-// 11d. F39/F40：超时路径 —— 第一次调用卡死（自身与一个孙进程都忽略 SIGTERM，持续写心跳），
+// 11d. 超时路径 —— 第一次调用卡死（自身与一个孙进程都忽略 SIGTERM，持续写心跳），
 // NORACU_PHONE_TIMEOUT_MS=1000：调用须在 ~1 s 返回 imctl_timeout；整个进程组随后被 SIGKILL；
 // 下一次 phone 调用要等进程组真正退出才开始，且开始后不再有任何心跳（CI 安全：不碰硬件）
 {
@@ -2708,12 +2708,12 @@ echo '{"running": false}'
     const next = Number((lines.find((l) => l[0] === "next") || [])[1]);
     const lastBeat = Math.max(...lines.filter((l) => l[0] === "c" || l[0] === "g").map((l) => Number(l[1])));
     const timedOut = r1?.isError && String(r1?.content?.[0]?.text).startsWith("ERROR: imctl_timeout:");
-    check("F39：超时 ~1 s 内返回 imctl_timeout", timedOut && dt < 2500, `${dt} ms`);
-    check("F40：被杀进程组退出后下一次调用才开始，且无孙进程残留", !r2?.isError && Number.isFinite(next) && lastBeat < next, `last beat ${lastBeat}, next start ${next}`);
+    check("超时 ~1 s 内返回 imctl_timeout", timedOut && dt < 2500, `${dt} ms`);
+    check("被杀进程组退出后下一次调用才开始，且无孙进程残留", !r2?.isError && Number.isFinite(next) && lastBeat < next, `last beat ${lastBeat}, next start ${next}`);
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-// 11e. F40：客户端取消（notifications/cancelled）一个还在排队的 phone 调用 —— 轮到它时直接跳过，
+// 11e. 客户端取消（notifications/cancelled）一个还在排队的 phone 调用 —— 轮到它时直接跳过，
 // 不启动 imctl，也不回响应（MCP：被取消的请求不应答）；第一个调用照常完成（CI 安全：不碰硬件）
 {
   const { mkdtempSync, writeFileSync, readFileSync: rf, rmSync } = await import("node:fs");
@@ -2739,7 +2739,7 @@ echo '{"running": false}'
     await new Promise((r) => setTimeout(r, 2500)); // the skipped job's turn has passed by now
     const pong = await s.rpc("ping");             // the queue and the server still work
     const runs = rf(log, "utf8").trim().split("\n").length;
-    check("F40：已取消的排队调用不执行、不应答", !r1?.isError && !secondReplied && runs === 1 && pong?.result !== undefined, `runs=${runs} replied=${secondReplied}`);
+    check("已取消的排队调用不执行、不应答", !r1?.isError && !secondReplied && runs === 1 && pong?.result !== undefined, `runs=${runs} replied=${secondReplied}`);
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
@@ -2821,7 +2821,7 @@ setTimeout(() => { process.stderr.write("fake download failed"); process.exit(1)
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-// 11f. F39/F40：MCP 客户端通常用 SIGTERM 停止 server —— 正在运行的 imctl 进程组（自身与孙进程
+// 11f. MCP 客户端通常用 SIGTERM 停止 server —— 正在运行的 imctl 进程组（自身与孙进程
 // 都忽略 SIGTERM、持续写心跳）须随 server 一起被杀，server 照常退出（未开浏览器时）（CI 安全：不碰硬件）
 {
   const { mkdtempSync, writeFileSync, readFileSync: rf, existsSync: ex, rmSync } = await import("node:fs");
@@ -2848,7 +2848,7 @@ while true; do echo c >> "${log}"; sleep 0.1; done
     const atExit = count();
     await new Promise((r) => setTimeout(r, 600));   // any survivor would keep beating meanwhile
     const later = count();
-    check("F40：SIGTERM 时 server 退出并带走 imctl 进程组", res !== null && (res.code === 143 || res.signal === "SIGTERM") && atExit > 0 && later === atExit,
+    check("SIGTERM 时 server 退出并带走 imctl 进程组", res !== null && (res.code === 143 || res.signal === "SIGTERM") && atExit > 0 && later === atExit,
       `exit=${JSON.stringify(res)} beats at exit ${atExit}, 600 ms later ${later}`);
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
@@ -2913,7 +2913,7 @@ if (LOCAL && TE_READY()) {
     return { seen, r: await pending };
   };
   const notVerified = (x) => x.seen && !x.r?.isError && /via physical click/.test(gsay(x.r)) && !/delivery=delivered_verified/.test(gsay(x.r));
-  // R31 (0.2.4): an interfered case counts only when the click was sent in the gap. When the interference
+  // 0.2.4: an interfered case counts only when the click was sent in the gap. When the interference
   // lands before the last pre-send check, the click is refused with nothing sent — that attempt says nothing
   // about the after-click verdict, so it is repeated (up to 5 attempts). Any delivered_verified fails at once;
   // a refusal that does not say delivery=not_delivered fails too. Every result is logged in full.
@@ -2969,11 +2969,11 @@ if (LOCAL && TE_READY()) {
   }
 } else if (LOCAL) check("0.2.2 本机空档：测试文档就绪", false, "TextEdit test document missing");
 
-// B2 本机：元素消失后用旧 index —— element_no_longer_valid，什么都不发（关文档本身就是测试收尾）
+// 本机：元素消失后用旧 index —— element_no_longer_valid，什么都不发（关文档本身就是测试收尾）
 if (LOCAL) {
   // by window id: TextEdit may also show a "… copy" window whose title contains the test document's name
   const wl = TE_READY() ? jsonOf(await call("mac_windows", { app: "TextEdit" })) : {};
-  // R31 (0.2.4): TextEdit can show more than one window with this title; try each one
+  // 0.2.4: TextEdit can show more than one window with this title; try each one
   const wids = (wl.windows || []).filter((w) => String(w.title ?? "").startsWith(TE_DOC)).map((w) => w.id);
   let bold;
   for (const wid of wids) {
@@ -2984,14 +2984,14 @@ if (LOCAL) {
   // "contains": TextEdit may have made a "… copy" of the test document after the format changes above
   spawnSync("/usr/bin/osascript", ["-e", `tell application "TextEdit" to close (every document whose name contains "${TE_DOC}") saving no`], { timeout: 10000 });
   await sleepMs(500);
-  if (!Number.isInteger(bold)) console.log(`   B2 fixture: TextEdit windows (on and off screen): ${JSON.stringify((jsonOf(await call("mac_windows", { app: "TextEdit", include_offscreen: true })).windows || []).filter((w) => w.title).map((w) => [w.title, w.onscreen]))}`);
+  if (!Number.isInteger(bold)) console.log(`   fixture: TextEdit windows (on and off screen): ${JSON.stringify((jsonOf(await call("mac_windows", { app: "TextEdit", include_offscreen: true })).windows || []).filter((w) => w.title).map((w) => [w.title, w.onscreen]))}`);
   const r = Number.isInteger(bold) ? await call("mac_click", { element_index: bold }) : null;
-  if (r) console.log(`   B2 result: ${String(r?.content?.[0]?.text)}`);
-  check("B2：元素已消失 → element_no_longer_valid（不误点）", r?.isError && /element_no_longer_valid/.test(String(r?.content?.[0]?.text)) && /delivery=not_delivered/.test(String(r?.content?.[0]?.text)),
+  if (r) console.log(`   result: ${String(r?.content?.[0]?.text)}`);
+  check("元素已消失 → element_no_longer_valid（不误点）", r?.isError && /element_no_longer_valid/.test(String(r?.content?.[0]?.text)) && /delivery=not_delivered/.test(String(r?.content?.[0]?.text)),
     r ? String(r?.content?.[0]?.text).slice(0, 100) : `fixture: bold index missing (TextEdit windows titled ${TE_DOC}…: ${JSON.stringify(wids)})`);
-} else skipLocal("B2：元素已消失 → element_no_longer_valid（不误点）");
+} else skipLocal("元素已消失 → element_no_longer_valid（不误点）");
 
-// 0.3.0（RF-3 / GH-1，CI 安全）：电脑前的人优先。假的 ioreg（NORACU_IOREG）按顺序报出"上一次键鼠事件的时刻"，
+// 0.3.0（CI 安全）：电脑前的人优先。假的 ioreg（NORACU_IOREG）按顺序报出"上一次键鼠事件的时刻"，
 // AX 引擎和 cliclick 也是假的 —— 没有任何事件发到这台 Mac 上
 {
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
@@ -3025,13 +3025,13 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
   const say = (r) => String(r?.content?.[0]?.text);
   const s = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_IOREG: fakeIoreg, NORACU_TEST_WHEEL: fakeWheel, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "2", NORACU_NO_BGPOST: "1" });
   try {
-    // RF-3: a call that sent nothing must not make the person's event of that moment look like noracu's own
+    // A call that sent nothing must not make the person's event of that moment look like noracu's own
     writeFileSync(clickLog, ""); idle(QUIET());
     const t1 = Date.now();
     const refused = await s.call("mac_click", { x: 600, y: 100 });   // occluded: refused, nothing sent
     idle(t1, NOW());                                                  // the person used the mouse while that call ran, and goes on
     const after = await s.call("mac_click", { x: 100, y: 100 });
-    check("RF-3：一次什么都没发的调用（occluded）之后，那一刻有人动过键鼠 → 下一个输入返回 user_active、不发（那次事件不算 noracu 自己的）",
+    check("一次什么都没发的调用（occluded）之后，那一刻有人动过键鼠 → 下一个输入返回 user_active、不发（那次事件不算 noracu 自己的）",
       refused?.isError && /^ERROR: occluded: /.test(say(refused)) && after?.isError && /^ERROR: user_active: /.test(say(after)) && read(clickLog) === "",
       `${say(refused).slice(0, 40)} | ${say(after).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
     // …and a call that did send still counts: the event of that moment is noracu's own, the next call goes ahead
@@ -3040,7 +3040,7 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
     const sent = await s.call("mac_click", { x: 100, y: 100 });
     idle(t2 + 1);
     const next = await s.call("mac_click", { x: 100, y: 10 });
-    check("RF-3：发出过输入的调用照旧算数 —— 那一刻的事件是 noracu 自己的，下一个输入照常发出",
+    check("发出过输入的调用照旧算数 —— 那一刻的事件是 noracu 自己的，下一个输入照常发出",
       !sent?.isError && !next?.isError && /c:100,100/.test(read(clickLog)) && /c:100,10\n/.test(read(clickLog)),
       `${say(sent).slice(0, 50)} | ${say(next).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
     // the same for input that does not go through cliclick (a named key through the engine's HID path)
@@ -3049,17 +3049,17 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
     const key1 = await s.call("mac_key", { key: "return" });
     idle(t3 + 1);
     const key2 = await s.call("mac_key", { key: "return" });
-    check("RF-3：不经 cliclick 发出的输入（引擎按键）同样算数 —— 下一个输入不被当成有人在用", !key1?.isError && /^pressed return/.test(say(key1)) && !key2?.isError && /^pressed return/.test(say(key2)),
+    check("不经 cliclick 发出的输入（引擎按键）同样算数 —— 下一个输入不被当成有人在用", !key1?.isError && /^pressed return/.test(say(key1)) && !key2?.isError && /^pressed return/.test(say(key2)),
       `${say(key1).slice(0, 60)} | ${say(key2).slice(0, 60)}`);
-    // GH-1: quiet when the call left the queue, in use right before the pointer is taken → nothing is sent
+    // Quiet when the call left the queue, in use right before the pointer is taken → nothing is sent
     idle(QUIET(), NOW()); writeFileSync(clickLog, "");
     const taken = await s.call("mac_click", { x: 100, y: 100 });
-    check("GH-1：出队时没人用键鼠、动指针前一刻有人用了 → user_active，一个事件都不发；两次检查都做了；delivery 只写一遍",
+    check("出队时没人用键鼠、动指针前一刻有人用了 → user_active，一个事件都不发；两次检查都做了；delivery 只写一遍",
       taken?.isError && /^ERROR: user_active: /.test(say(taken)) && say(taken).split("delivery=not_delivered").length === 2 && read(clickLog) === "" && samples() === 3,
       `${say(taken).slice(0, 70)} | samples=${samples()} | click=${JSON.stringify(read(clickLog))}`);
     idle(QUIET()); writeFileSync(clickLog, "");
     const calm = await s.call("mac_click", { x: 100, y: 100 });
-    check("GH-1：两次检查都安静 → 照常点击", !calm?.isError && /c:100,100/.test(read(clickLog)) && samples() === 2, `${say(calm).slice(0, 60)} | samples=${samples()}`);
+    check("两次检查都安静 → 照常点击", !calm?.isError && /c:100,100/.test(read(clickLog)) && samples() === 2, `${say(calm).slice(0, 60)} | samples=${samples()}`);
     // a drag is refused the same way, and no stray mouse-up follows
     const one = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
     idle(QUIET()); writeFileSync(clickLog, "");
@@ -3067,17 +3067,17 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
     const dragSent = read(clickLog);
     idle(QUIET(), NOW()); writeFileSync(clickLog, "");
     const dragNo = await s.call("mac_drag", { from_index: one, to_index: one });
-    check("GH-1：拖动同理 —— 安静时发出（dd/du），动指针前有人用了键鼠 → user_active，不发、也不补发松开鼠标",
+    check("拖动同理 —— 安静时发出（dd/du），动指针前有人用了键鼠 → user_active，不发、也不补发松开鼠标",
       !dragOk?.isError && /dd:/.test(dragSent) && /du:/.test(dragSent) && dragNo?.isError && /^ERROR: user_active: /.test(say(dragNo)) && read(clickLog) === "",
       `${say(dragOk).slice(0, 50)} | ${say(dragNo).slice(0, 50)} | click=${JSON.stringify(read(clickLog))}`);
-    // S4A-s1-me-1 / -reviewer-1: an input that posts no keyboard or mouse event (AXPress) does not make the
+    // an input that posts no keyboard or mouse event (AXPress) does not make the
     // person's event of that moment look like noracu's own
     idle(QUIET()); writeFileSync(clickLog, "");
     const t4 = Date.now();
     const pressed = await s.call("mac_click", { element_index: one, mechanism: "semantic" });
     idle(t4 + 1, NOW());                                              // the person moved the mouse while it ran, and goes on
     const afterPress = await s.call("mac_click", { x: 100, y: 100 });
-    check("S4A：语义点击（AXPress，不发键鼠事件）之后，那一刻有人动过键鼠 → 下一个输入 user_active、不发",
+    check("语义点击（AXPress，不发键鼠事件）之后，那一刻有人动过键鼠 → 下一个输入 user_active、不发",
       !pressed?.isError && afterPress?.isError && /^ERROR: user_active: /.test(say(afterPress)) && read(clickLog) === "",
       `${say(pressed).slice(0, 50)} | ${say(afterPress).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
     // a wheel scroll on an element is noracu's own event too: the next input is not taken for the person's
@@ -3163,24 +3163,27 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
       wheelNoStart?.isError && /could not be started/.test(say(wheelNoStart)) && /delivery=not_delivered, retry=safe/.test(say(wheelNoStart)) && read(wheelLog) === ""
         && afterNoStart?.isError && /^ERROR: user_active: /.test(say(afterNoStart)) && read(clickLog) === "",
       `${say(wheelNoStart).slice(0, 130)} | ${say(afterNoStart).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
-    // audit S5A-s2-D-2: a left double / triple click through cliclick is its dc: / tc: verb, not two or three c:
+    // A left double / triple click through cliclick is its dc: / tc: verb, not two or three c:
+    // (a fresh index: the one read for the first checks of this block can be past its 30 s on a loaded Mac)
+    const oneTri = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
+    await sleepMs(200);
     idle(QUIET()); writeFileSync(clickLog, "");
     const dbl = await s.call("mac_click", { x: 100, y: 100, count: 2 });
-    const tri = await s.call("mac_click", { element_index: one, mechanism: "physical", count: 3 });
-    check("审计 S5A：cliclick 的双击 / 三击用 dc: / tc:（不是连发 c:，那样应用收到的是单击）",
+    const tri = await s.call("mac_click", { element_index: oneTri, mechanism: "physical", count: 3 });
+    check("cliclick 的双击 / 三击用 dc: / tc:（不是连发 c:，那样应用收到的是单击）",
       !dbl?.isError && !tri?.isError && /^dc:100,100$/m.test(read(clickLog)) && /^tc:/m.test(read(clickLog)) && !/^c:/m.test(read(clickLog)),
       `${say(dbl).slice(0, 40)} | ${say(tri).slice(0, 40)} | click=${JSON.stringify(read(clickLog))}`);
-    // audit S5A-s1-X-1: a stop file made while the idle time is read (ioreg) still stops the input
+    // A stop file made while the idle time is read (ioreg) still stops the input
     const stopFile = join(dir, "stop-now");
     const s3 = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_IOREG: fakeIoreg, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "2", NORACU_NO_BGPOST: "1", NORACU_STOP_FILE: stopFile });
     try {
       idleTouching(stopFile, QUIET()); writeFileSync(clickLog, "");
       const late = await s3.call("mac_click", { x: 100, y: 100 });
-      check("审计 S5A：读空闲时间（ioreg）期间建了停止文件 → 输入照样被停（user_stopped），一个事件都不发",
+      check("读空闲时间（ioreg）期间建了停止文件 → 输入照样被停（user_stopped），一个事件都不发",
         late?.isError && /^ERROR: user_stopped: /.test(say(late)) && read(clickLog) === "" && samples() === 1,
         `${say(late).slice(0, 70)} | samples=${samples()} | click=${JSON.stringify(read(clickLog))}`);
     } finally { s3.proc.kill(); rmSync(stopFile, { force: true }); }
-    // review S5C (X, D, G): a client cancel that arrives while the idle time is read still cancels the input — no
+    // A client cancel that arrives while the idle time is read still cancels the input — no
     // event, no answer (MCP: a cancelled request is not answered)
     idleSlow(1500, QUIET()); writeFileSync(clickLog, "");
     const idCancel = 90101;
@@ -3193,10 +3196,10 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
     await new Promise((r) => setTimeout(r, 2500));
     s.proc.stdout.off("data", onOut);
     const pongC = await s.rpc("ping");
-    check("复审 S5C：读空闲时间（ioreg）期间客户端取消 → 输入不发、不应答，队列照常",
+    check("读空闲时间（ioreg）期间客户端取消 → 输入不发、不应答，队列照常",
       !cancelReplied && read(clickLog) === "" && samples() === 1 && pongC?.result !== undefined,
       `replied=${cancelReplied} samples=${samples()} click=${JSON.stringify(read(clickLog))}`);
-    // R3 (2026-11-17): a key of the person's that is less than 2 s old — the Return that sent the request — is
+    // 2026-11-17: a key of the person's that is less than 2 s old — the Return that sent the request — is
     // waited out once: with nothing more from them the click goes out after the rest of the 2 s; when they go on,
     // it is refused after the wait, and the answer says that noracu waited
     idle(Date.now() - 600); writeFileSync(clickLog, "");
@@ -3205,7 +3208,7 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
     const waitedMs = Date.now() - w0, waitedSamples = samples(), waitedLog = read(clickLog);
     idle(Date.now() - 600, NOW()); writeFileSync(clickLog, "");
     const goesOn = await s.call("mac_click", { x: 100, y: 100 });
-    check("R3: the person's key 0.6 s ago, nothing more from them → noracu waits out the rest of the 2 s and clicks; they go on → user_active after the wait, nothing sent",
+    check("the person's key 0.6 s ago, nothing more from them → noracu waits out the rest of the 2 s and clicks; they go on → user_active after the wait, nothing sent",
       !waited?.isError && /c:100,100/.test(waitedLog) && waitedMs >= 1300 && waitedSamples >= 2
         && goesOn?.isError && /^ERROR: user_active: /.test(say(goesOn)) && /after noracu had waited/.test(say(goesOn)) && read(clickLog) === "",
       `${say(waited).slice(0, 50)} ${waitedMs}ms samples=${waitedSamples} | ${say(goesOn).slice(0, 120)}`);
@@ -3219,7 +3222,7 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
       const phoneNo = await s2.call("phone_tap", { x: 0.5, y: 0.001 });
       idle(t5 + 1, NOW());                                            // the person moved the mouse while imctl ran, and goes on
       const afterPhone = await s2.call("mac_click", { x: 100, y: 100 });
-      check("S4B：手机输入被 imctl 先拒（什么都没发）之后，那一刻有人动过键鼠 → 下一个输入 user_active、不发",
+      check("手机输入被 imctl 先拒（什么都没发）之后，那一刻有人动过键鼠 → 下一个输入 user_active、不发",
         phoneNo?.isError && /out_of_screen/.test(say(phoneNo)) && afterPhone?.isError && /^ERROR: user_active: /.test(say(afterPhone)) && read(clickLog) === "",
         `${say(phoneNo).slice(0, 60)} | ${say(afterPhone).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
       // an imctl that could not import its modules sent nothing either: the person's event of that moment still
@@ -3340,7 +3343,7 @@ b.writeUInt32BE(1728, 16); b.writeUInt32BE(1117, 20); require("fs").writeFileSyn
     const say = (r) => String(r?.content?.[0]?.text || "");
     const shot = await s.call("mac_screenshot", { display: 1 });
     const meta = (() => { try { return JSON.parse(shot?.content?.find((c) => c.type === "text")?.text || "{}"); } catch { return {}; } })();
-    check("审计 S5A：mac_screenshot 截副屏时按那块屏自己的 scale 算 logical_size（副屏 1x、主屏 2x）",
+    check("mac_screenshot 截副屏时按那块屏自己的 scale 算 logical_size（副屏 1x、主屏 2x）",
       !shot?.isError && meta.scale === 1 && JSON.stringify(meta.logical_size) === "[1728,1117]", JSON.stringify(meta).slice(0, 160));
     const local = await s.call("mac_screenshot", { display: 1, region: { x: 8, y: 60, w: 1000, h: 600 } });
     const none = await s.call("mac_screenshot", { display: 5, region: { x: 0, y: 0, w: 10, h: 10 } });
@@ -3352,7 +3355,7 @@ b.writeUInt32BE(1728, 16); b.writeUInt32BE(1117, 20); require("fs").writeFileSyn
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-// audit S5A-s3-G-4: mac_app launch with cdp_port asks the app rules first — an IDE with a terminal on the default deny
+// mac_app launch with cdp_port asks the app rules first — an IDE with a terminal on the default deny
 // list is not launched with a DevTools port (the browser tools that would drive it are not judged by app rules)
 {
   const { mkdtempSync, writeFileSync, rmSync, mkdirSync } = await import("node:fs");
@@ -3378,7 +3381,7 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
   try {
     const r = await s.call("mac_app", { action: "launch", app: "Cursor", cdp_port: 0 });
     const t = String(r?.content?.[0]?.text || "");
-    check("审计 S5A：mac_app 带 cdp_port 启动默认拒绝名单里的 App（Cursor）→ input_denied，不启动",
+    check("mac_app 带 cdp_port 启动默认拒绝名单里的 App（Cursor）→ input_denied，不启动",
       r?.isError && /^ERROR: input_denied: "Cursor" — /.test(t) && /delivery=not_delivered/.test(t), t.slice(0, 160));
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
@@ -3449,7 +3452,7 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
     const wrong = await launch("wrongws");
     const other = await launch("other");
     const own = await launch("own");
-    check("审计：带 cdp_port 启动后，答话的端点不是这个 App 的（websocket 不在本端口 / 监听进程不是它）→ 不记录（cdp:null），browser_launch 附着被拒；是它自己的照常记录",
+    check("带 cdp_port 启动后，答话的端点不是这个 App 的（websocket 不在本端口 / 监听进程不是它）→ 不记录（cdp:null），browser_launch 附着被拒；是它自己的照常记录",
       !wrong.r?.isError && wrong.j.cdp === null && /is not the launched app's own/.test(wrong.j.note || "") && /was not opened by this noracu process/.test(wrong.attach)
       && !other.r?.isError && other.j.cdp === null && /was not opened by this noracu process/.test(other.attach)
       && own.j.cdp?.port === own.port && own.j.cdp?.websocket_url === `ws://127.0.0.1:${own.port}/devtools/browser/fake`,

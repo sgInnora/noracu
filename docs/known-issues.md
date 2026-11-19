@@ -8,7 +8,7 @@ iPhone backends are in [iphone.md](iphone.md).
 
 | Layer | Tested on | Not tested |
 |---|---|---|
-| Mac | one Apple silicon Mac on macOS 27.2 — the whole test suite, with real apps and windows, before each release | Intel Macs; macOS 15 and 26. Only the part of the suite that needs no desktop runs elsewhere (GitHub's macOS runner) |
+| Mac | one Apple silicon Mac on macOS 27.2 — the whole test suite, with real apps and windows, before each release; on macOS 26.7.1 (Apple M2 Max), an install and the read tools `mac_status` and `mac_ax_state` (2026-11-19) | Intel Macs; macOS 15; the rest of the suite on macOS 26. Only the part of the suite that needs no desktop runs elsewhere (GitHub's macOS runner) |
 | Browser | Playwright's Chromium, and Google Chrome 157 as your own Chrome (`chrome: true`), on that Mac | other Chromium browsers; other Chrome versions |
 | iPhone (XCUITest) | an iPhone 16 Pro on iOS 27.2 and 27.2.1; an iPhone 17 Pro simulator on iOS 26.5; Xcode 27.2 | other iPhones and iOS versions |
 | iPhone (Mirroring) | an iPhone 17 Pro Max mirrored to that Mac | other pairs of Mac and iPhone |

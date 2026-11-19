@@ -26,7 +26,7 @@ export function makePhone() {
     partial: 0,                           // a type delivers only its last N characters (0: all of them)
     truncated: false,                     // snapshots come back cut short
     afterType: null,
-    afterHome: null,                      // called once the phone has taken a `home` (ios_home reads the app before it, S4A)                      // called once the phone has taken a `type` (to move things between two reads)
+    afterHome: null,                      // called once the phone has taken a `home` (ios_home reads the app before it)                      // called once the phone has taken a `type` (to move things between two reads)
     autocorrect: false,                   // type "hello" → the field gets "Hello"
     slowFront: 0,                         // app_state answers before a launched app reports foreground
     hang: null,                           // an op that never answers

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.2] — 2026-11-19
+
+- **Orca gets no input by default.** Orca, an agent IDE whose terminals run a
+  shell, is on the default deny list — by its bundle id `com.stablyai.orca`
+  and by name — and a client running in one of its terminals is recognised as
+  hosted by it.
+- **Docs from a first install on another Mac.** The Quickstart says to paste
+  what `--doctor` prints, and how to replace an entry left by an earlier
+  install; Finder can be read with `app: "Finder"` without bringing it
+  forward; Claude Code's way to set a variable (`-e` after the server name) is
+  shown next to the JSON form, with the error the other order gives; the
+  README says that reading an Electron or Chromium app tries to turn on its
+  web accessibility (Google Chrome refuses it); macOS 26.7.1 is in the list of
+  where it was tested.
+- **XCUITest backend: build the runner again once.** Its sources changed in
+  comments only, but the runner's build check counts every byte of them:
+  `ios_*` answers `runner_version_mismatch` until `npx noracu ios-setup` (the
+  same flags as the first time) builds it again.
+
 ## [0.3.1] — 2026-11-19
 
 Fixes and stricter checks on top of 0.3.0; no tool was added or removed. The

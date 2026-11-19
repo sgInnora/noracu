@@ -23,11 +23,19 @@ export function verdict(files, folder = []) {
   };
 }
 
-// Labels of the maintainers' own review and device-test notes ("F25:", "(R18)", "E2 run", "next-steps R4") mean
-// nothing to a reader of the package: none may be in a comment of a source file that ships. They are looked for
-// in comments and docstrings only — in code and in strings a name such as F5 or T2 is something else.
-const LABEL = /(?<![\w.-])(?:F\d{1,2}|R\d{1,2}|G\d{1,2}[a-z]?|Y\d|P\d{1,2}|CR\d|T\d{1,2})(?![\w-])|\bE2 run\b|\bnext-steps\b|\bS\d[A-F]-[\w-]+|\bt\d{1,2} review\b|\bcross-verification [A-Z]\d\b|\bEA-\d+\b/;
-export const SCANNED = /^(?:src\/[^/]+\.(?:js|mjs)|imctl\/src\/imctl\/[^/]+\.py)$/;
+// Labels of the maintainers' own review and device-test notes (a letter or two and a number, with or without a
+// hyphenated tail, alone or in one of the phrases that LABEL lists, or a review named after whoever made it) mean
+// nothing to a reader: none may be in a comment of a source file that ships (check-pack.mjs: SCANNED), nor of any
+// other tracked source file — the tests and the maintainer scripts are public too (check-public.mjs:
+// PUBLIC_SOURCE). In sources they are looked for in comments and docstrings only — in code and in strings the same
+// letters and digits can be something else, a key name for one. A test file is read whole (labelledText): the names
+// its checks print and its assertion messages are public text as well.
+const LABEL = /(?<![\w.-])(?:F\d{1,2}|R\d{1,2}|G\d{1,2}[a-z]?|Y\d|P\d{1,2}|CR\d|T\d{1,2})(?![\w-])|\bE2 run\b|\bnext-steps\b|\bS\d[A-F]-[\w-]+|\bt\d{1,2} review\b|\bcross-verification [A-Z]\d\b|\bEA-\d+\b|(?<![\w.-])(?:[BES]\d[A-F]?|A0)(?![\w-])|\b(?:RF|GH)-\d+\b|(?<![\w.-])t\d{2}(?![\w-])|\breview (?:\d+\.\d+\.\d+ )?#\d+|\bpre-reviews?\b|\baudit S\d|\breview (?:S\d|CR\d|[A-Z]\d)|\bcross-verification (?:round )?[A-Z]\b|\breview(?: fix)? \([^)]{1,30}\)|\bv\d #\d+|\bs\d{1,2}#\d+|\b[A-Z]\d-[a-z]+\.md\b|(?<![\w.$-])[A-Z]{1,3}\d{1,3}[a-z]?-(?:[A-Za-z]{1,10}-)?\d+[a-z]?(?![\w-])|(?<![\w.$-])[A-Z]{2}\d{1,2}(?![\w-])/;
+export const SCANNED = /^(?:src\/[^/]+\.(?:js|mjs)|imctl\/src\/imctl\/[^/]+\.py|ios-runner\/NoracuRunnerUITests\/[^/]+\.swift)$/;
+export const PUBLIC_SOURCE = /\.(?:m?js|cjs|py|swift)$/;
+// the tests, read whole by labelledText — except the label check's own test data
+export const WHOLE_TEXT = /^(?:test|imctl\/tests)\/.+\.(?:m?js|cjs|py)$/;
+export const LABEL_FIXTURES = new Set(["test/check-pack-unit.mjs"]);
 // where a comment starts on a line of code (-1: nowhere): the first `mark` outside a quoted string
 function commentStart(line, mark) {
   let quote = null;
@@ -73,7 +81,7 @@ function jsCommentParts(line) {
   }
   return { parts, open };
 }
-// the comment text of a source file: [[line number, text], …] — // and /* */ in JavaScript; # and triple-quoted
+// the comment text of a source file: [[line number, text], …] — // and /* */ in JavaScript and Swift; # and triple-quoted
 // text in Python (docstrings; a script kept as a string is read too, which errs on the side of looking)
 export function commentsOf(path, source) {
   const py = path.endsWith(".py"), out = [];
@@ -103,12 +111,23 @@ export function commentsOf(path, source) {
   });
   return out;
 }
-// files: [{ path, source }] of the pack → "path:line: text" for every comment line that carries such a label
-export function labelled(files) {
+// files: [{ path, source }] → "path:line: text" for every comment line that carries such a label; scope: the paths
+// that are read (the shipped sources unless told otherwise)
+export function labelled(files, scope = SCANNED) {
   const hits = [];
   for (const { path, source } of files) {
-    if (!SCANNED.test(path)) continue;
+    if (!scope.test(path)) continue;
     for (const [n, text] of commentsOf(path, source)) if (LABEL.test(text)) hits.push(`${path}:${n}: ${text.trim().slice(0, 100)}`);
+  }
+  return hits;
+}
+// files: [{ path, source }] → "path:line: text" for every line of a test file (WHOLE_TEXT, not LABEL_FIXTURES) that
+// carries such a label, in code, a string or a comment
+export function labelledText(files) {
+  const hits = [];
+  for (const { path, source } of files) {
+    if (!WHOLE_TEXT.test(path) || LABEL_FIXTURES.has(path)) continue;
+    source.split("\n").forEach((line, i) => { if (LABEL.test(line)) hits.push(`${path}:${i + 1}: ${line.trim().slice(0, 100)}`); });
   }
   return hits;
 }

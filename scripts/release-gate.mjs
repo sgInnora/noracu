@@ -56,7 +56,7 @@ try { v = JSON.parse(readFileSync(file, "utf8")); } catch (e) { fail(`XV-VERDICT
 if (v.version !== version) fail(`the verdict is for ${v.version}, not ${version}`);
 if (!/^[0-9a-f]{40}$/i.test(String(v.head || ""))) fail(`"head" must be the verified commit's full 40-character hash, not ${JSON.stringify(v.head)}`);
 if (!(Number.isInteger(v.rounds) && v.rounds >= 2)) fail("fewer than 2 rounds recorded");
-// EA-3 (2026-11-09: a verdict copied from a plan debate cleared the gate): the rounds are logged, and every
+// The rounds are logged (2026-11-09: a verdict copied from another document once cleared the gate), and every
 // reviewer's final round is a file in this release's evidence folder that says SHIP
 const roundLog = v.round_log && typeof v.round_log === "object" && !Array.isArray(v.round_log) ? Object.keys(v.round_log) : [];
 if (roundLog.length < 2) fail(`"round_log" must name each review round (at least the independent round and the cross-check), got ${roundLog.length}`);
@@ -68,9 +68,9 @@ const families = new Set(reviewers.map(vendorOf).filter(Boolean));
 if (reviewers.length < 3 || families.size < 3) fail(`needs 3 reviewers from 3 different model families (got ${reviewers.length} reviewers, ${families.size} families: ${[...families].join(", ") || "none"})`);
 const notShip = reviewers.filter((r) => String(r.final || "").toUpperCase() !== "SHIP");
 if (notShip.length) fail(`final round not SHIP for: ${notShip.map((r) => `${r.model} (${r.final || "none"})`).join(", ")}`);
-// cross-verification A0 (2026-11-09): the verdict is the file's last line, the file names the verified commit,
+// The verdict is the file's last line, the file names the verified commit,
 // it is a plain file of this release's folder, and no two reviewers share one
-// case folded: on a case-insensitive volume "r1.md" and "R1.md" are one file; hard links are
+// case folded: on a case-insensitive volume "a.md" and "A.md" are one file; hard links are
 // caught below by device and inode
 if (new Set(reviewers.map((r) => String(r.file).toLowerCase())).size !== reviewers.length) fail("two reviewers name the same final-round file");
 const inodes = new Set();
@@ -100,7 +100,7 @@ const git = (args, opts = {}) => execFileSync("git", ["-C", root, ...args], { en
 const atHead = (path) => { try { return git(["show", `${v.head}:${path}`], { stdio: ["ignore", "pipe", "ignore"] }); } catch { return null; } };
 let oldVersion;
 try { oldVersion = JSON.parse(atHead("package.json")).version; } catch { fail(`cannot read package.json at the verified commit ${v.head}`); }
-// EA-1: the version asked for is the version of the tree being released
+// The version asked for is the version of the tree being released
 {
   let treeVersion;
   try { treeVersion = JSON.parse(target ? git(["show", `${target}:package.json`]) : readFileSync(join(root, "package.json"), "utf8")).version; }
@@ -109,7 +109,7 @@ try { oldVersion = JSON.parse(atHead("package.json")).version; } catch { fail(`c
 }
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // The version bump and nothing else: the CHANGELOG heading, then, token by token, each old or new version
-// number in the same place — old→new (the bump), old→old or new→new (unchanged). EA-2: a new→old token is a
+// number in the same place — old→new (the bump), old→old or new→new (unchanged). A new→old token is a
 // swap, not a bump (both used to normalize to the same placeholder).
 const heading = new RegExp(`^## \\[(?:Unreleased|${esc(version)})\\](?: — \\d{4}-\\d{2}-\\d{2})?$`, "m");
 // the longer number first: one that the other continues ("0.3.0" and "0.3.0-rc.1") would otherwise be taken out

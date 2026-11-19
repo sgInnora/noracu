@@ -177,7 +177,7 @@ const J = (r) => JSON.parse(r.text);
   await w.close();
 }
 {
-  // review S4C-s12 [D]: a blank NORACU_APPROVAL_FILE refuses iPhone input of the XCUITest backend too (fail closed)
+  // A blank NORACU_APPROVAL_FILE refuses iPhone input of the XCUITest backend too (fail closed)
   const w = world({ env: { NORACU_APPROVAL_FILE: "" } });
   const launch = await w.call("ios_launch", { bundle_id: SETTINGS });
   const tap = await w.call("ios_tap", { bundle_id: SETTINGS, x: 10, y: 10 });
@@ -196,7 +196,7 @@ const J = (r) => JSON.parse(r.text);
   const unlisted = await w.call("ios_launch", { bundle_id: "com.example.slow" });
   check("NORACU_APPROVAL_FILE: an app under ask (or not listed) is approval_required; ios_home passes as com.apple.springboard", ask.isError && /^ERROR: approval_required/.test(ask.text) && !home.isError && unlisted.isError && /^ERROR: approval_required/.test(unlisted.text) && w.lines("xcrun.log").every((a) => !a.includes("launch")), [ask.text.slice(0, 90), home.text, unlisted.text.slice(0, 90)]);
   await w.close();
-  // next-steps R4 (2026-11-12): with an approval file, no input that names the Home Screen goes out — an app in
+  // With an approval file, no input that names the Home Screen goes out — an app in
   // front or not, a runner up or not — and none reaches the runner; ios_home still does
   writeFileSync(file, JSON.stringify({ allow: [SPRINGBOARD, SETTINGS] })); chmodSync(file, 0o600);
   const SB_DENIED = /^ERROR: input_denied: input that names com\.apple\.springboard \(the Home Screen\) is not sent while app rules are in force \(NORACU_APPROVAL_FILE or NORACU_DENY_APPS\) — not even one tap on a system prompt's button; open apps with ios_launch, go home with ios_home/;
@@ -211,7 +211,7 @@ const J = (r) => JSON.parse(r.text);
     !up.isError && !home2.isError && [sbTap, sbSwipe, sbTap2].every((r) => r.isError && SB_DENIED.test(r.text) && r.text.endsWith(NOT_SENT))
       && sent("tap").length === 0 && sent("drag").length === 0, sbTap.text.slice(0, 200));
   await v.close();
-  // pre-review P5: what is refused starts no runner (a starting runner puts its own app in front)
+  // What is refused starts no runner (a starting runner puts its own app in front)
   const q = world({ env: { NORACU_APPROVAL_FILE: file } });
   const never = [await q.call("ios_type", { bundle_id: SPRINGBOARD, text: "hello" }), await q.call("ios_key", { bundle_id: SPRINGBOARD, key: "return" }), await q.call("ios_swipe", { bundle_id: SPRINGBOARD, from: [100, 500], to: [100, 300] }),
     await q.call("ios_tap", { bundle_id: SPRINGBOARD, x: 100, y: 100, duration_ms: 600 }), await q.call("ios_tap", { bundle_id: SPRINGBOARD, x: 100, y: 100, count: 2 }), await q.call("ios_tap", { bundle_id: SPRINGBOARD, x: 100, y: 100 })];
@@ -232,7 +232,7 @@ const J = (r) => JSON.parse(r.text);
   check("with no app rules (NORACU_DENY_APPS=none, no approval file), a tap that names com.apple.springboard is sent as asked on the Home Screen, without springboard_only",
     !freeTap.isError && /^tapped/.test(freeTap.text) && freeSent.length === 1, freeTap.text.slice(0, 120));
   await free.close();
-  // pre-review P6: the stop file and read-only mode are checked before a call reaches the session, so they
+  // The stop file and read-only mode are checked before a call reaches the session, so they
   // still answer first — refusing before the gate takes nothing from them
   const stopSb = join(tmpdir(), `noracu-ios-stop-sb-${process.pid}`);
   writeFileSync(stopSb, "");

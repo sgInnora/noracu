@@ -33,8 +33,9 @@ brew install cliclick       # Mac 上的物理输入要用（按键、拖拽、�
 npx noracu --doctor         # 检查这台机器，并打印出给客户端用的配置
 ```
 
-**2. 加到你的 MCP 客户端。** `--doctor` 会打印出要粘贴的内容，路径都是这台机器上的绝对路径：Claude Code 是一条命令，
-Claude Desktop 和 Cursor 是一段 JSON。手写的话是下面这样。
+**2. 加到你的 MCP 客户端。** 粘贴 `--doctor` 打印出的内容，别用下面手写的：它用的是这台机器上的绝对路径，指向你刚装的
+那一份——Claude Code 是一条命令（`-s user` 表示对你所有项目生效），Claude Desktop 和 Cursor 是一段 JSON。
+手写的话是下面这样。
 
 Claude Code（从终端启动，`PATH` 里有 Node）：
 
@@ -58,11 +59,14 @@ Claude Desktop（`~/Library/Application Support/Claude/claude_desktop_config.jso
 
 然后把客户端完全退出（包括菜单栏图标）再打开。
 
+以前装过？`claude mcp add` 不接受已经被占用的名字：先运行 `claude mcp remove noracu`（当初是对所有项目加的，就加上
+`-s user`）。JSON 配置里把 `args` 的路径改成新的。
+
 **3. 把权限给客户端应用，不是给 `node`。** 系统设置 → 隐私与安全性 → **辅助功能** 和 **录屏与系统录音**
 （较早的 macOS 上叫「屏幕录制」）→ 打开 Claude Desktop、Cursor 或你的终端。授权后再完全退出、重开一次客户端。
 
 **4. 检查。** 调用 `mac_status`：它会说客户端有没有这两项权限、找没找到 cliclick。再让访达在最前面，调用
-`mac_ax_state`，能返回一棵带编号的树就说明通了，点击是之后的事。浏览器：`browser_launch` →
+`mac_ax_state`（或者传 `app: "Finder"`，不用切到前台），能返回一棵带编号的树就说明通了，点击是之后的事。浏览器：`browser_launch` →
 `browser_navigate` → `browser_snapshot` → 带 `element_index` 的 `browser_click`。
 
 **5. 试一下。** 可以对客户端说这三句，都只读不改：
@@ -86,6 +90,9 @@ Claude Desktop（`~/Library/Application Support/Claude/claude_desktop_config.jso
 - **关着的开关就是关着。** `NORACU_READ_ONLY=1` 只许观察；`NORACU_STOP_FILE` 指的文件存在时不发任何输入；
   `NORACU_DENY_APPS` 和 `NORACU_APPROVAL_FILE` 决定哪些应用可以收输入（终端和 IDE 默认拒绝）；
   在页面里跑脚本和打开 `file://` 默认关。
+- **有一处读会写一个开关。** 读 Electron 或 Chromium 应用（`mac_ax_state`、`mac_find`）时，会试着打开它的网页无障碍
+  （`AXManualAccessibility`），让页面出现在树里——Electron 应用接受，Google Chrome 不接受；传 `web_accessibility: false`
+  或设 `NORACU_READ_ONLY=1` 就不打开。
 - **留在这台机器上。** 用的是你已经登录的浏览器配置和 Mac 应用。除了 Playwright 第一次下载 Chromium，
   noracu 自己不发任何网络请求。工具返回的内容（文字、截图）仍会由你的客户端发给它用的模型。
 

@@ -1,6 +1,6 @@
 // Release-gate tests (CI-safe: a throwaway git repository with a copy of scripts/release-gate.mjs; the gate
-// runs in its commit-to-commit mode, so npm is never called). EA-1 / EA-2 from the 0.2.7 cross-verification
-// and EA-3 from 2026-11-09 (a plan-debate verdict with two reviewers of one vendor cleared 0.3.0).
+// runs in its commit-to-commit mode, so npm is never called). Among the cases: a version file changed after the
+// verified tree (0.2.7), and a verdict with two reviewers of one vendor that cleared 0.3.0 (2026-11-09).
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync, symlinkSync, linkSync } from "node:fs";
@@ -36,7 +36,7 @@ try {
     "docs/tools.md": "# noracu 0.3.0 tools\nsince 0.2.9, before 0.3.0\n",
     "CHANGELOG.md": "# Changelog\n\n## [0.3.0] — 2026-02-02\n\n- x\n\n## [0.2.9] — 2026-01-01\n",
   }, "release: 0.3.0");
-  // EA-2: a new→old swap inside a version file
+  // A new→old swap inside a version file
   const C = commit({ "docs/tools.md": "# noracu 0.3.0 tools\nsince 0.3.0, before 0.2.9\n" }, "swap");
   git("checkout", "-q", B);
   // the old number becoming the new one somewhere else in a version file: a dependency pinned at the old number,
@@ -67,7 +67,7 @@ try {
   let r = gate("0.3.0", B);
   assert.ok(r.ok, `a proper bump clears: ${r.out}`);
   r = gate("0.3.0", C);
-  assert.ok(!r.ok && /beyond the version bump: docs\/tools\.md/.test(r.out), `EA-2: a new→old swap is not a bump: ${r.out}`);
+  assert.ok(!r.ok && /beyond the version bump: docs\/tools\.md/.test(r.out), `a new→old swap is not a bump: ${r.out}`);
   r = gate("0.3.0", E);
   assert.ok(!r.ok && /beyond the version bump: package\.json/.test(r.out), `a dependency pinned at the old number that becomes the new one is not the bump: ${r.out}`);
   r = gate("0.3.0", G);
@@ -75,7 +75,7 @@ try {
   r = gate("0.3.0", D);
   assert.ok(!r.ok && /src\/a\.js/.test(r.out), `a code change after the verdict is refused: ${r.out}`);
   r = gate("0.3.0", A);
-  assert.ok(!r.ok && /package\.json of .* is 0\.2\.9/.test(r.out), `EA-1: the version asked for must be the tree's: ${r.out}`);
+  assert.ok(!r.ok && /package\.json of .* is 0\.2\.9/.test(r.out), `the version asked for must be the tree's: ${r.out}`);
 
   verdict({ reviewers: [
     { model: "delta-direct", family: "delta", final: "SHIP", file: ship("p1.md") },
@@ -83,7 +83,7 @@ try {
     { model: "acme-large", family: "acme-large", final: "SHIP", file: ship("p3.md") },
   ] });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /3 different model families .* 2 families/.test(r.out), `EA-3: two models of one vendor are one family: ${r.out}`);
+  assert.ok(!r.ok && /3 different model families .* 2 families/.test(r.out), `two models of one vendor are one family: ${r.out}`);
 
   verdict({ reviewers: [
     { model: "alpha/model-1", family: "alpha", final: "SHIP", evidence: "~/.pi/agent/panel/…" },
@@ -91,7 +91,7 @@ try {
     { model: "gamma-model-3", family: "gamma", final: "SHIP", file: ship("xv-B__G.md") },
   ] });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /"file" must name its final-round answer/.test(r.out), `EA-3: a final round outside the evidence folder does not count: ${r.out}`);
+  assert.ok(!r.ok && /"file" must name its final-round answer/.test(r.out), `a final round outside the evidence folder does not count: ${r.out}`);
 
   verdict({ reviewers: [
     { model: "alpha/model-1", family: "alpha", final: "SHIP", file: ship("xv-B__X.md", "VERDICT: HOLD") },
@@ -99,40 +99,40 @@ try {
     { model: "gamma-model-3", family: "gamma", final: "SHIP", file: ship("xv-B__G.md") },
   ] });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /last line of xv-B__X\.md is "VERDICT: HOLD"/.test(r.out), `EA-3: a final round that ends on HOLD does not count as SHIP: ${r.out}`);
+  assert.ok(!r.ok && /last line of xv-B__X\.md is "VERDICT: HOLD"/.test(r.out), `a final round that ends on HOLD does not count as SHIP: ${r.out}`);
 
-  // cross-verification A0 (2026-11-09)
+  // the final-round file: its last line is the verdict, it names the commit, and no two reviewers share it
   const three = (x) => [x, { model: "beta-model-2", family: "beta", final: "SHIP", file: ship("xv-B__D.md") }, { model: "gamma-model-3", family: "gamma", final: "SHIP", file: ship("xv-B__G.md") }];
   verdict({ reviewers: three({ model: "alpha/model-1", family: "alpha", final: "SHIP", file: ship("xv-B__X.md", "VERDICT: HOLD\nwe can SHIP after the fix") }) });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /last line .* is "we can SHIP after the fix"/.test(r.out), `A0: HOLD followed by a later SHIP is not SHIP: ${r.out}`);
+  assert.ok(!r.ok && /last line .* is "we can SHIP after the fix"/.test(r.out), `HOLD followed by a later SHIP is not SHIP: ${r.out}`);
   verdict({ reviewers: three({ model: "alpha/model-1", family: "alpha", final: "SHIP", file: ship("xv-B__X.md", "VERDICT: SHIP", "0123456789abcdef") }) });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /does not name the verified commit/.test(r.out), `A0: a final round about another commit does not count: ${r.out}`);
+  assert.ok(!r.ok && /does not name the verified commit/.test(r.out), `a final round about another commit does not count: ${r.out}`);
   verdict({ reviewers: [{ model: "x", family: "alpha", final: "SHIP", file: ship("same.md") }, { model: "d", family: "beta", final: "SHIP", file: "same.md" }, { model: "g", family: "gamma", final: "SHIP", file: ship("xv-B__G.md") }] });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /same final-round file/.test(r.out), `A0: two reviewers cannot share one file: ${r.out}`);
+  assert.ok(!r.ok && /same final-round file/.test(r.out), `two reviewers cannot share one file: ${r.out}`);
   verdict({ reviewers: [{ model: "x", family: "alpha", final: "SHIP", file: ship("one.md") }, { model: "d", family: "beta", final: "SHIP", file: "./one.md" }, { model: "g", family: "gamma", final: "SHIP", file: "././one.md" }] });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /a plain file inside/.test(r.out), `audit S5A-s28-G-1: one file under three spellings does not clear three reviewers: ${r.out}`);
+  assert.ok(!r.ok && /a plain file inside/.test(r.out), `one file under three spellings does not clear three reviewers: ${r.out}`);
   verdict({ reviewers: [{ model: "x", family: "alpha", final: "SHIP", file: ship("one.md") }, { model: "d", family: "beta", final: "SHIP", file: "ONE.md" }, { model: "g", family: "gamma", final: "SHIP", file: ship("xv-B__G.md") }] });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /same final-round file/.test(r.out), `review S5C: "one.md" and "ONE.md" are one file: ${r.out}`);
+  assert.ok(!r.ok && /same final-round file/.test(r.out), `"one.md" and "ONE.md" are one file: ${r.out}`);
   linkSync(join(rel, "one.md"), join(rel, "hard.md"));
   verdict({ reviewers: [{ model: "x", family: "alpha", final: "SHIP", file: "one.md" }, { model: "d", family: "beta", final: "SHIP", file: "hard.md" }, { model: "g", family: "gamma", final: "SHIP", file: ship("xv-B__G.md") }] });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /same final-round file/.test(r.out), `review S5C: a hard link to one file is that file: ${r.out}`);
+  assert.ok(!r.ok && /same final-round file/.test(r.out), `a hard link to one file is that file: ${r.out}`);
   symlinkSync(join(rel, "xv-B__D.md"), join(rel, "link.md"));
   verdict({ reviewers: three({ model: "alpha/model-1", family: "alpha", final: "SHIP", file: "link.md" }) });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /a plain file inside/.test(r.out), `A0: a symlink does not count: ${r.out}`);
+  assert.ok(!r.ok && /a plain file inside/.test(r.out), `a symlink does not count: ${r.out}`);
   verdict({ rounds: 3 });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /"rounds" is 3 but "round_log" names only 2/.test(r.out), `A0: round_log must cover the rounds counted: ${r.out}`);
+  assert.ok(!r.ok && /"rounds" is 3 but "round_log" names only 2/.test(r.out), `round_log must cover the rounds counted: ${r.out}`);
 
   verdict({ round_log: undefined });
   r = gate("0.3.0", B);
-  assert.ok(!r.ok && /round_log/.test(r.out), `EA-3: the rounds must be logged: ${r.out}`);
+  assert.ok(!r.ok && /round_log/.test(r.out), `the rounds must be logged: ${r.out}`);
 
   verdict({ reviewers: [{ model: "../escape", family: "x", final: "SHIP", file: "../../../etc/hosts" }, { model: "d", family: "beta", final: "SHIP", file: "xv-B__D.md" }, { model: "g", family: "gamma", final: "SHIP", file: "xv-B__G.md" }] });
   r = gate("0.3.0", B);

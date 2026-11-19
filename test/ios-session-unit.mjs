@@ -433,7 +433,7 @@ function rig({ env = {}, sbDenied = false } = {}) {
   phone.afterType = () => { phone.extraField = true; phone.name = "hello"; };
   const appeared = await s.type({ text: "hello" });
   ok(!appeared.error && appeared.text === `typed 5 characters in ${SETTINGS} — the text fields listed before the text went in and afterwards are not the same ones, so the text could not be tied to one of them (delivery=delivered_unverified, retry=unsafe)`,
-    "a field that shows the text only appeared between the two reads: not verified — and not reported as missing either (pre-review P9)", appeared);
+    "a field that shows the text only appeared between the two reads: not verified — and not reported as missing either", appeared);
   // … and when the field that appeared shows something else, the text is in no field: not confirmed
   phone.extraField = false; phone.name = "";
   phone.afterType = () => { phone.extraField = true; phone.name = "other"; };
@@ -452,7 +452,7 @@ function rig({ env = {}, sbDenied = false } = {}) {
   const same = await s.type({ element_index: await idx("Name"), text: "Your name" });
   ok(/the same as a field's placeholder/.test(same.text) && /delivered_unverified/.test(same.text) && phone.name === "Your name", "text equal to the field's placeholder cannot be told from an empty field: sent, not verified, not an error", same);
 }
-// app rules in force (next-steps R4, 2026-11-12): no input that names com.apple.springboard goes out — not even one
+// app rules in force: no input that names com.apple.springboard goes out — not even one
 // tap on a button of a SpringBoard alert; ios_home still does, and input named for an app is not touched
 const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Home Screen\) is not sent while app rules are in force \(NORACU_APPROVAL_FILE or NORACU_DENY_APPS\) — not even one tap on a system prompt's button; open apps with ios_launch, go home with ios_home \(delivery=not_delivered, retry=safe\)$/;
 {
@@ -481,7 +481,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "ios_home still goes out, and input named for an app is sent as before (springboard_only is never sent)", [home, inApp]);
 }
 {
-  // pre-review P5: what is refused changes nothing — no runner is started for it (a starting runner puts its own
+  // What is refused changes nothing — no runner is started for it (a starting runner puts its own
   // app in front of what the iPhone was showing), and the app rule is still asked first
   const { s, t } = rig({ sbDenied: true });
   const refused = [
@@ -582,7 +582,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(/^app_not_foreground: .*call ios_launch first \(delivery=not_delivered, retry=safe\)$/.test(bg.error) && phone.scroll === 150, "a swipe for an app in the background is refused by the runner and moves nothing", bg);
 }
 {
-  // system_alert: "a system prompt is up" only when the runner saw one, not when SpringBoard could not be read (review S4B-s8-new-1, S4D)
+  // system_alert: "a system prompt is up" only when the runner saw one, not when SpringBoard could not be read
   const { s, phone } = rig();
   await s.launch({ bundle_id: SETTINGS });
   phone.refuseOnce = { op: "tap", error: "system_alert", message: "a system alert is up over the app" };
@@ -689,7 +689,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(again.text && t.starts === 4, "xcodebuild ended on its own: the next call starts the runner again");
 }
 
-// ---------- pre-review P1: the lock answer is never older than a second; what a starting runner ends ----------
+// ---------- the lock answer is never older than a second; what a starting runner ends ----------
 {
   const { s, t, idx } = rig();
   await s.launch({ bundle_id: SETTINGS });
@@ -831,7 +831,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(/^runner_start_timeout/.test(a.error) && /has not exited yet/.test(b.error) && t.starts === 1, "a start that failed leaves its xcodebuild to be waited for as well", [a.error, b.error, t.starts]);
 }
 
-// ---------- pre-review P3 ----------
+// ---------- the read-back after ios_type ----------
 {
   // the read-back pairs one field and wants the text put in at one place
   const f = (key, value, o = {}) => ({ key, value, cut: false, ph: "", ...o });
@@ -847,8 +847,8 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(fieldShows([f(K, "", { ph: "Title" }), f(K2, "", { ph: "Search" })], [f(K, "Search", { ph: "Title" }), f(K2, "", { ph: "Search" })], "Search", K) === "shown"
     && fieldShows([f(K2, "", { ph: "Search" })], [f(K2, "", { ph: "Search" })], "Search", K2) === "placeholder", "a placeholder counts only on the field that took the text");
   ok(fieldShows([f(K, "", { cut: true })], [f(K, "hello")], "hello", K) === "mismatch" && fieldShows([f(K, "x", { cut: true })], [f(K, "xhello", { cut: true })], "hello", K) === "mismatch" && fieldShows([f(K, "")], [f(K, "hello", { cut: true })], "hello", K) === "cut",
-    "a value that came back cut does not verify: cut before, or in both reads, is a mismatch; newly cut is 'cut' — the text could not be looked for in all of it (pre-review P15)");
-  // pre-review P4: the placeholder counts only on a field that reads empty, and after the look for the text itself
+    "a value that came back cut does not verify: cut before, or in both reads, is a mismatch; newly cut is 'cut' — the text could not be looked for in all of it");
+  // The placeholder counts only on a field that reads empty, and after the look for the text itself
   const P = (v) => [f(K, v, { ph: "Search" })];
   ok(fieldShows(P("abc"), P("abc"), "Search", K) === "mismatch" && fieldShows(P("abc"), P("abcSearch"), "Search", K) === "shown" && fieldShows(P(""), P(""), "Search", K) === "placeholder",
     "a field with text in it whose placeholder is the typed text: unchanged is a mismatch, gained is shown; only an empty one cannot be told");
@@ -878,7 +878,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(/^tapped/.test(after2.text), "once the app is brought back, points go out", after2);
 }
 {
-  // pre-review P5: a launch with terminate_existing that went out is not safe to repeat, confirmed or not —
+  // A launch with terminate_existing that went out is not safe to repeat, confirmed or not —
   // asking again would stop the app it has just started
   const { s, phone } = rig();
   phone.issueOnce = "app_state";
@@ -930,7 +930,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "the fields could not be read on either side of the typing: the result names both", r);
 }
 {
-  // pre-review P7: not read before, read in full afterwards, and no field holds the text — it is not there,
+  // Not read before, read in full afterwards, and no field holds the text — it is not there,
   // whatever was there before: type_not_confirmed, not "nothing to compare with"
   const { s, phone, idx } = rig();
   await s.launch({ bundle_id: SETTINGS });
@@ -948,7 +948,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "the same, but the field's value came back cut: the text may be past the cut — unverified, not type_not_confirmed", cut);
 }
 {
-  // pre-review P7: home was pressed and the app's state could not be read afterwards (the read failed, with no
+  // Home was pressed and the app's state could not be read afterwards (the read failed, with no
   // failure of XCTest's behind it) — pressed, not seen; the app stays the one later calls default to
   const { s, phone } = rig();
   await s.launch({ bundle_id: SETTINGS });
@@ -1021,7 +1021,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(/^runner_version_mismatch/.test(stuck.error) && /has not exited yet/.test(next.error) && t.starts === 1, "a runner of another build that does not exit: no second runner beside it", [stuck.error, next.error, t.starts]);
 }
 
-// ---------- pre-review P4 ----------
+// ---------- a shutdown while the runner starts ----------
 {
   // a shutdown while a stopped runner is being waited for: nothing is started afterwards
   const { s, t, phone } = rig();
@@ -1051,7 +1051,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   // ios_home and ios_type report a failure their own reads met, and the session ends
   const { s, t, phone, idx } = rig();
   await s.launch({ bundle_id: SETTINGS });
-  phone.afterHome = () => { phone.issueOnce = "app_state"; };   // the read after the press (S4A: one before it too)
+  phone.afterHome = () => { phone.issueOnce = "app_state"; };   // the read after the press (one before it too)
   const h = await s.home();
   ok(/^xctest_issue: .* — home was pressed; whether com\.apple\.Preferences left the front was not read \(delivery=delivered_unverified, retry=safe\)$/.test(h.error) && !s._state().running && phone.log.filter(([o]) => o === "home").length === 1,
     "home was pressed and the wait for the app to leave met a failure XCTest recorded: the result says both — pressed once, not read — and the session has ended", [h, s._state()]);
@@ -1063,7 +1063,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(/^xctest_issue: .*\(delivery=unknown, retry=unsafe\)$/.test(ty.error) && !s._state().running && t.starts === starts, "a failure recorded once the text had gone out: reported with delivery unknown, and the session has ended", [ty, s._state()]);
 }
 {
-  // pre-review P8: not read before, read in full afterwards, and the only sign of the text is a field that reads
+  // Not read before, read in full afterwards, and the only sign of the text is a field that reads
   // empty with the text as its placeholder — an earlier read would not have settled that either, and the result
   // says so (it used to say there was nothing to compare with)
   const { s, phone, idx } = rig();
@@ -1085,10 +1085,10 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "… another field's placeholder does not count for the tapped one: not confirmed, and the result names the field that was tapped", other);
 }
 {
-  // pre-review P8: a wait that a failed read ended early says what was read, not what the full wait would have shown
+  // A wait that a failed read ended early says what was read, not what the full wait would have shown
   const { s, phone } = rig();
   await s.launch({ bundle_id: SETTINGS });
-  phone.handleHome = false; phone.hangAfter = { op: "app_state", n: 2 };   // one read before the press (S4A), one after
+  phone.handleHome = false; phone.hangAfter = { op: "app_state", n: 2 };   // one read before the press, one after
   const h = await s.home();
   phone.hangAfter = null;
   ok(h.error === `home_not_confirmed: home was pressed and ${SETTINGS} was still in front when its state was last read; the read after that failed — look with ios_screenshot (delivery=delivered_unverified, retry=safe)` && s._state().current === SETTINGS && phone.log.filter(([o]) => o === "home").length === 1,
@@ -1111,7 +1111,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "ios_launch: read once (not in front), then the read failed — the result gives the state that was read and says the wait ended there", some);
 }
 {
-  // pre-review P10: "nothing to compare with" is only the case where the two reads do not list the same fields.
+  // "nothing to compare with" is only the case where the two reads do not list the same fields.
   // The same fields with none changed, or more than one changed, were compared — and no single field gained the text
   const f = (key, value, o = {}) => ({ key, value, cut: false, ph: "", ...o });
   const K = "textField||", K2 = "searchField|search|Search";
@@ -1126,10 +1126,10 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   phone.afterType = () => { phone.name = "x"; };         // a second field changes in the same moment
   const two = await s.type({ text: "hello" });
   ok(!two.error && two.text === `typed 5 characters in ${SETTINGS} — more than one text field changed while the text went in, so it was not tied to one of them (delivery=delivered_unverified, retry=unsafe)` && phone.search === "hello",
-    "the same fields before and after, two of them changed, one holds the text: unverified, and the result says why it was not tied to a field (pre-review P11)", two);
+    "the same fields before and after, two of them changed, one holds the text: unverified, and the result says why it was not tied to a field", two);
 }
 {
-  // pre-review P11: the same fields and more than one changed — a field holds the text, but it was not tied to one
+  // The same fields and more than one changed — a field holds the text, but it was not tied to one
   // of them: unverified, with that reason; no field holds it: not confirmed. And when no field changed at all while
   // one reads empty with the text as its placeholder, that field cannot be told from one that took the text —
   // whatever another field already held
@@ -1155,7 +1155,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "the tapped field's label changed as the text went in, and the field holds the text: unverified (the fields are not the same ones), not 'the tapped field was not seen to gain it'", renamed);
 }
 
-// ---------- pre-review P12: what the two reads say is decided per field that changed ----------
+// ---------- what the two reads say is decided per field that changed ----------
 {
   const f = (key, value, o = {}) => ({ key, value, cut: false, ph: "", ...o });
   const K = "textField||", K2 = "searchField|search|Search", K3 = "textField|note|Note";
@@ -1163,26 +1163,26 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(fieldShows(three, [f(K, "hello"), f(K2, "x"), f(K3, "y")], "hello", null) === "mismatch"
     && fieldShows(three, [f(K, "hello"), f(K2, "hello"), f(K3, "y")], "hello", null) === "several" && fieldShows(three, [f(K, "hello"), f(K2, "hello!"), f(K3, "y")], "hello", null) === "mismatch"
     && fieldShows(three, [f(K, "hello"), f(K2, "x", { cut: true }), f(K3, "y")], "hello", null) === "several",
-    "fieldShows: several fields changed — 'several' only when one of the changed ones gained the text (or came back cut); the text in a field that did not change does not count (P12-AGY-1), nor one that gained more than the text");
+    "fieldShows: several fields changed — 'several' only when one of the changed ones gained the text (or came back cut); the text in a field that did not change does not count, nor one that gained more than the text");
   ok(fieldShows([f(K, ""), f(K2, ""), f(K3, "", { ph: "hello" })], [f(K, "x"), f(K2, "y"), f(K3, "", { ph: "hello" })], "hello", null) === "mismatch"
     && fieldShows([f(K, ""), f(K, "", { ph: "hello" }), f(K2, "")], [f(K, ""), f(K, "", { ph: "hello" }), f(K2, "zzz")], "hello", K) === "mismatch"
     && fieldShows([f(K, "")], [f(K, ""), f(K3, "", { ph: "hello" })], "hello", null) === "mismatch"
     && fieldShows([f(K, ""), f(K, "", { ph: "hello" }), f(K2, "")], [f(K, ""), f(K, "", { ph: "hello" }), f(K2, "")], "hello", K) === "placeholder",
-    "fieldShows: a field that reads empty with the text as its placeholder explains a missing text only when no field changed at all (P12-1, P12-AGY-3)");
+    "fieldShows: a field that reads empty with the text as its placeholder explains a missing text only when no field changed at all");
   const tw = [f(K, ""), f(K, ""), f(K2, "")];
   ok(fieldShows(tw, [f(K, "hello"), f(K, ""), f(K2, "z")], "hello", K) === "shown" && fieldShows(tw, [f(K, "Hello"), f(K, ""), f(K2, "hello")], "hello", K) === "mismatch"
     && fieldShows(tw, [f(K, "hello"), f(K, ""), f(K2, "z")], "hello", null) === "several",
     "fieldShows: one field like the tapped one changed — it is the one judged, whatever a field of another kind did; with nothing tapped both count (several)");
   ok(fieldShows([f(K, ""), f(K2, "")], [f(K, "hello"), f(K2, "zzz")], "hello", K) === "shown" && fieldShows([f(K, ""), f(K2, "")], [f(K, "Hello"), f(K2, "hello")], "hello", K) === "mismatch"
     && fieldShows([f(K, "")], [f(K, "hello"), f(K3, "")], "hello", K) === "shown" && fieldShows([f(K, "")], [f(K, "Hello"), f(K3, "hello")], "hello", K) === "mismatch",
-    "fieldShows: the tapped field is the only one of its kind in both reads — it is judged, and a second field that changed, appeared, or holds the text changes nothing (P12-3)");
+    "fieldShows: the tapped field is the only one of its kind in both reads — it is judged, and a second field that changed, appeared, or holds the text changes nothing");
   ok(fieldShows([f(K, ""), f(K, "")], [f(K, ""), f("textField||Title (5)", "hello")], "hello", K) === "moved"
     && fieldShows([f(K, ""), f(K, "")], [f(K, ""), f(K, ""), f(K3, "hello")], "hello", K) === "mismatch"
     && fieldShows([f(K2, "")], [f(K2, ""), f(K, "")], "hello", null) === "mismatch",
-    "fieldShows: the reads list different fields — 'moved' when a field like the tapped one holds the text, or one of those is gone and some field holds it (P12-AGY-2); a new field of another kind does not count, nor a list in which nothing holds the text");
+    "fieldShows: the reads list different fields — 'moved' when a field like the tapped one holds the text, or one of those is gone and some field holds it; a new field of another kind does not count, nor a list in which nothing holds the text");
   ok(fieldShows(null, [f(K, "say hello")], "hello", null) === "unread" && fieldShows(null, [f(K, "")], "hello", null) === "mismatch" && fieldShows(null, [f(K, "", { ph: "hello" })], "hello", null) === "placeholder"
     && fieldShows(null, [f(K2, "hello")], "hello", K) === "unread" && fieldShows(null, [f(K, ""), f(K2, "hello")], "hello", K) === "mismatch" && fieldShows(null, [f(K, "", { ph: "hello" }), f(K2, "hello")], "hello", K) === "placeholder",
-    "fieldShows: not read before — 'unread' when a field like the tapped one holds the text (any field when none like it is listed), 'placeholder' when one reads empty with the text as its placeholder, a mismatch otherwise (P12-me-2)");
+    "fieldShows: not read before — 'unread' when a field like the tapped one holds the text (any field when none like it is listed), 'placeholder' when one reads empty with the text as its placeholder, a mismatch otherwise");
 }
 {
   // … and ios_type has one sentence per answer. The tapped field is the only one of its kind: it is judged,
@@ -1204,12 +1204,12 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   phone.moreFields = [{ type: "textField", label: "Note", id: "note", value: "hello" }];
   phone.afterType = () => { phone.name = "x"; phone.search = "y"; };
   const bystander = await s.type({ text: "hello" });
-  ok(NO_FIELD.test(bystander.error), "two fields changed without the text and a third, which did not change, already held it: not confirmed — not 'more than one changed' (P12-AGY-1)", bystander);
+  ok(NO_FIELD.test(bystander.error), "two fields changed without the text and a third, which did not change, already held it: not confirmed — not 'more than one changed'", bystander);
   phone.search = ""; phone.name = "";
   phone.moreFields = [{ type: "textField", label: "Note", id: "note", value: "", placeholder: "hello" }];
   phone.afterType = () => { phone.name = "x"; phone.search = "y"; };
   const hidden = await s.type({ text: "hello" });
-  ok(NO_FIELD.test(hidden.error), "two fields changed without the text and a third reads empty with the text as its placeholder: not confirmed — not the placeholder result (P12-1)", hidden);
+  ok(NO_FIELD.test(hidden.error), "two fields changed without the text and a third reads empty with the text as its placeholder: not confirmed — not the placeholder result", hidden);
   // the tapped field has a twin
   const twins = (o = {}) => [{ type: "textField", label: "Tag", id: "tag", value: "", ...o }, { type: "textField", label: "Tag", id: "tag", value: "", ...o }];
   phone.extraField = false; phone.search = ""; phone.name = "";
@@ -1217,14 +1217,14 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   const i1 = await idx("Tag");
   phone.afterType = () => { phone.search = "zzz"; };
   const twinPh = await s.type({ element_index: i1, text: "hello" });
-  ok(NOT_TAPPED.test(twinPh.error), "a twin of the tapped field reads empty with the text as its placeholder, and a field of another kind changed: not confirmed — not the placeholder result (P12-AGY-3)", twinPh);
+  ok(NOT_TAPPED.test(twinPh.error), "a twin of the tapped field reads empty with the text as its placeholder, and a field of another kind changed: not confirmed — not the placeholder result", twinPh);
   phone.search = ""; phone.typeInto = null;
   phone.moreFields = twins();
   const i2 = await idx("Tag");
   phone.afterType = () => { phone.moreFields[0].label = "Tag, 5 characters"; };
   const twinRenamed = await s.type({ element_index: i2, text: "hello" });
   ok(!twinRenamed.error && twinRenamed.text === `typed 5 characters in ${SETTINGS} — the text fields listed before the text went in and afterwards are not the same ones, so the text could not be tied to one of them (delivery=delivered_unverified, retry=unsafe)` && phone.moreFields[0].value === "hello",
-    "the tapped twin's label changed as the text went in while its twin stayed: unverified (the fields are not the same ones), not 'the tapped field was not seen to gain it' (P12-AGY-2)", twinRenamed);
+    "the tapped twin's label changed as the text went in while its twin stayed: unverified (the fields are not the same ones), not 'the tapped field was not seen to gain it'", twinRenamed);
   phone.moreFields = twins();
   const i3 = await idx("Tag");
   phone.afterType = () => { phone.search = "zzz"; };
@@ -1232,7 +1232,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(!twinShown.error && VERIFIED.test(twinShown.text) && phone.moreFields[0].value === "hello" && phone.search === "zzz", "one of the twins gained the text while a field of another kind changed: that twin is the one judged — verified", twinShown);
 }
 
-// ---------- pre-review P13: the placeholder answer only for a field that did not change; the text counts only where it is new ----------
+// ---------- the placeholder answer only for a field that did not change; the text counts only where it is new ----------
 {
   const f = (key, value, o = {}) => ({ key, value, cut: false, ph: "", ...o });
   const K = "textField||", K2 = "searchField|search|Search", K3 = "textField|note|Note";
@@ -1240,16 +1240,16 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(fieldShows(ph, [f(K, "", { ph: "hello" }), f(K2, "hello")], "hello", K) === "mismatch"
     && fieldShows([f(K, "abc", { ph: "hello" })], [f(K, "", { ph: "hello" })], "hello", K) === "mismatch" && fieldShows([f(K, "abc", { ph: "hello" })], [f(K, "", { ph: "hello" })], "hello", null) === "mismatch"
     && fieldShows(ph, [f(K, "", { ph: "hello" }), f(K2, "")], "hello", K) === "placeholder",
-    "fieldShows: the tapped field reads empty with the text as its placeholder — the placeholder answer only when no field changed: not when the text went to another field, nor when the field had a value and reads empty now (P13-AGY-1)");
+    "fieldShows: the tapped field reads empty with the text as its placeholder — the placeholder answer only when no field changed: not when the text went to another field, nor when the field had a value and reads empty now");
   ok(fieldShows([f(K, ""), f(K2, "hello")], [f("textField||renamed", "wrong"), f(K2, "hello")], "hello", K) === "mismatch"
     && fieldShows([f(K, "hello")], [f(K, "hello"), f(K3, "")], "hello", null) === "mismatch"
     && fieldShows([f(K, "hello")], [f(K, "hello"), f(K3, "hello")], "hello", null) === "moved"
     && fieldShows([f(K, "hello")], [f(K, "hello"), f(K3, "x", { cut: true })], "hello", null) === "moved",
-    "fieldShows: the reads list different fields — the text counts only where it is new (more fields have it than had it before, or one came back cut); a field that had it all along does not make it 'moved' (P13-AGY-2)");
+    "fieldShows: the reads list different fields — the text counts only where it is new (more fields have it than had it before, or one came back cut); a field that had it all along does not make it 'moved'");
   const pair = [f(K, "hello"), f(K, "a")];
   ok(fieldShows(pair, [f(K, "hello!"), f(K, "b")], "hello", K) === "mismatch" && fieldShows(pair, [f(K, "hello!"), f(K, "b")], "hello", null) === "mismatch"
     && fieldShows(pair, [f(K, "hello!"), f(K, "ahello")], "hello", K) === "several",
-    "fieldShows: several changed — a changed field that had the text and gained something else does not count; one that gained the text does (P13-AGY-2)");
+    "fieldShows: several changed — a changed field that had the text and gained something else does not count; one that gained the text does");
 }
 {
   // … and ios_type: the tapped field, the only one of its kind, reads empty with the text as its placeholder
@@ -1259,15 +1259,15 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   await s.launch({ bundle_id: SETTINGS });
   phone.typeInto = "search";
   const elsewhere = await s.type({ element_index: await idx("Name"), text: "Your name" });
-  ok(notTapped(9).test(elsewhere.error) && phone.search === "Your name" && phone.name === "", "the tapped field's placeholder is the text and the text went into another field: not confirmed — not the placeholder result (P13-AGY-1)", elsewhere);
+  ok(notTapped(9).test(elsewhere.error) && phone.search === "Your name" && phone.name === "", "the tapped field's placeholder is the text and the text went into another field: not confirmed — not the placeholder result", elsewhere);
   phone.search = ""; phone.name = "abc"; phone.typeInto = "void";
   const i = await idx("Name");
   phone.afterType = () => { phone.name = ""; };
   const cleared = await s.type({ element_index: i, text: "Your name" });
-  ok(notTapped(9).test(cleared.error), "the tapped field had a value and reads empty now, its placeholder being the text: not confirmed — it did not gain the text (P13-AGY-1)", cleared);
+  ok(notTapped(9).test(cleared.error), "the tapped field had a value and reads empty now, its placeholder being the text: not confirmed — it did not gain the text", cleared);
 }
 
-// ---------- pre-review P14: a field that is cut in both reads is not evidence ----------
+// ---------- a field that is cut in both reads is not evidence ----------
 {
   const f = (key, value, o = {}) => ({ key, value, cut: false, ph: "", ...o });
   const K = "textField||", K3 = "textField|note|Note";
@@ -1279,13 +1279,13 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "fieldShows: several changed — a changed field cut in both reads does not count; one that is newly cut does");
 }
 
-// ---------- pre-review P15: the one field that changed came back cut and was not cut before ----------
+// ---------- the one field that changed came back cut and was not cut before ----------
 {
   const f = (key, value, o = {}) => ({ key, value, cut: false, ph: "", ...o });
   const K = "textField||", K2 = "searchField|search|Search";
   ok(fieldShows([f(K, "abcd")], [f(K, "abcdh", { cut: true })], "hello", K) === "cut" && fieldShows([f(K, "abcd")], [f(K, "abcdh", { cut: true })], "hello", null) === "cut"
     && fieldShows([f(K, "abcd"), f(K2, "")], [f(K, "abcdh", { cut: true }), f(K2, "zzz")], "hello", K) === "cut" && fieldShows([f(K, "abcd", { cut: true })], [f(K, "abcdh", { cut: true })], "hello", null) === "mismatch",
-    "fieldShows: the one field singled out came back cut and was not cut before — 'cut' (unverified), by the tapped key and as the only changed field; cut in both reads stays a mismatch (P15-3, P15-AGY-1)");
+    "fieldShows: the one field singled out came back cut and was not cut before — 'cut' (unverified), by the tapped key and as the only changed field; cut in both reads stays a mismatch");
   const { s, phone, idx } = rig();
   await s.launch({ bundle_id: SETTINGS });
   const i = await idx("Search");
@@ -1295,7 +1295,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "ios_type: the tapped field's value came back cut after the text went in and was not cut before: unverified, with that reason — not type_not_confirmed", newlyCut);
 }
 
-// ---------- pre-review P16: a value that reads the same and came back cut, when it was not before, has changed ----------
+// ---------- a value that reads the same and came back cut, when it was not before, has changed ----------
 {
   const f = (key, value, o = {}) => ({ key, value, cut: false, ph: "", ...o });
   const K = "textField||", K2 = "searchField|search|Search";
@@ -1305,7 +1305,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     && fieldShows([f(K, "abcd", { cut: true })], [f(K, "abcd")], "hello", K) === "mismatch" && fieldShows([f(K, "abcd", { cut: true })], [f(K, "abcd", { cut: true })], "hello", K) === "mismatch"
     && fieldShows([f(K, "abcd"), f(K2, "wxyz")], [f(K, "abcd", { cut: true }), f(K2, "wxyz", { cut: true })], "hello", null) === "several"
     && fieldShows([f(K, "abcd")], [f(K, "abcd", { cut: true }), f(K2, "")], "hello", K) === "cut",
-    "fieldShows: the value reads the same and came back cut, not cut before — it changed ('cut', not a mismatch and not the placeholder answer of a twin); cut before and not after, or cut in both, is no gain; two such fields are 'several' (P16-AGY-1)");
+    "fieldShows: the value reads the same and came back cut, not cut before — it changed ('cut', not a mismatch and not the placeholder answer of a twin); cut before and not after, or cut in both, is no gain; two such fields are 'several'");
   // cut before and whole now, with the same value, is no change — it neither hides a field
   // that did gain the text nor the placeholder answer
   ok(fieldShows([f(K, "ab", { cut: true }), f(K2, "", { ph: "hello" })], [f(K, "ab"), f(K2, "", { ph: "hello" })], "hello", null) === "placeholder"

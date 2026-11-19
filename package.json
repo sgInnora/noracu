@@ -1,6 +1,6 @@
 {
   "name": "noracu",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "mcpName": "io.github.sgInnora/noracu",
   "description": "Local MCP server: macOS apps and a browser by element index, plus iPhone Mirroring (experimental).",
   "type": "module",
@@ -13,7 +13,7 @@
     "test": "node test/engine-unit.mjs && node test/bg-inject-unit.mjs && node test/release-gate-unit.mjs && node test/gen-tools-unit.mjs && node test/cli-unit.mjs && node test/check-pack-unit.mjs && node test/docs-codes-unit.mjs && node test/ios-xcuitest-unit.mjs && node test/ios-session-unit.mjs && node test/ios-setup-unit.mjs && node test/ios-runner-rules.mjs && node test/ios-e2e.mjs && node test/e2e.mjs",
     "test:ci": "node test/engine-unit.mjs && node test/bg-inject-unit.mjs && node test/release-gate-unit.mjs && node test/gen-tools-unit.mjs && node test/cli-unit.mjs && node test/check-pack-unit.mjs && node test/docs-codes-unit.mjs && node test/ios-xcuitest-unit.mjs && node test/ios-session-unit.mjs && node test/ios-setup-unit.mjs && node test/ios-runner-rules.mjs && node test/ios-e2e.mjs && NORACU_CI=1 node test/e2e.mjs",
     "test:imctl": "cd imctl && ${NORACU_PYTHON:-python3} tests/test_smoke.py",
-    "check": "node --check src/server.mjs && node --check src/mac-ax.js && node --check src/approval.js && node --check src/bg-inject.js && node --check src/ios-xcuitest.js && node --check src/ios-session.js && node --check src/ios-setup.js && node --check src/doctor.js && node --check scripts/gen-tools.mjs && node --check scripts/release-gate.mjs && node --check scripts/check-pack.mjs && node --check scripts/pack-rules.mjs && python3 -c \"import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]\" imctl/src/imctl/*.py",
+    "check": "node --check src/server.mjs && node --check src/mac-ax.js && node --check src/approval.js && node --check src/bg-inject.js && node --check src/ios-xcuitest.js && node --check src/ios-session.js && node --check src/ios-setup.js && node --check src/doctor.js && node --check scripts/gen-tools.mjs && node --check scripts/release-gate.mjs && node --check scripts/check-pack.mjs && node --check scripts/pack-rules.mjs && node --check scripts/check-public.mjs && node scripts/check-public.mjs && python3 -c \"import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]\" imctl/src/imctl/*.py",
     "prepublishOnly": "npm run check && node scripts/release-gate.mjs && node scripts/check-pack.mjs && node scripts/gen-tools.mjs && git diff --exit-code docs/tools.md"
   },
   "engines": {

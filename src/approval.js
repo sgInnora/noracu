@@ -42,20 +42,31 @@ const TERMINALS = [
   { bundle: "org.tabby", path: /\/Tabby\.app\//i },
   { bundle: "com.raphaelamorim.rio", path: /\/Rio\.app\/|\/rio$/i },
   { bundle: "dev.commandline.waveterm", path: /\/Wave\.app\//i },
+  // Orca, an agent IDE whose terminals run a shell (appId and productName from its electron-builder config, and its
+  // Homebrew cask, 2026-11-19). On this list rather than with the IDEs so that a client running in one of its
+  // terminals is recognised as hosted by it too: its helper processes live inside Orca.app
+  { bundle: "com.stablyai.orca", path: /\/Orca\.app\//i },
 ];
 
 // --- host terminal (resolved once): the first ancestor that is a terminal app; tmux / screen are walked
 // through. Returns { bundle } for a listed terminal, { name } for another app bundle named like a terminal,
 // or null (chain broken, no terminal found).
+// What one ancestor's executable path says: { bundle } for a listed terminal (a helper inside its .app counts),
+// { name } for another app bundle named like a terminal, null for anything else. Exported for the tests.
+export function terminalFromPath(comm) {
+  const t = TERMINALS.find((x) => x.path.test(comm));
+  if (t) return { bundle: t.bundle };
+  const app = /\/([^/]+)\.app\/Contents\/MacOS\/[^/]+$/.exec(comm);
+  if (app && /term|shell|console/i.test(app[1])) return { name: app[1] };
+  return null;
+}
 function hostTerminal() {
   try {
     let pid = process.ppid;
     for (let i = 0; i < 12 && pid > 1; i++) {
       const comm = execFileSync("/bin/ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
-      const t = TERMINALS.find((x) => x.path.test(comm));
-      if (t) return { bundle: t.bundle };
-      const app = /\/([^/]+)\.app\/Contents\/MacOS\/[^/]+$/.exec(comm);
-      if (app && /term|shell|console/i.test(app[1])) return { name: app[1] };
+      const t = terminalFromPath(comm);
+      if (t) return t;
       // anything else — a shell, node, npm, tmux, screen — is walked through to its parent
       const ppidLine = execFileSync("/bin/ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
       pid = Number(ppidLine);
@@ -67,7 +78,7 @@ function hostTerminal() {
 const HOST_TERMINAL = hostTerminal();
 
 // the same apps by name too, for an app whose bundle id cannot be read (Warp Preview was missed)
-const TERMINAL_NAMES = ["Terminal", "iTerm2", "iTerm", "WezTerm", "Ghostty", "Warp*", "Alacritty", "kitty", "Hyper", "Tabby", "Rio", "Wave"];
+const TERMINAL_NAMES = ["Terminal", "iTerm2", "iTerm", "WezTerm", "Ghostty", "Warp*", "Alacritty", "kitty", "Hyper", "Tabby", "Rio", "Wave", "Orca"];
 // IDEs with a built-in terminal (2026-11-12): keys typed into one can reach its shell, so
 // they get no input by default either. Bundle ids (VS Code and Cursor read from installed apps), and names,
 // which also match when the bundle id is read but differs (a fork, an edition)

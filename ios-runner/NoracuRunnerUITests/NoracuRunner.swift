@@ -8,7 +8,7 @@ import Network
 // What this runner was built from: a hash of its own sources, kept up to date by scripts/gen-runner-build.mjs
 // (a test fails when it is not). It goes out on the ready line; the Mac side does not use a runner whose build
 // is not the one its own copy of these sources names.
-let noracuRunnerBuild = "b4383f0898e5"
+let noracuRunnerBuild = "043fbc1f2a62"
 
 // MARK: - pure rules (no XCTest: test/ios-runner-rules.mjs compiles this block on its own and runs it)
 

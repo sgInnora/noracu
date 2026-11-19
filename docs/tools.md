@@ -1,7 +1,7 @@
 # Tool reference
 
 > Auto-generated from the running server (`node scripts/gen-tools.mjs`) — always in sync with the implementation. Hints are the four MCP tool annotations each tool reports — R read-only, D destructive, I idempotent, O open-world, – false — hints for the client, not permissions.
-> noracu v0.3.1 · 33 tools listed by default (the Mac and browser layers; NORACU_LAYERS unset), 47 with NORACU_LAYERS=mac,browser,iphone (iPhone Mirroring backend), 42 with NORACU_PHONE_BACKEND=xcuitest as well (the ios_* group replaces phone_*)
+> noracu v0.3.2 · 33 tools listed by default (the Mac and browser layers; NORACU_LAYERS unset), 47 with NORACU_LAYERS=mac,browser,iphone (iPhone Mirroring backend), 42 with NORACU_PHONE_BACKEND=xcuitest as well (the ios_* group replaces phone_*)
 
 ## Mac layer (computer-use)
 

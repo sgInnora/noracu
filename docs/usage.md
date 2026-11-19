@@ -295,6 +295,11 @@ model — don't let it override the task.
 
 ## 7. Environment variables
 
+Set them on the server entry: `"env": { "NAME": "value" }` in Claude Desktop's or Cursor's JSON; in Claude Code,
+`-e NAME=value` right after the server name — `claude mcp add -s user noracu -e NORACU_READ_ONLY=1 -- <node> <server.mjs>`
+(before the name, `-e` takes the name as one more variable and the command fails with "Invalid environment variable
+format"). Then restart the client.
+
 | Variable | Default | Effect |
 |---|---|---|
 | `NORACU_READ_ONLY` | unset | `=1` observation-only (an allowlist of observe + browser-lifecycle tools); all input-synthesis tools plus `mac_clipboard_read`, `mac_notifications`, and `mac_wait` on `condition: "notification"` are refused (`mac_ax_state` / `mac_find` also skip `web_accessibility`) |

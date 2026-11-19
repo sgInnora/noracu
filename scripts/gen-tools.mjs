@@ -16,7 +16,7 @@ const OUT = join(__dirname, "..", "docs", "tools.md");
 // ios_* for xcuitest), so the reference asks both and prints both groups.
 async function listTools(env) {
   // all three layers: the reference lists every layer whatever the shell that runs this has set (unset is
-  // mac,browser since S1)
+  // mac,browser)
   // no NORACU_* setting of the shell that runs this reaches the server (NORACU_READ_ONLY or a
   // kill switch would change what the reference says)
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("NORACU_")));
