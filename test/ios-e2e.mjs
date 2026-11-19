@@ -222,10 +222,15 @@ const J = (r) => JSON.parse(r.text);
   // no rules: input that names the Home Screen is sent as asked, without springboard_only
   const free = world({ env: { NORACU_DENY_APPS: "none" } });
   await free.call("ios_launch", { bundle_id: SETTINGS });
+  // …but not into an app: with Settings in front SpringBoard shows no icons, and the tap would land in Settings
+  const covered = await free.call("ios_tap", { bundle_id: SPRINGBOARD, x: 100, y: 100 });
+  check("with no app rules and an app in front, a tap that names com.apple.springboard is not sent into that app",
+    covered.isError && /app_not_foreground: the Home Screen is not what the iPhone is showing/.test(covered.text) && covered.text.endsWith(NOT_SENT), covered.text.slice(0, 120));
+  await free.call("ios_home");
   const freeTap = await free.call("ios_tap", { bundle_id: SPRINGBOARD, x: 100, y: 100 });
-  const freeSent = free.lines("runner.log").filter(([o]) => o === "tap");
-  check("with no app rules (NORACU_DENY_APPS=none, no approval file), a tap that names com.apple.springboard is sent as asked, without springboard_only",
-    !freeTap.isError && /^tapped/.test(freeTap.text) && freeSent.length === 1 && !freeSent[0][1].includes("springboard_only"), freeTap.text.slice(0, 120));
+  const freeSent = free.lines("runner.log").filter(([o, a]) => o === "tap" && !a.includes("springboard_only"));
+  check("with no app rules (NORACU_DENY_APPS=none, no approval file), a tap that names com.apple.springboard is sent as asked on the Home Screen, without springboard_only",
+    !freeTap.isError && /^tapped/.test(freeTap.text) && freeSent.length === 1, freeTap.text.slice(0, 120));
   await free.close();
   // pre-review P6: the stop file and read-only mode are checked before a call reaches the session, so they
   // still answer first — refusing before the gate takes nothing from them

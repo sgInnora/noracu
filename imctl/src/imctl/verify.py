@@ -10,7 +10,6 @@ that OpenAI's Computer Use enforces with its revision mechanism.
 from __future__ import annotations
 
 import hashlib
-import subprocess
 import tempfile
 import unicodedata
 from dataclasses import dataclass
@@ -31,31 +30,13 @@ class ScreenState:
 def capture_hash() -> ScreenState:
     """Capture the window and return a content fingerprint.
 
-    The hash is computed over a downsampled copy: full-resolution
-    hashes are sensitive to video-stream noise (compression flicker)
-    even when nothing meaningful changed.
+    The window's own pixels (window_luma: by window id, so a window on top of it does not count), downsampled
+    to about half the window to suppress video-stream noise (compression flicker), hashed in memory. It used to
+    write a screencapture of the window's screen region and a downsampled copy to two tempfile.mktemp paths.
     """
     b = get_bounds()
-    raw = tempfile.mktemp(prefix="imctl_verify_", suffix=".png")
-    small = tempfile.mktemp(prefix="imctl_verify_s_", suffix=".png")
-    try:
-        subprocess.run(
-            ["screencapture", "-x", f"-R{b.x},{b.y},{b.width},{b.height}", raw],
-            check=True,
-            timeout=10,
-        )
-        # Downsample to ~163x360 (half window) to suppress stream noise.
-        subprocess.run(
-            ["sips", "-z", "360", "163", raw, "--out", small],
-            check=True,
-            capture_output=True,
-            timeout=10,
-        )
-        with open(small, "rb") as f:
-            digest = hashlib.md5(f.read()).hexdigest()
-        return ScreenState(md5=digest, width=b.width, height=b.height)
-    finally:
-        subprocess.run(["rm", "-f", raw, small], capture_output=True)
+    digest = hashlib.md5(window_luma((163, 360))).hexdigest()
+    return ScreenState(md5=digest, width=b.width, height=b.height)
 
 
 def changed(before: ScreenState, after: ScreenState) -> bool:
@@ -103,14 +84,14 @@ def window_luma(size: tuple[int, int] = (36, 78)) -> bytes:
     Reads the window's own pixels with CGWindowListCreateImage — valid
     even when other windows cover it — and renders them into an 8-bit
     gray bitmap whose backing store is a Python bytearray. No temp
-    files, no sips, no subprocess (unlike capture_hash). Returns
+    files, no sips, no subprocess. Returns
     ``w*h`` bytes, one gray level (0-255) per pixel. Raises WindowError
     when the window cannot be found, is not on screen (hidden,
     minimized or on another Space), its image cannot be captured, or
     the frame is a near-single gray level: during window transitions
     CGWindowListCreateImage can hand back a blank/transparent frame,
     and a frame diff against it "confirms" changes that never happened
-    on the phone (F25).
+    on the phone.
     """
     import Quartz
 
@@ -143,8 +124,8 @@ def window_luma(size: tuple[int, int] = (36, 78)) -> bytes:
             luma = bytes(buf)
             if max(luma) - min(luma) >= 4:
                 return luma
-        # F31: a transition can hand back no image or a blank frame for a
-        # moment; look again shortly. Only a real frame is ever accepted (F25).
+        # A transition can hand back no image or a blank frame for a
+        # moment; look again shortly. Only a real frame is ever accepted.
         if attempt < 2:
             time.sleep(0.12)
     if img is None:
@@ -211,7 +192,7 @@ def screen_rect(size: tuple[int, int] = SCREEN_ALPHA_SIZE):
 def is_capture_error(exc: BaseException) -> bool:
     """True when ``exc`` means the pixels a check needed are not the phone's.
 
-    F25: WindowError (window missing, offscreen, or a blank/transparent
+    WindowError (window missing, offscreen, or a blank/transparent
     frame) and CaptureError (screencapture by window id failed) both
     mean a verification could not observe the screen — every check that
     depends on a capture must count that as "unconfirmed", never as
@@ -243,19 +224,19 @@ def text_probe(text: str) -> str | None:
     return probe if len(probe) >= 2 else None
 
 
-# 0.2.5 (Andy's call, 2026-11-07): a typed text is confirmed only by a sighting where a field can be —
+# 0.2.5: a typed text is confirmed only by a sighting where a field can be —
 # a spot where the text's probe was not seen before the paste, below the strip at the top where the
 # status bar and notification banners are drawn. A rise in the whole-screen count alone (a banner that
 # carries the same words, a label somewhere else) no longer confirms a paste.
 BANNER_STRIP_NY = 0.15
-# Andy's call (2026-11-07, review R37): a text shorter than this (after the probe's compaction) is never
+# a text shorter than this (after the probe's compaction) is never
 # confirmed by a sighting — "in" is part of "Sign in", "ok" of "Book" — so it never licenses a restore either
 VERIFY_MIN_PROBE = 4
 
 
 def probe_spots(text: str, hits) -> list[tuple[float, float]] | None:
     """Where ``text``'s probe shows in ``hits`` (one spot per OCR line that holds it), leaving out the
-    paste-progress box (F44) and the banner strip at the top; None when the text is too short for a
+    paste-progress box and the banner strip at the top; None when the text is too short for a
     probe. Hits without a position never count."""
     probe = text_probe(text)
     if probe is None:
@@ -263,9 +244,11 @@ def probe_spots(text: str, hits) -> list[tuple[float, float]] | None:
     if len(probe) < VERIFY_MIN_PROBE:
         return []
     spots = []
-    for hit in hits:
+    hits = list(hits)
+    hud = _paste_hud_parts(hits)   # the box's hits, also when it was read as two
+    for i, hit in enumerate(hits):
         nx, ny = getattr(hit, "nx", None), getattr(hit, "ny", None)
-        if nx is None or ny is None or ny < BANNER_STRIP_NY or _is_paste_hud(hit):
+        if nx is None or ny is None or ny < BANNER_STRIP_NY or i in hud:
             continue
         if probe in _compact(getattr(hit, "text", hit)):
             spots.append((nx, ny))
@@ -275,14 +258,16 @@ def probe_spots(text: str, hits) -> list[tuple[float, float]] | None:
 def strip_spots(text: str, hits) -> list[tuple[float, float]]:
     """Where ``text``'s probe shows inside the banner strip at the top (the spots probe_spots leaves
     out), the paste-progress box aside; [] when the text is too short to be confirmed at all. Only
-    explains an unconfirmed paste (review 0.2.6 #7) — never confirms one."""
+    explains an unconfirmed paste — never confirms one."""
     probe = text_probe(text)
     if probe is None or len(probe) < VERIFY_MIN_PROBE:
         return []
     spots = []
-    for hit in hits:
+    hits = list(hits)
+    hud = _paste_hud_parts(hits)
+    for i, hit in enumerate(hits):
         nx, ny = getattr(hit, "nx", None), getattr(hit, "ny", None)
-        if nx is None or ny is None or ny >= BANNER_STRIP_NY or _is_paste_hud(hit):
+        if nx is None or ny is None or ny >= BANNER_STRIP_NY or i in hud:
             continue
         if probe in _compact(getattr(hit, "text", hit)):
             spots.append((nx, ny))
@@ -297,16 +282,18 @@ def has_new_spot(before, after, eps: float = 0.03) -> bool:
 def probe_count(text: str, hits) -> int | None:
     """How many times ``text``'s probe occurs in the joined OCR ``hits``;
     None when the text is too short for a probe. The phone's "Pasting from …"
-    box is left out (F44): its words are never the typed text, even when the
+    box is left out: its words are never the typed text, even when the
     probe is a piece of them ("from", "pro" in a Mac named "M5pro")."""
     probe = text_probe(text)
     if probe is None:
         return None
-    return _compact("".join(getattr(hit, "text", hit) for hit in hits
-                            if not _is_paste_hud(hit))).count(probe)
+    hits = list(hits)
+    hud = _paste_hud_parts(hits)   # the box's hits, also when it was read as two
+    return _compact("".join(getattr(hit, "text", hit) for i, hit in enumerate(hits)
+                            if i not in hud)).count(probe)
 
 
-# F44 (2026-11-05 real device, load ~25): when the phone is slow to fetch a paste
+# 2026-11-05 real device, load ~25: when the phone is slow to fetch a paste
 # it shows a "Pasting from <Mac name>…" progress box mid-screen. That box alone
 # moves the whole-window frame diff past TYPE_MIN_DIFF while the text has not
 # arrived, and type_text() reported such pastes as typed. English UI only: an
@@ -318,6 +305,36 @@ def _is_paste_hud(hit) -> bool:
     return PASTE_HUD_PROBE in _compact(getattr(hit, "text", hit))
 
 
+# two hits whose centres are this close in height are words of one line…
+SAME_LINE_NY = 0.012
+# …and the two words of the box are next to each other: centres no further apart than this (the box is narrower
+# than the screen). Two hits at the two ends of a line are not it.
+HUD_PAIR_MAX_DX = 0.5
+
+
+def _paste_hud_parts(hits) -> set:
+    """Indexes of the hits that make up the "Pasting from …" box: a hit that reads it alone; two
+    neighbours in reading order that read it only together (the box split over two lines); and two
+    hits of one line, taken left to right, that read it only together — wherever the reading order
+    put them. That order comes from row buckets (vision.read_screen), so two words of one line on
+    either side of a bucket edge come out swapped, or with other hits between them."""
+    hits = list(hits)
+    c = [_compact(str(getattr(h, "text", h))) for h in hits]
+    parts = {i for i, t in enumerate(c) if PASTE_HUD_PROBE in t}
+    together = lambda i, j: i not in parts and j not in parts and PASTE_HUD_PROBE in c[i] + c[j]
+    pairs = [(i, i + 1) for i in range(len(c) - 1) if together(i, i + 1)]
+    pos = [(getattr(h, "nx", None), getattr(h, "ny", None)) for h in hits]
+    for i, (xi, yi) in enumerate(pos):
+        if xi is None or yi is None:
+            continue
+        for j, (xj, yj) in enumerate(pos):
+            if j != i and xj is not None and yj is not None and abs(yi - yj) <= SAME_LINE_NY and 0 < xj - xi <= HUD_PAIR_MAX_DX and together(i, j):
+                pairs.append((i, j))
+    for i, j in pairs:
+        parts.update((i, j))
+    return parts
+
+
 def shows_paste_hud(hits) -> bool:
     """True when the OCR read shows the phone's "Pasting from …" progress box
     (compared like probes: NFKC, lowercase, whitespace removed). While it
@@ -327,10 +344,7 @@ def shows_paste_hud(hits) -> bool:
     split "Pasting" and "from" into two hits. Only neighbours are joined
     (not the whole screen), and a false match can only block a restore or a
     confirmation (fail-closed), never license one."""
-    texts = [str(getattr(hit, "text", hit)) for hit in hits]
-    if any(PASTE_HUD_PROBE in _compact(t) for t in texts):
-        return True
-    return any(PASTE_HUD_PROBE in _compact(a + b) for a, b in zip(texts, texts[1:]))
+    return bool(_paste_hud_parts(hits))
 
 
 def screen_shows_text(text: str, read_screen) -> bool:
@@ -363,7 +377,7 @@ def _compact(s: str) -> str:
 
 
 def is_short_text(text: str, limit: int = 2) -> bool:
-    """True when ``text`` normalizes to 1..``limit`` characters (F27).
+    """True when ``text`` normalizes to 1..``limit`` characters.
 
     Such texts are OCR-fragile: Vision's full-frame pass can skip an isolated
     one- or two-character label entirely, so callers add a pass with
@@ -373,7 +387,7 @@ def is_short_text(text: str, limit: int = 2) -> bool:
 
 
 def _fold_label(s: str) -> str:
-    """Exact-reading key for a short label (F27).
+    """Exact-reading key for a short label.
 
     NFKC, lowercase, whitespace removed, trailing ".,:;" dropped, and "×"
     folded to "x" — the readings Vision gives the one-letter app "X" — so
@@ -384,24 +398,29 @@ def _fold_label(s: str) -> str:
 
 
 def new_text_positions(text: str, before, after, eps: float = 0.03) -> list:
-    """Centres of hits in ``after`` reading exactly ``text`` where ``before`` had none (F27).
+    """Centres of hits in ``after`` reading exactly ``text`` where ``before`` had none.
 
     Same matching as new_text_occurrences(); returns the (nx, ny) of each
-    such hit instead of their count.
+    such hit instead of their count. As for a longer text (probe_spots), a
+    hit in the banner strip at the top (a notification can carry the
+    character) or in the "Pasting from …" box is no sighting.
     """
     want = _fold_label(text)
     if not want:
         return []
+    after = list(after)
+    hud = _paste_hud_parts(after)
     olds = [h for h in before if _fold_label(h.text) == want]
     return [
-        (h.nx, h.ny) for h in after
-        if _fold_label(h.text) == want
+        (h.nx, h.ny) for i, h in enumerate(after)
+        if i not in hud and h.ny >= BANNER_STRIP_NY
+        and _fold_label(h.text) == want
         and not any(abs(h.nx - o.nx) <= eps and abs(h.ny - o.ny) <= eps for o in olds)
     ]
 
 
 class RepeatedSighting:
-    """Evidence that a typed single character really arrived (F27/F33, review).
+    """Evidence that a typed single character really arrived.
 
     One read showing the character at a new position is not enough: a
     label the baseline read missed, a banner, a list still moving or a
@@ -448,7 +467,7 @@ def wait_still(luma=None, *, sleep=None, clock=None, timeout_s: float = 1.5,
 
 
 def new_text_occurrences(text: str, before, after, eps: float = 0.03) -> int:
-    """Hits in ``after`` reading exactly ``text`` where ``before`` had none (F27).
+    """Hits in ``after`` reading exactly ``text`` where ``before`` had none.
 
     A hit counts when no matching hit in ``before`` lay within ``eps`` (in
     both axes) of it: evidence that a typed single character showed up even

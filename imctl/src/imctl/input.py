@@ -48,6 +48,8 @@ from .window import WindowBounds, ensure_frontmost, get_bounds
 
 TAP_INTERVAL_S = 0.05
 LONG_PRESS_S = 0.8
+# a hold longer than this looks at the frontmost app again every so often (a long press may last 10 s)
+LONG_PRESS_CHECK_S = 1.0
 # Device run 2026-11-07/08 (macOS 27.2): iPhone Mirroring pastes
 # through Universal Clipboard, which tells the phone about new Mac clipboard content
 # asynchronously. Once in about 30 pastes (23:33, Cmd+V ~0.5 s after the write) the phone pasted
@@ -67,7 +69,7 @@ class InputError(RuntimeError):
 
 
 class FocusLost(InputError):
-    """Raised when iPhone Mirroring stopped being the frontmost app (F26).
+    """Raised when iPhone Mirroring stopped being the frontmost app.
 
     The frontmost check runs right before every synthesized event; a
     keystroke landing in whatever app took the foreground in the meantime
@@ -83,14 +85,14 @@ class PasteFocusLost(FocusLost):
     rule. Raised instead of bringing iPhone Mirroring forward again."""
 
 
-# F26: consulted right before every synthesized event. Module-level so
+# Consulted right before every synthesized event. Module-level so
 # tests can swap it; window.is_frontmost asks System Events afresh on
-# every call (F30: an in-process NSWorkspace answer is a stale snapshot).
+# every call (an in-process NSWorkspace answer is a stale snapshot).
 _focus_check = window.is_frontmost
 
 
 def _require_focus() -> None:
-    """Refuse to send any event unless iPhone Mirroring is still frontmost (F26)."""
+    """Refuse to send any event unless iPhone Mirroring is still frontmost."""
     if not _focus_check():
         raise FocusLost("iPhone Mirroring is not the frontmost app")
 
@@ -114,7 +116,7 @@ def scroll_trackpad(total_px: float, nx: float = 0.5, ny: float = 0.6,
     """Scroll like a two-finger trackpad swipe: continuous wheel events with phases.
 
     iPhone Mirroring turns these into a touch scroll of the list under the cursor
-    (F16: a mouse drag scrolls nothing in a list, and a bare wheel event without a
+    (a mouse drag scrolls nothing in a list, and a bare wheel event without a
     phase is ignored). Negative total_px moves the content up, revealing what is
     below. The cursor is moved over the mirror first, because scroll events go to
     the window under the cursor.
@@ -123,9 +125,12 @@ def scroll_trackpad(total_px: float, nx: float = 0.5, ny: float = 0.6,
     b = bounds or get_bounds()
     x, y = b.denormalize(nx, ny)
     src = _source()
-    _require_focus()  # F26: before the first event
+    _require_focus()  # before the first event
     _mouse_event(kCGEventMouseMoved, x, y, src)
     time.sleep(0.12)
+    # that pause is long enough for another app to come to the front, with its window under the
+    # pointer: look again before the first wheel event, not only after the fifth
+    _require_focus()
     deltas = scroll_steps(total_px)
     last = len(deltas) - 1
     sent = 1  # events posted so far (the mouse-moved above)
@@ -134,7 +139,7 @@ def scroll_trackpad(total_px: float, nx: float = 0.5, ny: float = 0.6,
     try:
         for i, d in enumerate(deltas):
             if sent % 6 == 0:
-                _require_focus()  # F26: every 6 events; drop the rest on focus loss
+                _require_focus()  # every 6 events; drop the rest on focus loss
             phase = 1 if i == 0 else (4 if i == last else 2)
             _scroll_event(src, d, x, y, phase)
             if phase == 1:
@@ -162,6 +167,10 @@ def _key_event(keycode: int, down: bool, source) -> None:
     event = CGEventCreateKeyboardEvent(source, keycode, down)
     if event is None:
         raise InputError(f"CGEventCreateKeyboardEvent returned None for {keycode}")
+    # A key pressed by itself (Return, Delete, an arrow) carries no modifier. The event source is the
+    # HID state, so without this a modifier held on the Mac's keyboard at that moment rides along:
+    # with ⌘ down, Delete goes out as ⌘Delete.
+    CGEventSetFlags(event, 0)
     CGEventPost(kCGHIDEventTap, event)
 
 
@@ -197,7 +206,7 @@ def tap(nx: float = 0.5, ny: float = 0.5, bounds: WindowBounds | None = None) ->
     b = bounds or get_bounds()
     x, y = b.denormalize(nx, ny)
     src = _source()
-    _require_focus()  # F26: before the first event
+    _require_focus()  # before the first event
     _mouse_event(kCGEventLeftMouseDown, x, y, src)
     try:
         time.sleep(TAP_INTERVAL_S)
@@ -224,10 +233,18 @@ def long_press(nx: float = 0.5, ny: float = 0.5, duration_s: float = LONG_PRESS_
     b = bounds or get_bounds()
     x, y = b.denormalize(nx, ny)
     src = _source()
-    _require_focus()  # F26: before the press-down
+    _require_focus()  # before the press-down
     _mouse_event(kCGEventLeftMouseDown, x, y, src)
     try:
-        time.sleep(duration_s)
+        # the button is not kept down under another app: when one comes to the front during a long hold,
+        # the hold ends there (FocusLost) and the finally below lets the button go
+        left = duration_s
+        while left > 0:
+            step = min(LONG_PRESS_CHECK_S, left)
+            time.sleep(step)
+            left -= step
+            if left > 0:
+                _require_focus()
     finally:
         _mouse_event(kCGEventLeftMouseUp, x, y, src)
 
@@ -270,7 +287,7 @@ def swipe(from_x: float, from_y: float, to_x: float, to_y: float,
     src = _source()
     step_delay = (duration_ms / 1000.0) / SWIPE_STEPS
 
-    _require_focus()  # F26: before the first event
+    _require_focus()  # before the first event
     cx, cy = x0, y0
     _mouse_event(kCGEventLeftMouseDown, cx, cy, src)
     try:
@@ -286,7 +303,7 @@ def swipe(from_x: float, from_y: float, to_x: float, to_y: float,
 
         for i in range(1, SWIPE_STEPS + 1):
             if i % 5 == 0:
-                _require_focus()  # R18: a long swipe stops (and releases) when the mirror loses focus
+                _require_focus()  # a long swipe stops (and releases) when the mirror loses focus
             t = i / SWIPE_STEPS
             e = _ease_in_out(t)
             nx = x0 + (x1 - x0) * e
@@ -305,7 +322,7 @@ def scroll(dy_pixels: int, nx: float = 0.5, ny: float = 0.5,
     b = bounds or get_bounds()
     x, y = b.denormalize(nx, ny)
     src = _source()
-    _require_focus()  # F26: before the only event
+    _require_focus()  # before the only event
     # Axis 1 = vertical; pixel units; negative = scroll down (content up).
     _scroll_event(src, dy_pixels)
 
@@ -349,7 +366,7 @@ class KeyboardLayoutMismatch(InputError):
     Command chords are sent from ANSI key codes; iPhone Mirroring (a Mac
     app) reads its own key equivalents through the Mac's layout first. On
     French AZERTY key code 0 is "q": a ⌘A select-all would arrive as ⌘Q.
-    Raised before anything is posted (review 0.2.6 #5).
+    Raised before anything is posted.
     """
 
 
@@ -398,14 +415,15 @@ def _cmd_chord(keycode: int, before_key=None, activate: bool = True) -> None:
     iPhone Mirroring forwards the *state* of the physical modifier
     keys, not the per-event flag bits: a target-key event that merely
     carries kCGEventFlagMaskCommand arrives on the phone as an
-    unmodified keystroke (F14 — a "Cmd+V" paste typed a literal "v").
+    unmodified keystroke (a "Cmd+V" paste typed a literal "v").
     The chord therefore presses the Command key itself, keeps the
     flag set on every event, and releases Command last. ~30ms between
     steps, all events from one shared source.
 
     ``before_key`` runs after the focus checks, right before the first
     event: the caller's last chance to call the chord off by raising —
-    nothing is posted then (F35).
+    nothing is posted then. The focus is looked at once more between ⌘ down
+    and the key: lost there, ⌘ is released and no key is sent.
 
     ``activate=False``: never bring iPhone Mirroring forward — when another
     app is frontmost, raise FocusLost before anything is posted. type_text's
@@ -413,10 +431,10 @@ def _cmd_chord(keycode: int, before_key=None, activate: bool = True) -> None:
     wait after the clipboard write, and pulling the mirror back would send
     the paste (and their next keystrokes) to the phone.
     """
-    check_chord_layout(keycode)  # review 0.2.6 #5: before anything is sent
+    check_chord_layout(keycode)  # before anything is sent
     if activate:
         ensure_frontmost()
-    _require_focus()  # F26: before the chord's first event
+    _require_focus()  # before the chord's first event
     if before_key is not None:
         before_key()
     src = _source()
@@ -431,6 +449,9 @@ def _cmd_chord(keycode: int, before_key=None, activate: bool = True) -> None:
     post(_VK_COMMAND, True, kCGEventFlagMaskCommand)
     try:
         time.sleep(0.03)
+        # the mirror can lose the front in these 30 ms: then no key goes out with ⌘ held — ⌘ is let go (finally)
+        # and FocusLost is raised, as before the chord's first event
+        _require_focus()
         post(keycode, True, kCGEventFlagMaskCommand)
         try:
             time.sleep(0.03)
@@ -448,7 +469,7 @@ def press_key(key: str) -> None:
     if key not in keymap:
         raise InputError(f"unsupported key: {key!r} (supported: {sorted(keymap)})")
     src = _source()
-    _require_focus()  # F26: before the key-down
+    _require_focus()  # before the key-down
     _key_event(keymap[key], True, src)
     try:
         time.sleep(0.02)
@@ -458,7 +479,7 @@ def press_key(key: str) -> None:
 
 class ClipboardChanged(InputError):
     """Raised when something else wrote the pasteboard between type_text()'s
-    own write and Cmd+V (F35): another app, or Universal Clipboard bringing
+    own write and Cmd+V: another app, or Universal Clipboard bringing
     a copy over from another device. Cmd+V would paste THEIR content into
     the phone, so nothing is sent and their newer content is left alone.
     """
@@ -532,6 +553,7 @@ def restore_pasteboard(pasteboard, saved) -> bool:
     """Put a save_pasteboard() snapshot back (the caller checked the
     changeCount). Returns False when it cannot be put back ("remote",
     "too_large"): then the clipboard is left holding the typed text.
+    False as well when the pasteboard refuses the write.
     Raw text data (bytes or None, the older snapshot) is accepted too."""
     if not isinstance(saved, tuple):
         saved = ("text", saved)
@@ -539,9 +561,10 @@ def restore_pasteboard(pasteboard, saved) -> bool:
     if kind in ("remote", "too_large"):
         return False
     pasteboard.clearContents()
+    # A write the pasteboard refuses (it answers NO) has not put anything back: that is "not restored".
     if kind == "text":
-        if data is not None:
-            pasteboard.setData_forType_(data, "public.utf8-plain-text")
+        if data is not None and pasteboard.setData_forType_(data, "public.utf8-plain-text") is False:
+            return False
     elif kind == "items" and data:
         objs = []
         for rec in data:
@@ -549,12 +572,21 @@ def restore_pasteboard(pasteboard, saved) -> bool:
             for t, d in rec:
                 it.setData_forType_(d, t)
             objs.append(it)
-        pasteboard.writeObjects_(objs)
+        if pasteboard.writeObjects_(objs) is False:
+            return False
     return True
 
 
+def restore_failure(saved) -> str:
+    """Why restore_pasteboard(saved) answered False. "kept_text": the snapshot could not be taken (another
+    device's clipboard, or more than the size limit), so the clipboard was never cleared and still holds what
+    was written last — the typed text. "may_be_empty": it was cleared, then refused the write."""
+    kind = saved[0] if isinstance(saved, tuple) else "text"
+    return "kept_text" if kind in ("remote", "too_large") else "may_be_empty"
+
+
 class PendingRestore:
-    """A clipboard restore type_text() could not license itself (F33).
+    """A clipboard restore type_text() could not license itself.
 
     Holds the user's saved clipboard after a one-character paste whose
     checks did not see the character arrive in time — on the device the
@@ -565,7 +597,7 @@ class PendingRestore:
     clipboard goes back, under the same changeCount rule as type_text().
     Nothing else restores it.
 
-    Since review R38 (Andy's call, 2026-11-07) type_text() creates none: a
+    Since 2026-11-07 type_text() creates none: a
     one-character paste never puts the clipboard back. The class stays for
     its own tests and for open_app's offer loop, which still takes any
     PendingRestore an injected type_text hands over.
@@ -614,13 +646,13 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
       4. wait until the paste is visible on screen,
       5. only then restore the pasteboard.
 
-    Step 4 yields two SEPARATE judgments (F18, tightened in G26b):
+    Step 4 yields two SEPARATE judgments:
 
     ``landed`` — did the paste show up? This decides the return
     value. The whole-window luma frame diff is the fast path; when
     it never fires within ``timeout_s``, a single OCR probe is the
     fallback. Either one confirms the paste (the frame diff not
-    while the phone shows its paste-progress box — F44 below).
+    while the phone shows its paste-progress box — see below).
 
     ``restore_ok`` — may the user's clipboard be restored? ONLY an
     OCR hit grants this. The frame diff merely proves "the picture
@@ -650,7 +682,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     the pasteboard at any moment, so the clipboard is NEVER restored
     after an error there and the original exception is re-raised.
 
-    Capture failures are not errors (F25): when changed() or
+    Capture failures are not errors: when changed() or
     ocr_check() cannot get the mirroring window's pixels (window
     offscreen, blank transition frame, capture by id failed), that
     poll counts as "no change" and the OCR probe as "not seen" —
@@ -663,13 +695,13 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     restored.
 
     ``replace=True`` sends Cmd+A before the paste, replacing the
-    focused field's content. Like clear_text() (F17), Cmd+A targets
+    focused field's content. Like clear_text(), Cmd+A targets
     whatever field currently has focus on the phone: if the focus is
     not the intended input, this overwrites content elsewhere. Use it
     only when the caller has established the focus (e.g. guarded by
     a preceding expect/verify step).
 
-    F41: for text of two or more characters the default OCR check used to
+    For text of two or more characters the default OCR check used to
     ask only "is the text on screen?" — so text that was already there (a
     search-history chip with the same query, an older message) licensed a
     restore at once, and a paste that the phone read late could then paste
@@ -699,11 +731,11 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     ``restore=False``: once Cmd+V may be on its way the user's clipboard is
     never put back — no restore here and no PendingRestore — and it keeps
     ``text``; only an error before Cmd+V still restores it. open_app uses
-    this (F42): a paste can reach the phone more than 10 s late, and
+    this: a paste can reach the phone more than 10 s late, and
     Spotlight can show the name in its own suggestions before that, so a
     licensed restore could still paste the user's clipboard into the search.
 
-    F44: a paste the phone is slow to fetch puts up its "Pasting from <Mac>…"
+    A paste the phone is slow to fetch puts up its "Pasting from <Mac>…"
     progress box, and that box alone moves the frame diff. So when the frame
     diff fired but OCR did not see the text, ``hud_check`` (one more screen
     read) looks for the box: while it shows, the paste is still on its way —
@@ -715,10 +747,10 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     this one or an earlier one, is still on its way and could fetch the
     restored clipboard — and the box's own words never count as the text.
 
-    ``pending`` (F33): kept for callers that pass one, but nothing is
+    ``pending``: kept for callers that pass one, but nothing is
     appended to it any more. A one-character paste used to hand over a
-    PendingRestore for a later restore on evidence; since Andy's call
-    (2026-11-07, review R38) a one-character paste never puts the user's
+    PendingRestore for a later restore on evidence; since 2026-11-07
+    a one-character paste never puts the user's
     clipboard back, here or later — like a text of two or three
     characters, it leaves the clipboard holding ``text``.
 
@@ -729,7 +761,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
 
     from . import verify, vision
 
-    # review 0.2.6 #5: both chords are checked against the Mac's keyboard layout before anything is
+    # both chords are checked against the Mac's keyboard layout before anything is
     # sent, the mirror is brought forward or the clipboard is touched (the chord checks again itself)
     if replace:
         check_chord_layout(_VK_A)
@@ -752,7 +784,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
         paste_chord = chord  # injected (tests): one chord for both keys
     if pasteboard is None:
         pasteboard = NSPasteboard.generalPasteboard()
-    # F27: a single character is invisible to the default OCR probe
+    # A single character is invisible to the default OCR probe
     # (screen_shows_text never matches it) and may already be on screen, so
     # the default checks wait for a still screen, read it with the
     # minimumTextHeight sweep before Cmd+V, and confirm the paste only when
@@ -760,17 +792,17 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     # reads, looking for up to 4 s (the paste can land while Spotlight
     # redraws its results; the field echo blinks with the cursor). A screen
     # that never holds still gets no baseline and so no such sighting. Since
-    # review R38 the sighting never licenses a restore: the clipboard keeps
+    # 2026-11-07 the sighting never licenses a restore: the clipboard keeps
     # holding ``text``.
     single = verify.is_short_text(text, limit=1)
     sweep_before = [None]
-    # F41: the probe count of a 2+ character text before the paste (None = unknown)
+    # The probe count of a 2+ character text before the paste (None = unknown)
     multi = not single and verify.text_probe(text) is not None
     count_before = [None]
     # 0.2.5: where the probe showed before the paste (None = unknown → no confirmation)
     spots_before = [None]
-    strip_before = [[]]  # and inside the banner strip (review 0.2.6 #7: explains, never confirms)
-    # review 0.2.6 #7: why OCR could not confirm a paste the frame diff saw — "too_short" (fewer
+    strip_before = [[]]  # and inside the banner strip (explains, never confirms)
+    # why OCR could not confirm a paste the frame diff saw — "too_short" (fewer
     # than VERIFY_MIN_PROBE characters, never confirmed) or "strip_only" (the text appeared only in
     # the banner strip at the top, where a field cannot be told from a banner)
     unverifiable = [None]
@@ -785,7 +817,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     if hud_check is None:
         if before_check is None:
             def hud_check() -> bool:
-                # F44: one more look for the phone's paste-progress box (a
+                # One more look for the phone's paste-progress box (a
                 # sweep for a single character, like every read of it)
                 return verify.shows_paste_hud(sweep_read() if single else vision.read_screen())
         else:
@@ -814,7 +846,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 deadline = clock() + 4.0
                 while True:
                     hits = sweep_read()
-                    # F44: a read showing the paste-progress box is no evidence —
+                    # A read showing the paste-progress box is no evidence —
                     # a paste is still on its way, and a restore now could hand it
                     # the user's clipboard
                     if not verify.shows_paste_hud(hits) and evidence.add(hits):
@@ -823,7 +855,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                         return False
                     sleep(0.3)
             if multi:
-                # F41: only a rise over the pre-paste count is the paste, and it
+                # Only a rise over the pre-paste count is the paste, and it
                 # must show in two reads (one misread is no license to restore)
                 if count_before[0] is None:
                     return False
@@ -831,7 +863,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                     if i:
                         sleep(0.3)
                     hits = vision.read_screen()
-                    # F44: no license while the paste-progress box shows — a paste
+                    # No license while the paste-progress box shows — a paste
                     # (this one or an earlier one) is still on its way
                     if (verify.shows_paste_hud(hits)
                             or verify.probe_count(text, hits) <= count_before[0]
@@ -848,6 +880,9 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
     sent = [False]  # True from the moment a Cmd+V may be on its way
     saved = None
     saved_change = None
+    # with replace, ⌘A has gone out before any of the checks below: a refusal says so ("nothing was typed" alone
+    # reads as nothing done — the field's text is selected)
+    nothing = "nothing was typed (⌘A had already selected the field's text)" if replace else "nothing was typed"
     try:
         if replace:
             chord(_VK_A)  # select the focused field's content first (see docstring)
@@ -861,7 +896,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             saved_change = None  # nothing of ours to undo
             raise ClipboardChanged(
                 "another app or device changed the clipboard while it was being saved; "
-                "nothing was typed and the clipboard was left as it is")
+                f"{nothing} and the clipboard was left as it is")
 
         pasteboard.clearContents()
         pasteboard.setString_forType_(text, "public.utf8-plain-text")
@@ -879,10 +914,10 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
         if pasteboard.changeCount() != saved_change + 1:
             raise ClipboardChanged(
                 "another app or device changed the clipboard during the wait before the paste; "
-                "nothing was typed and the clipboard was left as it is")
+                f"{nothing} and the clipboard was left as it is")
 
         if pre_read:
-            # F27: the pre-paste sweep for a single character, taken on a
+            # The pre-paste sweep for a single character, taken on a
             # still screen only (a mid-transition read could miss a label
             # that is already there and later pass it off as the paste).
             # Taken after the clipboard write and the wait (0.2.7), so
@@ -896,7 +931,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 sweep_before[0] = None
 
         if pre_count:
-            # F41: count the text before the paste — the higher of two reads
+            # Count the text before the paste — the higher of two reads
             # 0.3 s apart (a redraw or the select-all highlight can hide an
             # occurrence from one read). A capture failure in either leaves it
             # unknown: then OCR can never license a restore for this paste.
@@ -930,18 +965,18 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
             raise
 
         def last_check():
-            # F35: the last look at the pasteboard, after the chord's focus
+            # The last look at the pasteboard, after the chord's focus
             # round-trips and right before its first event: anything else
             # that wrote it since our own write would be pasted instead.
             if pasteboard.changeCount() != saved_change + 1:
                 raise ClipboardChanged(
                     "another app or device changed the clipboard before the "
-                    "paste; nothing was typed and the clipboard was left as it is")
+                    f"paste; {nothing} and the clipboard was left as it is")
             # From here on a paste may be on its way: an error from now on
             # must never put the user's clipboard back.
             sent[0] = True
 
-        # real ⌘ chord — flags alone reach the phone as "v" (F14)
+        # real ⌘ chord — flags alone reach the phone as "v"
         paste_chord(_VK_V, before_key=last_check)  # never re-activates the mirror after the wait
         t0 = clock()
 
@@ -956,7 +991,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                     landed = True
                     break
             except Exception as exc:
-                # F25: a capture failure is "no change observed this
+                # A capture failure is "no change observed this
                 # round", never proof of change — keep polling. Other
                 # errors still propagate (after Cmd+V: no restore).
                 if not verify.is_capture_error(exc):
@@ -966,7 +1001,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
         # restore. When the frame-diff window timed out, this same
         # probe is also the confirmation — one call covers both, and
         # its result is reused rather than re-checked. A capture
-        # failure counts as "not seen" (F25): the paste stays
+        # failure counts as "not seen": the paste stays
         # unconfirmed rather than trusting another window's pixels.
         try:
             restore_ok = ocr_check()
@@ -975,7 +1010,7 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 raise
             restore_ok = False
         if landed and not restore_ok:
-            # F44: the frame diff fired but OCR did not see the text. If the
+            # The frame diff fired but OCR did not see the text. If the
             # phone shows its "Pasting from …" progress box, the box was the
             # change and the paste is still on its way: not landed. A capture
             # failure tells nothing either way and keeps the frame diff's
@@ -997,11 +1032,11 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 report["unverifiable"] = unverifiable[0]
 
         if not landed:
-            # F18 invariant: never restore unconfirmed — a late paste
+            # Invariant: never restore unconfirmed — a late paste
             # must at worst repeat `text`, never the user's own clipboard.
             return False
 
-        # Andy's call (2026-11-07, review R38): one character seen on screen
+        # one character seen on screen
         # confirms the paste but never licenses a restore — like a text of two or
         # three characters (VERIFY_MIN_PROBE), it keeps the clipboard holding `text`.
         if restore_ok and restore and not single:
@@ -1012,30 +1047,37 @@ def type_text(text: str, *, replace: bool = False, pasteboard=None,
                 sleep(min_hold_s - elapsed)
             # Restore the user's clipboard only if nothing else changed it.
             if pasteboard.changeCount() == saved_change + 1:
-                restore_pasteboard(pasteboard, saved)
+                # what the clipboard held before could not be written back: the caller is told
+                if restore_pasteboard(pasteboard, saved) is False and report is not None:
+                    report["restore_failed"] = restore_failure(saved)
         # else: landed but OCR is blind to it (short/cropped text), a single
         # character, or the caller keeps the clipboard (restore=False): success,
         # but the clipboard keeps `text` — see the docstring's tradeoff.
         return True
-    except BaseException:
+    except BaseException as exc:
         # Before Cmd+V the phone never got a paste command, so the
         # user's clipboard can safely go back (changeCount rule).
         # After Cmd+V a late asynchronous read may still happen — never
         # restore then. Either way the original exception propagates.
         if not sent[0] and saved_change is not None:
             if pasteboard.changeCount() == saved_change + 1:
-                restore_pasteboard(pasteboard, saved)
+                if restore_pasteboard(pasteboard, saved) is False:
+                    # the error goes on as it is; it carries that the clipboard was not put back
+                    try:
+                        exc.restore_failed = restore_failure(saved)
+                    except Exception:
+                        pass
         raise
 
 
 def clear_text() -> None:
     """Select-all and delete in the focused field."""
-    check_chord_layout(_VK_A)  # review 0.2.6 #5: before the mirror is brought forward
+    check_chord_layout(_VK_A)  # before the mirror is brought forward
     ensure_frontmost()
     _cmd_chord(_VK_A)  # Cmd+A — real chord, same reason as type_text
     time.sleep(0.05)
     src = _source()
-    _require_focus()  # F26: re-check between Cmd+A and Delete
+    _require_focus()  # re-check between Cmd+A and Delete
     _key_event(_VK_DELETE, True, src)
     try:
         time.sleep(0.02)

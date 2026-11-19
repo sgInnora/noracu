@@ -1,5 +1,613 @@
 # Changelog
 
+## [0.3.1] — 2026-11-19
+
+Fixes and stricter checks on top of 0.3.0; no tool was added or removed. The
+ten that matter most:
+
+- **A call whose text holds U+2028 or U+2029 is answered.** In 0.3.0 such a
+  call never got an answer.
+- **An app name that two running apps share is not resolved to one of them.**
+  The answer is `ambiguous_app` with the pids; name the one you mean as
+  `pid:<number>`.
+- **The client's Stop reaches a call that is already running**, and
+  `browser_type` stops when the stop file appears.
+- **Keystrokes and pastes wait for the person at the Mac right before they go
+  out**, not only when the call starts.
+- **An `element_index` stays with its row.** A number that names an item is
+  part of its identity, and two look-alike buttons in one list row stay tied to
+  that row.
+- **iPhone (XCUITest): nothing is sent while Control Center covers the app**,
+  and input named for the Home Screen is not sent into an app that is still in
+  front.
+- **iPhone (Mirroring): no old picture of a minimized mirror.**
+  `phone_screenshot`, `phone_ocr` and `phone_find` answer `capture_failed`
+  instead.
+- **`initialize` answers in the protocol revision the client asked for**
+  (2024-11-05, 2025-06-18 or 2025-11-25).
+- **`ax_empty` says when an app's windows are off screen** — on another Space,
+  minimized or hidden — and what to do next. Windows on another Space still
+  cannot be read.
+- **Docs:** a short README that starts with `npx noracu --doctor`, a page of
+  known issues, the apps noracu was run against, and an error reference that
+  names every code.
+
+Several results also claim less than before: `mac_scroll`, `browser_fill` and
+`browser_scroll` report success only for what was seen, and `mac_wait` no
+longer reports something gone while the app is not answering.
+
+**Upgrading with the XCUITest backend:** the runner changed in this version.
+`ios_*` answers `runner_version_mismatch` until the runner is built again with
+`npx noracu ios-setup` (the same flags as the first time).
+
+### Added
+- **`noracu doctor`.** Run in a terminal, it prints the client configuration
+  with the absolute paths of `node` and the server filled in (a GUI client does
+  not inherit the shell's `PATH`), and says whether Node, cliclick and
+  Playwright's Chromium are where the server will look; `--json` gives the same
+  as JSON. It reads this machine only and sends nothing. `noracu --help` and
+  `--version` exist too, and a server started by hand in a terminal says that
+  it is waiting for a client. `noracu --doctor` is the same command. It exits 1
+  when something the configured layers need is missing (Node 20; macOS for the
+  Mac and iPhone layers; cliclick for the Mac layer) or a setting in the shell
+  is one the server would refuse (`NORACU_LAYERS`) or
+  replace (`NORACU_PHONE_BACKEND`) — such a setting is left out of the printed
+  configuration, and a valid `NORACU_PHONE_BACKEND` goes into it. It ends with
+  one line of versions and findings to paste into an issue, with no path or
+  user name in it.
+- `phone_type` and `phone_open`: a clipboard that could not be put back is
+  reported on every path that ends the call — a capture or window error before
+  ⌘V as well as a lost focus — and the report says which case it is: the
+  clipboard may be empty (it was cleared, then refused the write), or it still
+  holds the typed text (what it held could not be saved: another device's
+  clipboard, or one too large).
+- **`mac_ax_state` with `skeleton` (or a snapshot cut short by `depth` or
+  `max_nodes`): an element of a row whose texts were not read is refused for
+  actions.** Nothing in such a snapshot told the row's control from the same
+  control of another row of the same shape that took its place, so an action
+  could land on the other row. The answer is `element_no_longer_valid`
+  (`row_unread`) and says to drill into the row with `root` or take a fuller
+  snapshot. Reading the element (`mac_get`, `mac_wait`) and drilling into it
+  work as before.
+- **A key of the person's that is less than 2 s old is waited out once.** Mac
+  and iPhone Mirroring input answered `user_active` at once when the keyboard or
+  mouse had been used in the last `NORACU_USER_IDLE_S` seconds — often the
+  Return that sent the request, so the first call of a quick client failed. The
+  call now waits out the rest of that time, reads it again, and goes ahead when
+  nothing more came from the person; when something did, it answers
+  `user_active` as before, saying that it waited. Nothing is sent during the
+  wait, and a stop file made during it still stops the input.
+- **An approval file can let one app of the default deny list through.** An
+  `allow` entry of `NORACU_APPROVAL_FILE` that names a terminal or IDE exactly —
+  its bundle id or its name, without `*` or `?` — now lets that app receive
+  input; before, the default deny list won and the only way out was dropping
+  the whole list. A wildcard entry does not open it, the file's own `deny` wins,
+  and so does every entry of `NORACU_DENY_APPS`. The refusal says how the
+  person can let an app through.
+- `mac_click` and the other `element_index` actions: a number is a reading that
+  may change in place (a time span, a percentage, a count) only when nothing is
+  glued to its front — no letter or digit, no currency sign, no 第 — and a
+  one-letter unit has nothing glued after it. "$12m" → "$15m", "Order 104s-2" →
+  "Order 105s-2" and "第3天" → "第4天" are other items now. And a snapshot that
+  lists only some elements (`mac_find`, `interactive`) and left out a
+  look-alike in the same row as a listed one no longer tells them apart by the
+  texts of that row: the element is not looked for elsewhere when it moved.
+- **cliclick on an Intel Mac.** Without `NORACU_CLICLICK` the server runs
+  `/opt/homebrew/bin/cliclick` or, when that is not there, `/usr/local/bin/cliclick`
+  — where Homebrew installs it on an Intel Mac. It looked only in the first.
+
+### Security
+- `ios_*` input (XCUITest backend) reads the lock again right before it goes
+  out when its last "unlocked" answer is older than a second, and looks at the
+  stop file again last — right before the command is written to the runner,
+  after any connection it first had to open. The reads made just before an
+  input (what the iPhone shows over the app, that lock read, a new connection)
+  can take seconds after the first checks, and a stop file made or a lock in
+  that time did not stop the input.
+- `ios_launch` looks at the stop file again right before devicectl or simctl
+  starts. Its gate can start the runner and read the lock, which takes seconds
+  after the input queue looked at the stop file, and the launch — with
+  `terminate_existing`, the stop of the running app too — went out after a stop
+  file made in that time.
+- `mac_app` launch with `cdp_port` records the DevTools port as the app's
+  only when the process listening on it is the launched app (or one of its
+  child processes) and `/json/version` names a websocket on that port. Any
+  answer on the port was recorded, so a local process that took the port
+  first could later be attached to as the app. Otherwise the result says the
+  endpoint is not the app's own, with `cdp: null`.
+- The default deny list names Tabby (`org.tabby`), Rio
+  (`com.raphaelamorim.rio`) and Wave (`dev.commandline.waveterm`) by bundle
+  id too. They were on it by name only, which a renamed or localized app name
+  did not match.
+- On the Mac, input to an app whose name cannot be read is refused while a
+  rule that names apps by name is in force (the default deny list has some).
+  Such an app was let through when its bundle id matched no rule, as if the
+  rules that name apps had been checked. iPhone apps are matched on their
+  bundle id, as before.
+- `NORACU_APPROVAL_FILE`: a file that is not valid JSON is refused without
+  quoting a piece of it (the parser's message, passed on to the agent, did),
+  and a file over 64 KB is refused before it is read. Input stays refused
+  (fail closed) in both cases, as before.
+- `phone_*` ⌘ chords (paste, select all, the app switcher): the iPhone
+  Mirroring window is checked to be in front again between ⌘ down and the
+  key. If another app came forward in those 30 ms, ⌘ is released and the key
+  is not sent — it would have been a ⌘ shortcut in that app.
+- iOS runner (XCUITest backend; rebuild the runner after upgrading): when
+  SpringBoard's frame could not be read, the runner found "no Home Screen
+  icon, no system alert" against the empty frame, and `ios_type` / `ios_key`
+  were let through without the alert check. Such a frame now counts as
+  unreadable: input that needs the check is refused (`system_alert` /
+  `app_not_foreground`), as when SpringBoard cannot be read at all.
+- `imctl verify` (a command-line check of the iPhone driver, not a tool)
+  wrote two screenshots of the phone to paths from `tempfile.mktemp`, and
+  took them as a capture of the screen region under the mirror window. It
+  now reads the window's own pixels and hashes them in memory.
+- **An app name that two running apps share is no longer resolved to one of them.** `app` took the first
+  match — the active one when there was one — so input, a menu command or Quit could go to another copy than
+  the one meant. Every tool that takes `app` now answers `ambiguous_app`, lists the pids and which of them is
+  frontmost, and does nothing; `app: "pid:<number>"` names one (`mac_apps` lists them). A helper process of
+  the same name is not counted, nor one started from the same `.app` bundle. `mac_app` `activate` with
+  `pid:<number>` brings that very process forward (`open -a` picked a copy itself), and `mac_windows` takes
+  `app` the same way — a word that names no app exactly still filters the window owners' names.
+- `phone_open`: the words "Top Hit" count as Spotlight's card header only in the top part of the screen. A
+  line reading "Top Hit" further down — in a list or a page — was taken for the header, and the name under it
+  for the app to tap.
+- `phone_type` and `phone_open`: when the Mac's clipboard refuses to take back what it held before the paste,
+  the result says so (it said the clipboard had been put back).
+- **`phone_screenshot`, `phone_ocr` and `phone_find` do not return an old picture of a minimized mirror.**
+  A capture by window id succeeds for a minimized iPhone Mirroring window — with the picture the window had
+  when it went away (seen on a device: a full-size PNG, no error) — and these read-only tools passed it on as
+  the phone's screen. A window that is not on screen (hidden, minimized or on another Space) now answers
+  `capture_failed` and says so; the input tools already refused it.
+- **`mac_click` and the other `element_index` actions: a number that names an item is part of its identity.**
+  A unique element's item ignored every digit, so a row replaced in place by one that differed only in a
+  number ("Invoice 12" → "Invoice 13") was taken for the same row, and its button was pressed. Now only a
+  number that reads as a clock time or a duration, a percentage, a time span with its unit ("5 min ago"), an
+  explicit count ("3 unread", "12 items") or a count against a fixed total ("12/280") may change in place;
+  any other changed number answers `element_no_longer_valid` — take a new snapshot.
+- **`ios_tap`, `ios_swipe` and `ios_type` named for the Home Screen are not sent into an app.**
+  `com.apple.springboard` always reports itself in front, so after `ios_home` an input without a `bundle_id`
+  went out even when another app had come forward since (a call, the person opening one) — and landed in that
+  app. noracu now looks at SpringBoard first: with no Home Screen icon showing, only one tap on a button of a
+  system alert is sent; anything else answers `app_not_foreground` and nothing goes out. Seen on a device: the
+  Home Screen's pages, Today View and the App Library show icons; an app or Spotlight in front shows none.
+  While the app the session last launched, acted on or read in front still reads as in front, the same rule
+  holds without looking for icons — one can stay on screen for a moment after an app came forward, and Control
+  Center over an app shows them too — also after a call that named the Home Screen in between. When that app's
+  state cannot be read, nothing is sent.
+- **`mac_menu_command`: Quit is refused for a protected app even when the
+  menu item has no shortcut and no AppKit action.** Quit was recognised only by
+  ⌘Q / ⌥⌘Q or its AppKit action, so a menu built another way let "Quit <App>"
+  through for the MCP host and the session apps. The title counts now ("Quit",
+  "Quit …", "Exit", "Exit <app>"), and an item directly in the application menu
+  with neither a shortcut nor an identifier is refused for those apps.
+- `noracu ios-setup`: a build that fails because this Mac's keychain is locked no longer says "unlock the
+  iPhone".
+- `noracu ios-setup --bundle-prefix`: a prefix that ends in a dot or has two dots in a row is refused
+  before the build instead of producing a bundle identifier Xcode rejects.
+- `noracu ios-setup`: when something else ends xcodebuild with a signal, the message says so instead of
+  "could not be run — is Xcode installed?".
+- `mac_windows` without Screen Recording permission: two windows of one app at the same position each get
+  their own title (the second one was left untitled and the first got the second's).
+- `mac_windows`: `titles_from_screen_recording` is true only when the window server gave a non-empty title
+  for another process's window (this process's own windows and empty titles made it true).
+- `mac_ax_state`: `depth` must be a whole number (a fraction such as 2.5 was accepted).
+- `phone_*`: when the iPhone Mirroring driver is stopped for printing more than 10 MB, the error now says
+  that the action may have partly run and to look before retrying, as the timeout error does.
+- `phone_*`: when the python that was picked lacks a pyobjc module, the install command in the error names
+  that python instead of `python3`, which may be a different one.
+- **`phone_open` taps nothing when the app's row is gone at the re-read.** The row found in Spotlight's Top
+  Hit card is read again half a second later; when that read did not show the name, the first position was
+  tapped anyway — onto whatever had moved there — and another app that opened was reported as opened. One
+  more read is made now, and without the name in the card nothing is tapped (`open_not_confirmed`). The
+  same holds when the row moved between those two reads: the read after that must still show the name, or
+  nothing is tapped.
+- `phone_type`: the phone's "Pasting from …" box is recognised when its two words are read as two hits of
+  one line in swapped order (it was missed then, and a paste still on its way could be taken as done).
+- `phone_type`: the words of the "Pasting from …" box are left out of the count of the typed text also when
+  the box was read as two hits (a Mac named "M5pro" made "pro" look typed).
+- `phone_scroll`: the frontmost app is checked again after the short pause that follows the pointer move,
+  before the first wheel event (the first check came after the fifth: an app that came to the front in that
+  pause got the start of the scroll).
+- `phone_type` with a text of two or three characters: a paste that was not confirmed is reported as
+  `type_not_confirmed` at once. It used to be watched for 15 more seconds, and the same two or three letters
+  showing up anywhere ("in" inside "Sign in") were reported as "the text showed up late".
+- `phone_longpress`: a hold longer than a second looks at the frontmost app again every second; when another
+  app has come to the front the button is let go at once and the call fails with `focus_lost`, instead of
+  the button staying down for the rest of the hold (up to 10 s) under whatever is done next.
+- `NORACU_TRACE`: a call that is refused before the tool runs — an unknown tool, a tool outside
+  `NORACU_READ_ONLY`'s list, invalid arguments, a browser input tool while the stop file exists — gets its line
+  too, with the code `unknown_tool`, `read_only`, `invalid_args` or `user_stopped` (such calls left no line).
+  The name of an unknown tool is the caller's text and is not written: its line has `unknown(<length>)`.
+- **A tool call whose text holds U+2028 or U+2029 is answered.** The server read its input with a line reader that
+  also ends a line at those two characters, and JSON leaves them as they are inside a string: such a call (a
+  `mac_type` or `browser_type` of text copied from a web page, say) was cut in two, answered with parse errors
+  that carried no id, and never answered under its own — the client waited until its own timeout. A message
+  now ends at a line feed only.
+- `phone_open`: an app name with a line break, a tab or another control character is refused before anything
+  is sent (the name is pasted into Spotlight as it is).
+- `phone_key` and the clearing of a field before `phone_open` types: a key pressed by itself no longer picks
+  up a modifier that is held on the Mac's keyboard at that moment (with ⌘ down, Delete went out as ⌘Delete).
+- `mac_set_value` on a pop-up: when no option matches and the menu that was opened for it does not close
+  again, the result says the menu may still be open (`delivery=unknown`) instead of "opened and closed again,
+  retry is safe".
+- **A list item's texts identify it however deep they sit.** The snapshot collected an item's texts only four
+  levels below it, while the check before an action read them at any depth. A row whose texts were deeper
+  (common in web content) had no item key, so a list that was re-sorted or recycled could send a stale
+  `element_index` to another row's look-alike button; a row with texts on both sides of that line never
+  matched again (`element_no_longer_valid` on an unchanged window). Both sides read the same texts now.
+- **Two unlabelled look-alike buttons in one list row stay tied to their row.** Both read the same row
+  texts, and a key that two look-alikes share was dropped as telling nothing apart — which left such
+  buttons identified by their place alone, so a list recycled in place sent a stale `element_index` to the
+  same button of another row. The key is kept now and must still match when the element is found at its
+  old place; it is only never used to pick one look-alike over another.
+- `mac_ax_state` with `skeleton: true`: an element of such an outline is no longer taken to be the only one
+  of its kind (the outline stops three levels down and has not seen what lies below), so after it is gone
+  its `element_index` does not move to a same-named control deeper in the window.
+- A look-alike control that moved is followed by its row's texts only when the whole window could be read.
+  When part of it did not answer, the one match that was read is accepted only where the element was (it
+  was accepted anywhere, though the real one may sit in the part that was not read).
+- `mac_ax_state` / `mac_find` with `surface: "app"`: an element inside a window that has no window ID is
+  refused for `element_index` actions (`policy_denied`), as it already was when that window was read by
+  itself, and the result carries `window_identity: "unverifiable"`. Such an element used to skip the check
+  that it is still in the window it was seen in.
+- `mac_menu_command`: a change in the focused element counts as the command's effect (`delivered_verified`)
+  only when the keyboard and mouse were not used since the item was pressed. A selection the person moved in
+  that moment was taken for the command's effect.
+- **An element that had to be waited for is checked again before it is acted on.** A disabled control is
+  waited for (up to 30 s); a list can re-use the same accessibility element for another row in that time, and
+  the click, value or press then went to that row. After a wait the element is looked up once more and the
+  action is refused (`element_no_longer_valid`) when it is no longer the one that was asked for.
+- **The client's Stop reaches a call that is already running.** `notifications/cancelled` was honoured only for
+  a call still waiting in the input queue. For a call whose tool had started it was ignored: a `browser_type` of
+  a long text went on typing for up to 40 s after the client had given the call up, and the result was sent
+  anyway. A cancelled call is no longer answered, and `browser_type` stops at the character it is on.
+- **`browser_type` stops when the stop file appears.** `NORACU_STOP_FILE` was looked at before the call
+  only; a long text went on being typed after the person had put the file there. It is looked at before
+  each character now, and the result says how much had gone out.
+- `browser_click`: when the click made the page navigate, the result says so and where the tab is now (as
+  `browser_fill` and `browser_scroll` do) — the snapshot's `element_index` values are gone with the page.
+- `browser_snapshot`: the clickable-elements list does not go into shadow roots or frames; it now says so
+  when the page has any ("not listed: what is inside 1 shadow root(s)…"), instead of reading as a full list.
+- **A physical click on a Finder desktop icon is refused while a window covers the icon.** The desktop is
+  below every window; with one of Finder's own windows over the icon and an inconclusive hit test the click
+  went ahead and landed on that window. Any window at the point now refuses it (`OCCLUDED`).
+- `ios_launch`: a launch that timed out, or failed after `terminate_existing` may have stopped the app, ends
+  the `element_index` values read before it, as a launch that worked does.
+- **`ios_*` input is not sent while Control Center covers the app.** With
+  Control Center pulled down, the app still reports that it is in front and
+  reads as usual, but a tap went to Control Center — on one of its controls it
+  would have switched it. Taps, swipes, keys and text now answer
+  `system_overlay` and send nothing while the iPhone shows something of its
+  own over the app. No runner rebuild is needed.
+- **A session attached over a DevTools port (`NORACU_ALLOW_CDP`) never takes a
+  DevTools window as its active page.** When the app's own pages were closed,
+  or none was open at attach, the first page left could be a DevTools window;
+  keys sent to it go into its console and run as script, which
+  `browser_evaluate` needs `NORACU_ENABLE_EVAL` for. Such a window is not
+  counted as a tab and is not read or acted on. The same holds for the DevTools
+  front end that a DevTools port serves over http, in every kind of session:
+  the browser tools do not navigate to it, nor to any address on a DevTools
+  port this server opened or is attached to.
+- **`browser_tabs` list does not return the title of a page the tools do not
+  read.** A tab that went to such a page (a `blob:` page a site made, a local
+  file a person opened in it) was listed with its title, which is page
+  content, and its whole address. It is now listed with `not_read:true`, no
+  title, and the first 60 characters of the address.
+
+### Changed
+- `mac_ax_state` with `window` as a title: when no window has exactly that
+  title and one contains it (in any case), the answer reads that window, as
+  before, and now says so — `window.title_match: "partial"`.
+- The first `browser_launch` on a Mac without Playwright's Chromium no
+  longer holds its answer for the whole download, which can take minutes —
+  longer than a client waits. After 20 s it answers `browser_installing`
+  while the download goes on; `browser_launch` again takes the browser once it
+  is there, and reports a download that failed in the meantime.
+- `mac_screenshot` says when Screen Recording looks not granted to the app
+  that runs noracu (no other app's window title can be read):
+  `screen_recording_note` in its meta says the image then holds the desktop
+  picture and that app's own windows only, and where to turn the permission
+  on. Once seen granted, it is not checked again.
+- **The client's Stop reaches `mac_wait` and `phone_type`.** When the client
+  cancels a call (`notifications/cancelled`, e.g. its Stop button), a running
+  `mac_wait` ends its accessibility wait and a running `phone_type` ends imctl
+  at once, as a timeout does: `phone_type` puts the clipboard back only if the
+  paste had not gone out yet. Neither call is answered, as before. With
+  `NORACU_TRACE`, a cancelled call is logged as an error with code
+  `cancelled`, or `cancelled_queued` if it was still waiting in the input
+  queue (such a call had no line before).
+- A physical click refused because the element's window has no window ID no
+  longer says to use "mechanism auto" — under `auto` a click is physical only
+  when the element has no accessibility action, so that advice led back to the
+  same refusal. It names `mechanism: "semantic"` for an element that has an
+  action, and bringing the window forward otherwise.
+- **`ax_empty` says when an app's windows are off screen.** An app whose windows
+  are all on another Space (or minimized, or hidden) gave the same `ax_empty` as
+  an app with no window at all. The answer now says how many of the app's windows
+  the window server lists off screen, points to `mac_windows` with
+  `include_offscreen: true`, and says that `mac_app` `activate` may move the
+  person's desktop to that app; an app with no window open says so. Windows on
+  another Space still cannot be read.
+- `ios_launch`, `ios_home`, `ios_type` and input by `element_index`: a read made inside the call — whether the app
+  came to the front or left it, the text fields around the typed text, the element read again before the input —
+  no longer starts the runner when it has stopped meanwhile. A runner that starts puts its own app in front of the
+  screen the call is about; the result now says what could not be read, and the next call that asks for the
+  iPhone starts the runner.
+- **`initialize` answers in the protocol revision the client asked for** —
+  2024-11-05, 2025-06-18 or 2025-11-25 (it always answered 2024-11-05). A
+  client that asks for 2025-03-26 gets 2024-11-05, because that revision
+  requires a server to accept JSON-RPC batches and noracu does not; any other
+  version gets 2025-11-25.
+- **Keystrokes and pastes wait for the person at the Mac right before they go
+  out, as clicks do.** `mac_key`, the keystrokes of `mac_type`, `mac_paste` and
+  the wheel event of `mac_scroll` on an element had only the check made when the
+  call left the queue. When `mac_type` clicks first and the person takes over
+  before the keystrokes, the result says that the click went out
+  (`delivery=unknown, retry=unsafe`).
+- **`browser_fill` requires `value`.** A call without it (the text passed under
+  another name, say) used to empty the field and report `delivered_verified`.
+  An empty string still clears the field when it is given.
+- **The README is short now.** What it does, the quickstart, how it behaves, what it does not protect against,
+  non-goals and links. Troubleshooting moved to `docs/troubleshooting.md`, the iPhone setup, requirements and
+  known limits to `docs/iphone.md`, the list of defaults and switches to `SECURITY.md`; the environment
+  variables were already in `docs/usage.md`. The Chinese README follows the same outline.
+- **The Chinese README is at `docs/README.zh-CN.md`.** npm takes a package's
+  page from a README file in the package folder and showed the Chinese one for
+  0.3.0; the folder now holds `README.md` only, and the pack check enforces it.
+- **Bug reports no longer need a clone.** The issue form asks for the tool and
+  the text it returned; `npm test` output is optional, and there is a short
+  form for an app or site that noracu handles badly.
+
+### Fixed
+- With the Dock set to hide and show automatically, a Dock that has popped up
+  now counts as covering what is under it, so a physical click there is
+  refused (`occluded`) instead of landing on a Dock icon. macOS keeps no strip
+  for such a Dock; noracu now reads where its tiles are drawn.
+- The `system_overlay` refusal (XCUITest backend) no longer says that what
+  covers the app is Control Center, which it cannot tell; it says to look again
+  in a moment, and that `ios_home` would leave the app for the Home Screen.
+- `mac_type` with `element_index` and an `app` name that two running copies
+  share types into the element when its process is one of them. It answered
+  `ambiguous_app`, although the index already names the process.
+- `mac_wait` `app_running` / `app_gone` with an app name that several running
+  copies share: the app counts as running, so `app_gone` waits until none is
+  left. Both answered `ambiguous_app`.
+- `mac_notifications` finds the menu-bar clock (which opens Notification
+  Center's history) by its accessibility identifier, or an item named exactly
+  "Clock". Any menu-bar extra whose name contained "clock", such as a timer,
+  could be taken for it.
+- `mac_window` raise says `delivered_verified` only when the window became its
+  app's main window and is not minimized. Any change to the window counted,
+  so a raise that only took the window out of the Dock was reported as
+  verified.
+- A window whose attributes the app did not answer for is never the window a
+  Mac snapshot picks by default (it read as an untitled window that was not
+  minimized), and window lists in errors mark it `unreadable`.
+- An input tool that fails in a way noracu did not plan for (an exception)
+  answers `internal_error: … (delivery=unknown, retry=unsafe)`. It answered
+  the bare exception text, with nothing about what had been sent.
+- `mac_scroll` on an element looks once more, right before the wheel event,
+  at what is on top at the element's point, as a click does. A window that
+  came up there since the hit test is no longer scrolled (`occluded`, nothing
+  sent).
+- A physical click or drag made while the pointer's position could not be
+  read went out and left the pointer where the click put it, without saying
+  so. The result now says the pointer was not put back.
+- A `phone_*` input whose driver could not import its modules (pyobjc
+  missing) sent nothing; it no longer counts as noracu's own input of that
+  moment, so the person's keyboard or mouse use then still makes the next
+  input wait for them first (`user_active` if they go on).
+- `mac_type` with `element_index` and an `app` the element does not belong to
+  is refused before anything is written. The check ran only before physical
+  keystrokes; through accessibility (the default) the text went into the
+  element whatever app was named.
+- `mac_set_value` on a pop-up menu: when the press on the option did not
+  answer and the control already showed that option before, the result was
+  `delivered_verified`. It is now `delivered_unverified`, with a note.
+- `mac_ax_state` / `mac_find`: `web_accessibility: "unsupported"` (the window
+  holds no web content the app exposes) is said only after the whole window
+  was looked through. A window too large to look through in time answers
+  `"unknown"`, with the same hint.
+- XCUITest backend: stopping a runner whose `xcodebuild` had already exited
+  no longer signals its process group (TERM, then KILL 3 s later). By then
+  that pid could belong to another process.
+- XCUITest backend: a call to the runner that was in flight when the
+  connection was closed (the runner stopped, the server shutting down) is
+  answered at once; it waited for its own timeout, up to 30 s.
+- XCUITest backend: the size limit on the runner's answers held only for an
+  answer still waiting for its newline; a whole line over the limit was read.
+  Both now end the connection (`runner_protocol`).
+- `mac_ax_state` with `surface: dialog` or `alert`, for an app with several
+  windows and none focused: a dialog that is a window of its own is read when
+  it is the only one, instead of answering `ambiguous_window` before looking.
+- `mac_ax_state` and the tools that pick a window: an app whose window list
+  did not answer (busy or hung) is reported as `app_unresponsive`. It was
+  reported as having no window open, or its windows being minimized or on
+  another Space.
+- `ios_home` looks at `NORACU_STOP_FILE` again right before the press: the
+  read of the app's state before it can take up to 10 s after the input
+  queue's own check, and a stop file made meanwhile did not stop the press.
+- `noracu ios-setup` with `NORACU_IOS_RUNNER_DIR` set to a folder that is
+  already there no longer changes that folder's mode to `0700`; the device
+  folder it makes inside is still private.
+- `mac_app` `unhide`: when the app's hidden state could not be read
+  afterwards, it was taken for "not hidden" and the call reported
+  `delivered_verified`. An unread state now gives `delivered_unverified`
+  (and `hidden: null`); `hide` likewise.
+- `phone_find` prefers a label that reads exactly the text: "X" finds the app
+  X, not the "Xcode" listed above it. A label that only contains the text
+  still stands in when none reads it exactly.
+- `phone_type` with `replace: true` that a clipboard change stopped before
+  the paste said "nothing was typed"; it now adds that ⌘A had already
+  selected the field's text.
+- `phone_open`: when Spotlight could not be opened, the answer is
+  `spotlight_unavailable: …`, which says the steps before it may have gone
+  out. It was an uncoded line that a warning from the driver could hide.
+- `phone_open`: a capture that failed partway through answered only "could
+  not capture the iPhone Mirroring window". It now says the steps before it
+  may have gone out and Spotlight may still be open, and to look before
+  retrying.
+- `phone_*` input: when iPhone Mirroring quit while noracu brought it forward,
+  the answer said its state was unknown (`mirror_state_unknown`); it now says
+  it is not running, as when it was not running to begin with. Nothing is sent
+  either way.
+- `phone_swipe` / `phone_scroll`: "a swipe moved clear of the window's margin
+  and left shorter than about 10 pt is a press, not sent" is measured in the
+  mirror window's own size; it assumed the 280 × 620 pt window it was first
+  measured on.
+- `phone_type` of a single character: a sighting in the banner strip at the
+  top of the screen, where a notification can carry the character, no longer
+  confirms it, as it already did not for a longer text.
+- iOS runner: a listener still waiting for the network (the device tunnel
+  coming up) is waited for, instead of ending the start at once with
+  `bind_failed`; when it never comes up, `bind_failed` names every state it
+  went through. A listener that goes away after the runner is up ends the
+  runner (`listener_failed`) instead of leaving it running for 12 hours with
+  nothing listening.
+- iOS runner (XCUITest backend; rebuild the runner after upgrading — `noracu
+  ios-setup`): a bind address that parses but is not one the runner listens on
+  (`0.0.0.0`, `::`, a Wi-Fi address) is reported as `bad_bind`; it was
+  `bad_port`.
+- `phone_*`: an x or y of 1.0 is the mirror window's last point, not the
+  first point past its edge.
+- `phone_open`: when OCR misread a letter of the app's name in Spotlight's
+  search field, Spotlight was taken for gone after the tap, and the app could
+  be reported as opened while Spotlight still showed. The field is now matched
+  as its echo is (a letter off still counts from 6 characters, two from 14).
+- `mac_ax_state` with `root` and any of `app`, `window`, `window_id` or
+  `surface` is refused. A `root` is an element of an earlier snapshot and
+  names its app and window; the others were not looked at.
+- `mac_window` with a `window_id` and an `app` that does not own that window
+  is refused (`invalid_args`, nothing done). Before, the `window_id` won and
+  the `app` was not looked at.
+- `phone_*`: when iPhone Mirroring lists another of its standard windows (a
+  near-square one, such as a settings or welcome window) ahead of the phone's,
+  reading the window's position, checking for an overlay and clicking Resume
+  use the window shaped like a phone. Before, they used the first one listed.
+- `phone_*` input: while the pointer rests on the mirror window's top edge, an
+  empty group in the window is no longer taken for the window's toolbar. It
+  may be an overlay that has not drawn its content yet, so the mirror does not
+  read as live and nothing is sent (`mirror_not_live`).
+- A `tools/call` under a request id that another call is still using is refused with a JSON-RPC error. It took
+  over the first call's entry, so a cancellation meant for one could stop the other. The refusal comes before
+  anything else is answered for that call — a tool this server does not have, arguments that do not validate,
+  the stop file — so no tool result goes out under the id before the first call's.
+- A request of more than about 4 million characters on one line is dropped unread and answered with an error
+  (`request too large`); before, the server kept whatever a client sent without a line end.
+- `phone_open` and `phone_type` report `delivered_verified` only for the driver's own confirmed result
+  ("opened '<app>'", "typed <n> chars"). Any other line the driver ends successfully with was verified unless
+  it matched a list of known "not confirmed" wordings; it is `delivered_unverified` now.
+- `mac_click` with both `element_index` and `x`,`y`, and `browser_click` with more than one of `element_index`,
+  `selector` and `xy`, are refused (`invalid_args`): one was used and the other dropped without a word. A
+  `snapshot_id` given to `mac_click`, `mac_scroll` or `mac_type` without an `element_index` is refused as well —
+  it was ignored.
+- `browser_navigate`: when the server answers with an error status (404, 500 …) the result says that an error
+  page loaded, next to the status code. The navigation itself is still reported as delivered.
+- **`mac_wait` no longer reports something gone while the app is not
+  answering.** An app that did not answer in time read as having no windows, no
+  sheet, no open menu and no text, so `window_gone`, `sheet_gone`, `menu_closed`
+  and `text_gone` were met at once. The wait now goes on until the app can be
+  read. `value_equals` and `value_contains` are no longer met by an element
+  that has no value.
+- **`mac_ax_state` of a window that closed as the snapshot started is an
+  error** (`element_no_longer_valid`), not an empty tree marked complete.
+- **`mac_scroll` says an element was scrolled into view only when it is.** The
+  accessibility action returning success was reported as "scrolled into view"
+  without looking; what can be seen of the element (cut by its window and by
+  scroll areas above it) is now read afterwards.
+- **After `mac_scroll` on an element, the next input is not refused as
+  `user_active`.** The wheel event was not recorded as noracu's own.
+- **`mac_scroll` reports `delivery=not_delivered, retry=safe` when the wheel
+  script could not be started** (it said `unknown`). A script that did start
+  and failed is still `unknown`.
+- **`browser_fill` does not report `delivered_verified` from a page it did not
+  fill.** When the fill made the page navigate, the value read back could be
+  that of a field on the next page. The result now says that the page navigated
+  and is `delivered_unverified`.
+- **`browser_type` stops when its time runs out.** Typing that outlasted its
+  time (a page answering each key slowly) returned an error while the rest of
+  the text kept arriving, into whatever had the focus by then. The remaining
+  characters are no longer sent, and the error says how many went out. Typing
+  also stops when the tab turns into a page noracu does not act on.
+- **`browser_scroll` reports `delivered_verified` only when the page moved the
+  way that was asked.** Any change of the scroll position counted — also one
+  the other way, or the jump to the top that a navigation brings.
+- **A physical click on a menu item is not sent when its menu closed in
+  between.** For an element with no window of its own, the check made right
+  before the click only looked at which app owned the window on top, so the
+  click could land on the app's own window under the menu, or on the desktop.
+  The window on top must now be the one it was at the hit test. Physical clicks
+  on menu bar items, which were always refused as covered, go out.
+- **`ios_type` with `element_index` takes a text field only.** Given the index
+  of a button or a row it pressed that element and then typed into whatever
+  held the keyboard. It now answers `not_a_text_field` and sends nothing.
+- **Releasing a stuck modifier no longer clears the modifiers the person is
+  holding.** The extra release after a key chord went to every modifier of the
+  chord with all flags cleared; it now goes only to a modifier that is still
+  set and keeps the other flags.
+- **A press that did nothing is not `delivered_verified` because another
+  window's title changed.** For an action on an element, the app's window list
+  counts as evidence only when a window opened, closed or changed kind, or when
+  the element's own window's title changed.
+- **An app that stops answering before an action is reported as
+  `app_unresponsive`**, not as a vanished element; an app that has exited is
+  still a vanished element.
+- **`mac_paste` without the Accessibility permission returns the permission
+  error** before the clipboard is touched, instead of `delivered_unverified`.
+- **`browser_snapshot` lists controls nested deeper than 20 elements.** The walk
+  behind the clickable-element list stopped 20 levels under `<body>` without
+  saying so; it now goes 64 deep and says when a page is deeper than that.
+- **iPhone (XCUITest): a refusal for a system prompt says how to see it.**
+  When input is not sent because a system prompt is up (`system_alert`), the
+  message now also says to look at it with `ios_screenshot`, so the client can
+  tell the person what the prompt asks before they answer it on the phone.
+
+### Docs
+- Tool descriptions: `browser_click` takes exactly one of `element_index`,
+  `selector` or `xy`; an `app` argument takes `pid:<n>` too, and
+  `ambiguous_app` says to pick one that way (the server's instructions and
+  `mac_ax_state`); `snapshot_id` goes only with `element_index`; `root` goes
+  alone. The `mac_click`, `browser_tabs` and `mac_ax_state` descriptions are
+  shorter; the tools work as before.
+- The Screen Recording permission is called **Screen & System Audio
+  Recording** on macOS 15 and later (录屏与系统录音 in Chinese); the README,
+  its Chinese version, usage and troubleshooting say so. A screenshot taken
+  without it shows the desktop picture without other apps' windows, or comes
+  back black; the docs said only black.
+
+- `docs/iphone.md` names the paste prompt iOS shows when an app reads the
+  clipboard: while it is up, `ios_*` input answers `system_alert`.
+- README: the quickstart starts with `npx noracu --doctor`, lists three
+  read-only things to try and links the issue forms; the first picture's caption
+  and the Browser row say what working in your own Chrome needs; it says that
+  noracu is device-tested only on Apple silicon Macs running macOS 27.
+  `docs/README.zh-CN.md` follows.
+- **`docs/known-issues.md`** (new): where noracu was tested and where not (one
+  Apple silicon Mac on macOS 27.2; no Intel Mac, no macOS 15 or 26), limits such
+  as windows on another Space, what is known and not fixed in this version, and
+  what was changed without a new run on a real machine.
+- **`docs/apps.md`** (new): the apps noracu was run against, each with what was
+  exercised and the record of it, and how to report one more app with the issue
+  form — no clone needed. `CONTRIBUTING.md` starts with the same.
+- `docs/iphone.md`: a Live Activity in the Dynamic Island was checked — it does
+  not get input refused.
+- `server.json` declares eight of the environment variables (observation-only
+  mode, the layers, the stop and approval files, the deny list, the idle wait,
+  the two opt-in switches), so a registry page can show them.
+- **The error reference names every code.** `docs/usage.md` listed about half of
+  the codes an answer can open with; `ambiguous_app`, `user_active`,
+  `eval_disabled`, the `browser_tabs` and DevTools-port refusals, the approval
+  and stop-file errors and the XCUITest runner's codes were not in it. They are
+  now, each with what it means and what to do next, and a test
+  (`test/docs-codes-unit.mjs`, part of `npm test`) fails when the source can
+  answer a code the reference does not name.
+- `docs/usage.md`: the environment table has rows for `NORACU_ENABLE_EVAL`,
+  `NORACU_PHONE_BACKEND`, `NORACU_IOS_UDID` and `NORACU_IOS_RUNNER_DIR`.
+- `docs/architecture.md` no longer names an old Playwright version, counts the
+  21 tools of observation-only mode (it said 18, without the `ios_*` ones) and
+  says that `browser_tabs` selects tabs (it said there was no tab switching).
+
 ## [0.3.0] — 2026-11-15
 
 Background input, a stop switch and per-app input rules, and clicks by
@@ -190,7 +798,7 @@ screenshot pixels.
 
 ### Fixed
 
-- **Deep code audit (S5A), 2026-11-14.**
+- **Deep code audit, 2026-11-14.**
   - The stop file, a cancelled request and a server shutdown are checked
     again right before an input runs: after the read of the time since the
     last keyboard or mouse event, and after waiting for an earlier phone
@@ -234,7 +842,7 @@ screenshot pixels.
     `mac_status`), the note that the server is older than its files on disk
     now comes in a text block of its own after it; before, it was put in
     front of the JSON, which then no longer parsed.
-- **Formal pre-release review (S4A), 2026-11-13.**
+- **Formal pre-release review, 2026-11-13.**
   - iPhone, XCUITest backend: no input goes to an app while a system alert (a
     permission prompt) is up, or while SpringBoard cannot be read
     (`system_alert`, nothing sent); the runner listens only on loopback or the
@@ -260,7 +868,7 @@ screenshot pixels.
     instead of verified when it did not see it; closing in your Chrome waits for
     the disconnect and counts only tabs noracu's close reached; a session with
     no tab left answers `no_active_page` with what to do.
-- **Second review (S4B) and the device run of 2026-11-14** (iPhone 16 Pro, iOS 27.2.1).
+- **Second review and the device run of 2026-11-14** (iPhone 16 Pro, iOS 27.2.1).
   - iPhone, XCUITest backend: taps, long presses and drags go out without
     XCTest's wait for the app to go idle — with a context menu up (a
     long-pressed note in Notes), a tap went out in about a second instead of

@@ -1,11 +1,33 @@
 name: Bug report
-description: Report something that behaves incorrectly
+description: A tool did the wrong thing, or said something that was not true
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to file a bug report.
+        Thanks for taking the time. The two things that help most are the name of the tool and the text it
+        returned — every result says what was delivered. You do not need a clone of the repository.
+  - type: input
+    id: tool
+    attributes:
+      label: Which tool?
+      description: The tool that misbehaved, if you know it
+      placeholder: "e.g. mac_click, browser_snapshot, phone_tap"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you asked for, what the tool returned (paste its text), and what you expected instead.
+    validations:
+      required: true
+  - type: input
+    id: noracu-version
+    attributes:
+      label: noracu version
+      description: Output of `npm ls noracu`, or the server version your client shows
+      placeholder: "e.g. 0.3.0"
+    validations:
+      required: true
   - type: input
     id: macos-version
     attributes:
@@ -15,21 +37,19 @@ body:
     validations:
       required: true
   - type: input
+    id: mcp-client
+    attributes:
+      label: MCP client
+      description: Which app hosts the MCP client?
+      placeholder: "e.g. Claude Desktop, Claude Code, Cursor"
+    validations:
+      required: true
+  - type: input
     id: node-version
     attributes:
       label: Node version
       description: Output of `node -v`
       placeholder: "e.g. v22.14.0"
-    validations:
-      required: true
-  - type: input
-    id: mcp-client
-    attributes:
-      label: MCP client
-      description: Which app hosts the MCP client?
-      placeholder: "e.g. Claude Desktop, Claude Code, Cursor, pi"
-    validations:
-      required: true
   - type: dropdown
     id: permissions
     attributes:
@@ -39,26 +59,20 @@ body:
         - "Only one"
         - "No"
         - "Not sure"
-    validations:
-      required: true
   - type: textarea
-    id: what-happened
+    id: mac-status
     attributes:
-      label: What happened?
-      description: Also tell us what you expected to happen instead.
-    validations:
-      required: true
+      label: Output of the `mac_status` tool (optional)
+      description: Ask your client to call `mac_status` and paste what it returns — permissions and environment as the server sees them.
+      render: shell
   - type: textarea
     id: npm-test
     attributes:
-      label: Output of `npm test`
+      label: Output of `npm test` (optional)
       description: |
-        Clone the repo, run `npm install && npm test`, and paste the tail of
-        the output. On macOS without local permissions, prefix with
-        `NORACU_CI=1`. This will be formatted as code.
+        Only if you already work from a clone: the tail of `npm test`. Prefix with `NORACU_CI=1` to skip the
+        checks that act on the desktop.
       render: shell
-    validations:
-      required: true
   - type: textarea
     id: context
     attributes:

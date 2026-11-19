@@ -5,6 +5,15 @@
 import XCTest
 import Foundation
 
+// MARK: - pure rules (no XCTest: test/ios-runner-rules.mjs compiles this block on its own and runs it)
+
+// SpringBoard's frame as XCUITest read it is the screen only when it has an area. A read that failed comes back as
+// a zero rect, and against it nothing is "shown" — no icon, no alert: that read as "no system alert" and let text
+// and keys through. Such a frame is taken as unreadable, and what needs it fails closed.
+func noracuScreenReadable(_ r: CGRect) -> Bool { !r.isNull && !r.isInfinite && r.width > 0 && r.height > 0 }
+
+// MARK: - end of pure rules
+
 enum RunnerCommands {
     // MARK: helpers
 
@@ -312,6 +321,7 @@ enum RunnerCommands {
         let snap: XCUIElementSnapshot
         do { snap = try app("com.apple.springboard").snapshot() } catch { return nil }
         let scr = screen()
+        guard noracuScreenReadable(scr) else { return nil }   // unread: the callers fail closed, as for no snapshot
         var icons = 0
         var alerts: [SBAlert] = []
         func shown(_ s: XCUIElementSnapshot) -> Bool { s.frame.width > 0 && s.frame.height > 0 && s.frame.intersects(scr) }

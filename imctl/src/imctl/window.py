@@ -34,36 +34,70 @@ class WindowBounds:
         return (self.x + self.width // 2, self.y + self.height // 2)
 
     def denormalize(self, nx: float, ny: float) -> tuple[int, int]:
-        """Convert normalized (0-1) coordinates to screen coordinates."""
+        """Convert normalized (0-1) coordinates to screen coordinates.
+
+        The window covers x .. x + width - 1: 1.0 (and anything that rounds past it) is its last point,
+        not the first point outside it.
+        """
         if not (0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0):
             raise ValueError(f"normalized coords out of range: ({nx}, {ny})")
         return (
-            round(self.x + nx * self.width),
-            round(self.y + ny * self.height),
+            min(round(self.x + nx * self.width), self.x + max(self.width, 1) - 1),
+            min(round(self.y + ny * self.height), self.y + max(self.height, 1) - 1),
         )
 
 
 # Device run 2026-11-07: while the phone's keyboard is composing (a Pinyin "x" with its underline),
 # iPhone Mirroring adds a 397x28 AXDialog window — the candidate bar — and System Events lists it as
 # window 1, ahead of the phone (AXStandardWindow). Every script that reads the mirror window starts
-# with this static block: mi is the index of the first AXStandardWindow, else 1 as before. Fixed text
-# joined into the scripts below — no runtime value is interpolated (invariant 1).
+# with this static block: mi is the index of the first standard window shaped like a phone (as
+# is_phone_shaped: PHONE_MIN_SHORT_SIDE, PHONE_MIN_ASPECT), else of the first standard window, else 1 as
+# before — review 2026-11-17: another standard window of the process (one near square: a settings or
+# welcome window) can be listed ahead of the phone. Fixed text joined into the scripts below — no runtime
+# value is interpolated (invariant 1).
 # Device run 2026-11-08 03:44: the first version kept `contents of cand`, which System Events turns
 # into a reference BY NAME (window "iPhone Mirroring"); during a connection blip that name did not
 # resolve and `position of` failed with -1728. The index is re-read on every call, like window 1 was.
 _PICK_WINDOW = '''
-        set mi to 1
+        set cands to {}
         repeat with i from 1 to (count of windows)
+            set sr to ""
+            set wh to {0, 0}
             try
-                if ((subrole of window i) as text) is "AXStandardWindow" then
-                    set mi to i
-                    exit repeat
-                end if
+                set sr to (subrole of window i) as text
             end try
+            try
+                set wh to size of window i
+            end try
+            set end of cands to {sr, item 1 of wh, item 2 of wh}
         end repeat
+        set mi to my pickWindow(cands)
+'''
+# the choice itself, a handler at the top of each script: {subrole, width, height} per window → an index
+_PICK_HANDLER = '''
+on pickWindow(cands)
+    set firstStd to 0
+    repeat with i from 1 to (count of cands)
+        set c to item i of cands
+        if (item 1 of c) is "AXStandardWindow" then
+            if firstStd is 0 then set firstStd to i
+            set w to (item 2 of c) as real
+            set h to (item 3 of c) as real
+            set shortSide to w
+            set longSide to h
+            if w > h then
+                set shortSide to h
+                set longSide to w
+            end if
+            if shortSide >= 120 and longSide >= 1.7 * shortSide then return i
+        end if
+    end repeat
+    if firstStd > 0 then return firstStd
+    return 1
+end pickWindow
 '''
 
-_GET_BOUNDS_SCRIPT = '''
+_GET_BOUNDS_SCRIPT = _PICK_HANDLER + '''
 tell application "System Events"
     tell process "iPhone Mirroring"
         set winCount to count of windows
@@ -127,7 +161,7 @@ def ensure_frontmost(timeout: float = 10) -> None:
 
     CGEvents are delivered to the frontmost app; if another window
     covers the mirroring window, taps would land on the wrong target.
-    F31: when the app had to be activated (possibly switching Spaces), wait
+    When the app had to be activated (possibly switching Spaces), wait
     until the window yields a real frame before returning, so the caller's
     next capture is not a transition frame refused as capture_failed.
     ``timeout`` bounds each osascript run (a tidy-up passes a short one).
@@ -148,10 +182,10 @@ def ensure_frontmost(timeout: float = 10) -> None:
 
 
 def _wait_capturable(timeout_s: float = 2.0, poll_s: float = 0.2) -> bool:
-    """Poll until the mirror window gives a valid frame (F31); best effort.
+    """Poll until the mirror window gives a valid frame; best effort.
 
     Uses verify.window_luma(), which refuses off-screen windows and blank
-    transition frames (F25). Returns True once a frame passes, False after
+    transition frames. Returns True once a frame passes, False after
     ``timeout_s`` — it never raises: a caller whose own capture still fails
     reports capture_failed as before.
     """
@@ -215,10 +249,10 @@ def get_bounds() -> WindowBounds:
 # is localized, so the decision never matches on text — only on structure (child count, classes).
 # Labels can span multiple lines and nameless elements coerce to the literal "missing value";
 # both are normalized so one element = exactly one `<class>\t<label>\t<subrole>\t<child classes>`
-# line (tabs inside labels are collapsed too). F28: the subrole and, for groups, the classes of
+# line (tabs inside labels are collapsed too). The subrole and, for groups, the classes of
 # their children let parse_overlay_ex tell the window's own hover controls (close / minimize /
 # zoom buttons and the small toolbar group) apart from a real overlay.
-_OVERLAY_SCRIPT = '''
+_OVERLAY_SCRIPT = _PICK_HANDLER + '''
 on collapseBreaks(s)
     set tid to AppleScript's text item delimiters
     set AppleScript's text item delimiters to linefeed
@@ -283,10 +317,10 @@ end tell
 
 # Clicks the Resume control of the paused overlay. Only ever invoked after _OVERLAY_SCRIPT
 # reported exactly one overlay button under group 1 (static script, no interpolated
-# parameters). F29: "button 1 of group 1" was the window's Close button whenever the
+# parameters). "button 1 of group 1" was the window's Close button whenever the
 # pointer rested on the window, so window controls are skipped by AX subrole and the
 # click happens only when exactly one other button remains; prints CLICKED or SKIP.
-_CLICK_RESUME_SCRIPT = '''
+_CLICK_RESUME_SCRIPT = _PICK_HANDLER + '''
 tell application "System Events"
     tell process "iPhone Mirroring"
 ''' + _PICK_WINDOW + '''
@@ -349,7 +383,7 @@ def get_window_info() -> dict | None:
 def is_frontmost() -> bool:
     """True when iPhone Mirroring is the frontmost application, asked fresh on every call.
 
-    F26 runs this right before synthesized input events. F30: the in-process
+    This runs right before synthesized input events. The in-process
     NSWorkspace.frontmostApplication() query used before is a snapshot in a process
     without a run loop (imctl's case) — after Finder came to the front it still answered
     "iPhone Mirroring", so the re-checks inside one operation could never fire. System
@@ -362,7 +396,7 @@ def is_frontmost() -> bool:
         return False
 
 
-# F28: controls iPhone Mirroring adds to group 1 while the pointer rests on its window
+# Controls iPhone Mirroring adds to group 1 while the pointer rests on its window
 # (the title-bar buttons), identified by AX subrole — never by localized text.
 _CHROME_SUBROLES = frozenset(
     {"AXCloseButton", "AXMinimizeButton", "AXZoomButton", "AXFullScreenButton"}
@@ -380,11 +414,12 @@ def parse_overlay_ex(raw: str) -> tuple[dict, bool]:
                                                    buttons=button count
       - "NO_WINDOW" / "NO_GROUP" / unparseable  -> live=None,  overlay=None, buttons=0
 
-    F28: while the pointer rests on the mirror window, group 1 also holds the window's own
+    While the pointer rests on the mirror window, group 1 also holds the window's own
     title-bar buttons (subroles AXCloseButton / AXMinimizeButton / AXZoomButton) and a small
-    toolbar (a group whose children are only buttons). hover is True when those buttons are
-    present; they and the toolbar group are not an overlay and are never counted. Without
-    them the rules above apply unchanged: any other child still means not live.
+    toolbar (a group whose children are only buttons; an empty group is not it). hover is True when those buttons are
+    present; they and the toolbar group — one group, the first such — are not an overlay and
+    are never counted. Without them the rules above apply unchanged: any other child, a second
+    group of buttons or a second empty group included, still means not live.
     """
     unknown = {"live": None, "overlay": None, "buttons": 0}
     if raw is None:
@@ -411,10 +446,17 @@ def parse_overlay_ex(raw: str) -> tuple[dict, bool]:
     hover = any(c == "button" and s in _CHROME_SUBROLES for c, _, s, _ in elements)
     rest_els = [e for e in elements if not (e[0] == "button" and e[2] in _CHROME_SUBROLES)]
     if hover:
-        # The hover toolbar: a group holding only buttons (or nothing yet, mid-animation).
-        rest_els = [
-            e for e in rest_els if not (e[0] == "group" and all(k == "button" for k in e[3]))
-        ]
+        # The hover toolbar: one group holding only buttons. There is one of it: a second such group is
+        # something else, stays, and the window does not read as live. An empty group is not taken for it
+        # (all() of nothing is True): it may be an overlay that has not drawn its content yet, and a window
+        # that is not known to be live gets no input.
+        kept, toolbar = [], False
+        for e in rest_els:
+            if not toolbar and e[0] == "group" and e[3] and all(k == "button" for k in e[3]):
+                toolbar = True
+                continue
+            kept.append(e)
+        rest_els = kept
     if not rest_els:
         return {"live": True, "overlay": None, "buttons": 0}, hover
     buttons = sum(1 for e in rest_els if e[0] == "button")
@@ -458,7 +500,7 @@ def get_overlay() -> dict:
     return overlay_snapshot()[0]
 
 
-# F37 (2026-11-05, macOS 27.2): the first launch after the macOS upgrade showed a welcome
+# 2026-11-05, macOS 27.2: the first launch after the macOS upgrade showed a welcome
 # screen ("iPhone on Your Mac …") in a 640×660 window. Its button made it look like the paused
 # overlay: phone_status reported paused=true, phone_launch told the user to lock the iPhone, and
 # resume() clicks an overlay's lone button as if it were Resume. The mirror window itself — live
@@ -468,13 +510,17 @@ def get_overlay() -> dict:
 # (≈1.78) in and a wide dialog (e.g. 800×520 ≈ 1.54) out. Geometry, not text: language-
 # independent like the rest of the overlay probe.
 PHONE_MIN_ASPECT = 1.7
+# The short side of a phone's picture: the keyboard's candidate bar (397x28, an AXDialog window of the same
+# process) is elongated too, and is the window the scripts fall back to when no standard window is listed.
+PHONE_MIN_SHORT_SIDE = 120
 
 
 def is_phone_shaped(bounds: WindowBounds | None = None) -> bool | None:
-    """True when the mirror window is elongated like a phone, portrait or landscape (F37).
+    """True when the mirror window is elongated like a phone, portrait or landscape.
 
-    The long side must be at least PHONE_MIN_ASPECT times the short side. None when the
-    bounds cannot be read.
+    The long side must be at least PHONE_MIN_ASPECT times the short side, and the short side
+    at least PHONE_MIN_SHORT_SIDE: a strip such as the keyboard's candidate bar is not a phone.
+    None when the bounds cannot be read.
     """
     try:
         b = bounds if bounds is not None else get_bounds()
@@ -483,12 +529,12 @@ def is_phone_shaped(bounds: WindowBounds | None = None) -> bool | None:
     if b.width <= 0 or b.height <= 0:
         return None  # degenerate bounds say nothing about the shape
     long_side, short_side = max(b.width, b.height), min(b.width, b.height)
-    return long_side >= PHONE_MIN_ASPECT * short_side
+    return short_side >= PHONE_MIN_SHORT_SIDE and long_side >= PHONE_MIN_ASPECT * short_side
 
 
 def is_setup_screen(overlay: dict | None = None,
                     bounds: WindowBounds | None = None) -> bool:
-    """True when an overlay is up in a window that is not phone-shaped (F37).
+    """True when an overlay is up in a window that is not phone-shaped.
 
     Such a screen (first-run welcome, setup, permission prompt) is the user's to
     finish: resume() never clicks it and phone_launch says so. Unknown bounds → False.
@@ -517,7 +563,7 @@ def is_paused(overlay: dict | None = None) -> bool | None:
 def _move_pointer_off_window() -> bool:
     """Move the pointer just outside the mirror window (a move, never a click).
 
-    F28/F29: with the pointer on the window its title-bar buttons share group 1 with
+    With the pointer on the window its title-bar buttons share group 1 with
     the overlay; moving off hides them before resume() reads and clicks. Picks the
     first point beside the window that lies on an active display. Best effort:
     returns False when Quartz is unavailable or nothing qualifies.
@@ -555,7 +601,7 @@ def _move_pointer_off_window() -> bool:
 def resume() -> bool:
     """Click the Resume control when the session is paused (language-independent).
 
-    Live already -> True. F28/F29: when the pointer rests on the window its title-bar
+    Live already -> True. When the pointer rests on the window its title-bar
     buttons appear in the same AX group, so the pointer is first moved off the window
     and the state read again; window controls are never counted or clicked. Paused
     overlay with exactly one other button -> click it, then poll up to ~6 s (0.5 s
@@ -575,7 +621,7 @@ def resume() -> bool:
     if overlay["live"] is not False or overlay["buttons"] != 1:
         return False
     if is_phone_shaped() is not True:
-        # F37: a button in a window that is not phone-shaped belongs to a setup /
+        # A button in a window that is not phone-shaped belongs to a setup /
         # welcome / permission screen — never ours to click. Unknown bounds: no click either.
         return False
     try:

@@ -34,7 +34,7 @@ import subprocess
 
 from .window import WindowError, ensure_frontmost, get_overlay, get_window_info, is_frontmost
 
-# F31 / R13 §3: every phone input command starts in _require_live(), which probes
+# Every phone input command starts in _require_live(), which probes
 # get_overlay() first so a paused or stopped mirror refuses without stealing focus,
 # then brings the mirror to the front (switching Spaces if needed and waiting for a
 # real frame) before any capture or input. Module-level callables so tests can swap them.
@@ -53,7 +53,7 @@ _MIRROR_STATE_UNKNOWN_LINE = (
     "nothing was sent; retry, or call phone_status"
 )
 
-# F25: one line, one exit code for every capture failure. The pixels a check
+# One line, one exit code for every capture failure. The pixels a check
 # needed are not the phone's — report that, never guess from whatever
 # another window happened to show inside the region.
 _CAPTURE_FAILED_LINE = (
@@ -62,7 +62,7 @@ _CAPTURE_FAILED_LINE = (
 )
 
 
-# R19: the same failure while checking --expect, before the first event
+# The same failure while checking --expect, before the first event
 _CAPTURE_FAILED_EXPECT_LINE = (
     "capture_failed: could not capture the iPhone Mirroring window to check --expect "
     "(it may be hidden, minimized or on another Space); no image was returned, so nothing was sent"
@@ -76,8 +76,33 @@ _CAPTURE_FAILED_EDGES_LINE = (
 )
 
 
+# The Mac's clipboard was not put back to what it held before the paste. input.restore_failure() says which
+# case it was: the clipboard was cleared and refused the write, or it was never touched because what it held
+# could not be saved (another device's clipboard, or too large) — then it still holds the typed text.
+def _clipboard_not_back(reason) -> str:
+    if reason == "kept_text":
+        return ("the Mac's clipboard was not put back: what it held before could not be saved (it came from "
+                "another device, or was too large), so it still holds the typed text")
+    return "the Mac's clipboard could not be put back to what it held before — it may be empty now"
+
+
+def _restore_note(exc) -> str:
+    """'; <what the clipboard holds>' when an error carries a restore that failed, else ''."""
+    reason = getattr(exc, "restore_failed", None)
+    return f"; {_clipboard_not_back(reason)}" if reason else ""
+
+
+# phone_open's capture failed after it had started: the Home Screen command and Spotlight (and maybe the name and a tap)
+# had gone out before it, and Spotlight may still be open — the bare capture line said none of that
+_OPEN_CAPTURE_FAILED_LINE = (
+    "capture_failed: could not capture the iPhone Mirroring window partway through phone_open (it may be hidden, "
+    "minimized or on another Space) — the steps before it may have gone out (the Home Screen command, Spotlight, "
+    "the name, a tap), and Spotlight may still be open; check phone_screenshot before retrying"
+)
+
+
 def _capture_failed() -> int:
-    """Print the F25 capture-failure line; exit code 7."""
+    """Print the capture-failure line; exit code 7."""
     print(_CAPTURE_FAILED_LINE, file=sys.stderr)
     return 7
 
@@ -133,7 +158,7 @@ def _refuse_off_screen(x: float, y: float, *, measure: bool) -> int | None:
                 return None  # nothing remembered: decided once the mirror is live and in front
         elif not wi:
             # the live check has just seen the window and now there is no record of it: nothing says where the
-            # phone screen is, and without the window's size the bands cannot be measured (pre-review P5)
+            # phone screen is, and without the window's size the bands cannot be measured
             raise WindowError("iPhone Mirroring window not found")
         else:
             rect, how = _phone_screen(retry_untrusted=False)
@@ -197,7 +222,7 @@ def _require_live() -> int | None:
     Probes get_overlay() first to avoid stealing focus when the mirror is paused or off:
       - reason in ("not_running", "no_window") -> mirror_not_live (exit 3), no _bring_front
       - live is False -> mirror_not_live (exit 3), no _bring_front
-      - live is True  -> _bring_front() (F31), then allow (None)
+      - live is True  -> _bring_front(), then allow (None)
       - live is None  -> _bring_front(), sleep(0.4), probe again:
         True -> allow; False -> mirror_not_live; still None -> mirror_state_unknown (exit 3).
     """
@@ -208,7 +233,7 @@ def _require_live() -> int | None:
     if overlay["live"] is False:
         return _mirror_not_live(overlay)
     if overlay["live"] is True:
-        # R18: bringing it forward can take a Space switch; the mirror may stop being live meanwhile
+        # Bringing it forward can take a Space switch; the mirror may stop being live meanwhile
         # (the iPhone was picked up) — so when it was not in front, look again afterwards
         try:
             was_front = _is_front()
@@ -222,6 +247,10 @@ def _require_live() -> int | None:
         if was_front:
             return None
         overlay = get_overlay()
+        # it quit meanwhile (or its window went): say that, as when it was not running to begin with
+        if overlay.get("reason") in ("not_running", "no_window"):
+            print(_MIRROR_NOT_RUNNING_LINE, file=sys.stderr)
+            return 3
         if overlay["live"] is True:
             return None
         if overlay["live"] is False:
@@ -275,12 +304,12 @@ def _require_expect(args, read_screen=None, read_sweep=None) -> int | None:
         hits = read_screen()
         if (read_sweep is not None and verify.is_short_text(expect)
                 and not verify.screen_contains(expect, hits)):
-            # F27: a one- or two-character anchor (the app "X") can be invisible
+            # A one- or two-character anchor (the app "X") can be invisible
             # to the default OCR pass; read again with the sweep before refusing.
             hits = read_sweep()
     except (WindowError, CaptureError):
-        # F25: an unreadable screen is not a match — refuse exactly like
-        # expect_not_found; nothing is sent (R19: and the line says so).
+        # An unreadable screen is not a match — refuse exactly like
+        # expect_not_found; nothing is sent (and the line says so).
         print(_CAPTURE_FAILED_EXPECT_LINE, file=sys.stderr)
         return 7
     if verify.screen_contains(expect, hits):
@@ -334,7 +363,7 @@ def _invalid_duration(exc: ValueError) -> int:
 
 
 def _cmd_longpress(args) -> int:
-    # R19: a bad duration is refused before the mirror is brought forward
+    # A bad duration is refused before the mirror is brought forward
     try:
         input._check_duration(_longpress_duration(args), 0.01, 10, "long-press duration (s)")
     except ValueError as exc:
@@ -389,7 +418,7 @@ def _cmd_swipe(args) -> int:
         except (WindowError, CaptureError):
             wi = None
         if not wi:
-            # the window was there for the measurement and has no record now: nothing is sent (pre-review P5)
+            # the window was there for the measurement and has no record now: nothing is sent
             print(_CAPTURE_FAILED_EDGES_LINE, file=sys.stderr)
             return 7
         safe = screenrect.fallback(wi["w"], wi["h"])
@@ -399,14 +428,14 @@ def _cmd_swipe(args) -> int:
             return 2
         fx, fy = input.clamp_to_rect(args.fx, args.fy, safe, inset=0.0)
         tx, ty = input.clamp_to_rect(args.tx, args.ty, safe, inset=0.0)
-        if _collapsed(asked, (fx, fy, tx, ty)):
+        if _collapsed(asked, (fx, fy, tx, ty), (float(wi["w"]), float(wi["h"]))):
             return _refuse_collapsed(asked)
         input.swipe(fx, fy, tx, ty, args.ms)
         print(_swipe_line(asked, (fx, fy, tx, ty), safe, known=False))
         return 0
     fx, fy = input.clamp_to_rect(args.fx, args.fy, rect)
     tx, ty = input.clamp_to_rect(args.tx, args.ty, rect)
-    if _collapsed(asked, (fx, fy, tx, ty)):
+    if _collapsed(asked, (fx, fy, tx, ty), _window_size_pt()):
         return _refuse_collapsed(asked)
     input.swipe(fx, fy, tx, ty, args.ms)
     print(_swipe_line(asked, (fx, fy, tx, ty), rect))
@@ -418,13 +447,14 @@ def _num(v: float) -> str:
 
 
 # A swipe whose points were moved clear of the margin and that is left shorter than this (in points of the
-# 280x620 pt mirror window measured on 2026-11-10) is refused: iOS starts a pan only after about 10 pt, so a
-# shorter drag lands as a tap or press on whatever is under it (review S4A-s10-gemini-1).
+# mirror window as it is now) is refused: iOS starts a pan only after about 10 pt, so a shorter drag lands as a
+# tap or press on whatever is under it. _REF_WINDOW_PT (the 280x620 pt window measured on 2026-11-10) stands in
+# only when the window's size cannot be read.
 _MIN_MOVED_SWIPE_PT = 10.0
 _REF_WINDOW_PT = (280.0, 620.0)
 
 
-def _collapsed(asked, sent) -> bool:
+def _collapsed(asked, sent, size_pt=None) -> bool:
     """True when moving a point clear of the margin left the swipe too short to be a swipe: a press, not a
     swipe — whatever length it was asked for with (a pull-down from the margin that ends just inside the
     screen would otherwise go out as a tap at the top of the app). That covers a swipe whose two ends read
@@ -434,8 +464,17 @@ def _collapsed(asked, sent) -> bool:
         return False
     if (_num(sent[0]), _num(sent[1])) == (_num(sent[2]), _num(sent[3])):
         return True
-    w, h = _REF_WINDOW_PT
+    w, h = size_pt if size_pt and size_pt[0] > 0 and size_pt[1] > 0 else _REF_WINDOW_PT
     return math.hypot((sent[2] - sent[0]) * w, (sent[3] - sent[1]) * h) < _MIN_MOVED_SWIPE_PT
+
+
+def _window_size_pt():
+    """The mirror window's size in points as it is now, or None when it cannot be read."""
+    try:
+        wi = _window_info()
+    except (WindowError, CaptureError):
+        return None
+    return (float(wi["w"]), float(wi["h"])) if wi and wi.get("w") and wi.get("h") else None
 
 
 def _refuse_collapsed(asked) -> int:
@@ -545,25 +584,29 @@ def _cmd_type(args) -> int:
     report = {}
     try:
         typed_ok = input.type_text(args.text, replace=args.replace, report=report)
-    except input.PasteFocusLost:
+    except input.PasteFocusLost as exc:
         # 0.2.7: another app came to the front during the wait after the clipboard write;
         # ⌘V was called off rather than pulling iPhone Mirroring back to the front
+        clip = (_clipboard_not_back(exc.restore_failed) if getattr(exc, "restore_failed", False)
+                else "the clipboard was put back unless something else had copied meanwhile")
         sent = ("the select-all (⌘A) for replace was sent, but nothing was pasted" if args.replace
                 else "nothing was sent")
         print("focus_lost: another app came to the front before ⌘V, so iPhone Mirroring was not "
-              f"brought back and the paste was called off — {sent}; the clipboard was put back "
-              "unless something else had copied meanwhile", file=sys.stderr)
+              f"brought back and the paste was called off — {sent}; {clip}", file=sys.stderr)
         return 6
     if typed_ok:
         if report.get("seen", True):
             if _late_paste_probe(args.text) is None:
-                # 0.2.5 (review Y6): one character that OCR saw appear is no proof of where it went,
-                # and (review R38) no license to put the clipboard back
+                # 0.2.5: one character that OCR saw appear is no proof of where it went,
+                # and no license to put the clipboard back
                 print(f"typed {len(args.text)} chars (one character: OCR saw it appear, which is no "
                       "proof of where it landed — check the field, which may hold the phone's own older "
                       "clipboard instead; the clipboard still holds the typed text)")
                 return 0
             print(f"typed {len(args.text)} chars")
+            if report.get("restore_failed"):
+                # a line of its own: the first line stays the confirmed result
+                print(f"note: {_clipboard_not_back(report['restore_failed'])}")
             return 0
         if _late_paste_probe(args.text) is None:
             # one character: OCR cannot read it back, only the picture changed
@@ -571,7 +614,7 @@ def _cmd_type(args) -> int:
                   "OCR cannot read this text back — check the field, which may hold the phone's own "
                   "older clipboard instead; the clipboard still holds the typed text)")
             return 0
-        # review 0.2.6 #7: the screen changed and OCR could not confirm the text for a reason
+        # the screen changed and OCR could not confirm the text for a reason
         # known now — say that one, instead of watching for a late paste that would only
         # report a rise it cannot attribute
         cause = report.get("unverifiable")
@@ -593,26 +636,28 @@ def _cmd_type(args) -> int:
     count_before = report.get("count_before")
     late = _watch_late_paste(args.text, baseline=count_before)
     if late is not None:
-        # F38: the text showed up late — report it so the caller reads the field before
+        # The text showed up late — report it so the caller reads the field before
         # retyping. The clipboard is deliberately NOT restored here: type_text()
         # restores only under its own checks (a rise seen inside its window, the
         # minimum hold, an untouched changeCount); after the fact, leaving the
         # typed text on the clipboard is the choice that can never hand the phone
         # the user's original clipboard (possibly a password).
-        # E2 run 2026-11-07 (T15): a second paste of the same text into the Settings search
+        # Device run 2026-11-07: a second paste of the same text into the Settings search
         # field was "seen late" while the field still showed the text once — a line repeating
         # the query can rise too — so the wording claims no landing (the server reports it
-        # delivered_unverified, review R38).
+        # delivered_unverified).
         print(f"typed {len(args.text)} chars (the text showed up late, during an extra "
               f"{late:.0f}s check after the 2.5s confirmation window — OCR cannot tell whether "
               "that is the paste or a line repeating it, such as a search result: check the "
               "field before typing again; the clipboard still holds the typed text)")
         return 0
+    probe = _late_paste_probe(args.text)
     watched = (f" or a further {LATE_PASTE_WATCH_S:.0f}s check"
-               if _late_paste_probe(args.text) else
-               " (one-character text cannot be confirmed by OCR afterwards)")
+               if probe and len(probe) >= verify.VERIFY_MIN_PROBE else
+               " (a text of fewer than four characters, spaces and case aside, cannot be confirmed by OCR "
+               "afterwards)")
     if args.replace and count_before:
-        # F41: the text was on screen before the paste, and a field replaced with
+        # The text was on screen before the paste, and a field replaced with
         # the same text shows no change at all
         advice = ("the text was already on screen before this paste, and replacing a "
                   "field with the same text shows no change — read the screen "
@@ -633,11 +678,11 @@ def _cmd_type(args) -> int:
     return 4
 
 
-# F38 (2026-11-05 real-device): a paste reported unconfirmed after 2.5 s showed up a
+# 2026-11-05 real-device: a paste reported unconfirmed after 2.5 s showed up a
 # few seconds later, and the caller's retry typed the text twice ("… case … case").
 # Before type_not_confirmed, keep watching — read-only, no second Cmd+V — for up to
 # this long.
-# F42: on the device a paste reached the phone up to more than 10 s after Cmd+V.
+# On the device a paste reached the phone up to more than 10 s after Cmd+V.
 LATE_PASTE_WATCH_S = 15.0  # needs two consecutive sightings ~1 s apart
 
 
@@ -651,19 +696,21 @@ def _watch_late_paste(text, *, baseline=None, read_screen=None, sleep=time.sleep
     """Seconds into the watch until ``text`` showed up on screen, or None.
 
     Read-only: it never pastes again. ``baseline`` is type_text()'s pre-paste
-    count of the text's probe (F41); the paste counts as arrived once the count
+    count of the text's probe; the paste counts as arrived once the count
     is above it in TWO consecutive readable frames (one OCR misread is not
     enough). Without a baseline (type_text() could not read the screen before
     the paste) the watch's own first two readable frames set it — the higher
     count, as in type_text(): text already on screen elsewhere is then never
     taken for the paste, at the price of missing a paste that landed before
     those frames (reported unconfirmed — the caller is told to read the
-    screen before typing again). Text too short for a probe is
-    not watched at all (None at once). A capture failure breaks the run of
-    sightings (F25), never counts as one. ``read_screen``, ``sleep`` and
+    screen before typing again). Text too short for a probe, or of fewer
+    than verify.VERIFY_MIN_PROBE characters (never confirmed by a sighting:
+    "in" is part of "Sign in"), is not watched at all (None at once). A capture failure breaks the run of
+    sightings, never counts as one. ``read_screen``, ``sleep`` and
     ``clock`` are injectable for tests.
     """
-    if _late_paste_probe(text) is None:
+    probe = _late_paste_probe(text)
+    if probe is None or len(probe) < verify.VERIFY_MIN_PROBE:
         return None
     if read_screen is None:
         read_screen = vision.read_screen
@@ -786,9 +833,9 @@ def _confidence_note(report: dict) -> str:
 def _open_and_report(args) -> int:
     tidy = {}  # open_app records whether its trip back to the Home Screen worked
     try:
-        # F34: one retry — on the device the Spotlight command was once
+        # One retry — on the device the Spotlight command was once
         # ignored right after an app closed. Each try goes Home first; when Home
-        # lands back in Spotlight (iOS 27, F43) the gate reports it open instead
+        # lands back in Spotlight (iOS 27) the gate reports it open instead
         # of toggling it shut.
         if not (gestures.open_spotlight_checked()
                 or gestures.open_spotlight_checked()):
@@ -797,10 +844,15 @@ def _open_and_report(args) -> int:
             result = gestures.open_app(args.app, spotlight_open=True, report=tidy,
                                        **_open_deadline_kwargs())
     except (WindowError, CaptureError):
-        # F25: the Spotlight gate and the result matching both read the
+        # The Spotlight gate and the result matching both read the
         # mirroring window's pixels; without them nothing about the
-        # phone is known — refuse rather than guess.
-        return _capture_failed()
+        # phone is known — refuse rather than guess. A paste called off by it put the clipboard back, or says
+        # that it could not.
+        if tidy.get("restore_failed"):
+            print(f"{_OPEN_CAPTURE_FAILED_LINE}; {_clipboard_not_back(tidy['restore_failed'])}", file=sys.stderr)
+            return 7
+        print(_OPEN_CAPTURE_FAILED_LINE, file=sys.stderr)
+        return 7
     if result == "opened":
         print(f"opened {args.app!r}{_confidence_note(tidy)}")
         return 0
@@ -838,6 +890,10 @@ def _open_and_report(args) -> int:
               f"spot, so nothing was tapped; {home_note} — open it from its Home Screen icon "
               "instead (phone_screenshot, then phone_tap)", file=sys.stderr)
         return 4
+    if result == "gone":
+        print(f"open_not_confirmed: Spotlight's Top Hit card showed {args.app!r}, then no longer did "
+              f"when it was read again, so nothing was tapped; {home_note} — try again", file=sys.stderr)
+        return 4
     if result == "low_confidence":
         print(f"open_not_confirmed: Spotlight showed {args.app!r} but the label was read with "
               f"confidence {_fmt_confidence(tidy.get('confidence'))}, below "
@@ -865,8 +921,10 @@ def _open_and_report(args) -> int:
         # Home either — that would pull iPhone Mirroring forward again
         print(f"focus_lost: another app came to the front before ⌘V, so iPhone Mirroring was not "
               f"brought back and {args.app!r} was not pasted or tapped — Spotlight was opened and "
-              "cleared on the phone and may still be open; the clipboard was put back unless "
-              "something else had copied meanwhile; retry phone_open", file=sys.stderr)
+              "cleared on the phone and may still be open; "
+              + (_clipboard_not_back(tidy["restore_failed"]) if tidy.get("restore_failed")
+                 else "the clipboard was put back unless something else had copied meanwhile")
+              + "; retry phone_open", file=sys.stderr)
         return 6
     if result == "clipboard_changed":
         print(f"open_not_confirmed: another app or device changed the clipboard before ⌘V, so "
@@ -874,9 +932,12 @@ def _open_and_report(args) -> int:
               f"{home_note}; retry phone_open", file=sys.stderr)
         return 4
     if result == "spotlight_unavailable":
-        print("spotlight unavailable (could not reach the Home Screen, the menu command failed, or the screen did not change)")
+        # on stderr with its code, like every other refusal: on stdout it was lost when stderr held a warning
+        print("spotlight_unavailable: could not open Spotlight on the phone (could not reach the Home Screen, the menu "
+              "command failed, or the screen did not change) — the Home Screen command or the Spotlight gesture may "
+              "have gone out; check phone_screenshot before retrying", file=sys.stderr)
         return 1
-    # "not_confirmed" (F24): the row — and possibly the Top Hit icon —
+    # "not_confirmed": the row — and possibly the Top Hit icon —
     # was tapped but the app never verifiably opened; the phone is
     # back on the Home Screen.
     print(f"open_not_confirmed: tapped {args.app!r} in Spotlight{_confidence_note(tidy)} but the app did not open; {home_note}", file=sys.stderr)
@@ -904,11 +965,11 @@ def _cmd_verify(args) -> int:
 def _cmd_launch(_args) -> int:
     live = gestures.launch()
     if live is False:
-        # F29: never report "ready" while the overlay is still up.
+        # Never report "ready" while the overlay is still up.
         from .window import is_setup_screen
 
         if is_setup_screen():
-            # F37: a welcome / setup screen is the user's to finish; nothing was clicked.
+            # A welcome / setup screen is the user's to finish; nothing was clicked.
             print(
                 "mirror_setup_required: iPhone Mirroring is showing a setup or welcome "
                 "screen (its window is not phone-shaped) — finish it in the iPhone "
@@ -1068,23 +1129,24 @@ def _run(args) -> int:
     try:
         return args.func(args)
     except input.KeyboardLayoutMismatch as exc:
-        # review 0.2.6 #5: raised before any event was posted or the clipboard was written
+        # raised before any event was posted or the clipboard was written
         print(f"keyboard_layout: {exc}", file=sys.stderr)
         return 2
-    except input.FocusLost:
-        # F26: the frontmost check failed right before an event — either
+    except input.FocusLost as exc:
+        # The frontmost check failed right before an event — either
         # nothing was sent at all, or (mid-scroll) nothing further was.
         print(
             "focus_lost: iPhone Mirroring is not the frontmost app; "
-            "nothing (or nothing further) was sent",
+            f"nothing (or nothing further) was sent{_restore_note(exc)}",
             file=sys.stderr,
         )
         return 6
     except WindowError as exc:
-        print(f"window error: {exc}", file=sys.stderr)
+        # a paste called off before ⌘V put the clipboard back — or says here that it could not
+        print(f"window error: {exc}{_restore_note(exc)}", file=sys.stderr)
         return 3
     except input.InputError as exc:
-        print(f"input error: {exc}", file=sys.stderr)
+        print(f"input error: {exc}{_restore_note(exc)}", file=sys.stderr)
         return 4
 
 

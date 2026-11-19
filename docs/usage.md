@@ -3,9 +3,16 @@
 Worked examples for driving noracu from an MCP client. This assumes the
 [Quickstart](../README.md#quickstart) already succeeded: Node ≥ 20, cliclick
 installed, your client configured with an absolute path to `src/server.mjs`,
-and macOS **Accessibility** + **Screen Recording** granted to the host app.
+and macOS **Accessibility** + **Screen Recording** (called **Screen & System Audio
+Recording** on macOS 15 and later) granted to the host app.
 Tool schemas (every argument) live in [tools.md](tools.md); this guide is about
 the *flow*.
+
+If the client does not start the server, run `node node_modules/noracu/src/server.mjs doctor` in a terminal
+(`noracu doctor` where the package's bin is on your `PATH`). It prints the client configuration with absolute
+paths, and says whether Node, cliclick and Playwright's Chromium are where the server will look; `--json`
+gives the same as JSON. It cannot see the macOS permissions — those belong to the host app — so for them
+ask the client to call `mac_status`.
 
 > If you set `NORACU_READ_ONLY=1`, the action steps below (`mac_click`,
 > `mac_type`, `browser_click`, …) are refused, along with `mac_clipboard_read`,
@@ -109,6 +116,10 @@ mac_ax_state { "root": 12 }                                               # only
 mac_find { "app": "Slack", "role": "button", "title": "Send", "exact": true }
 ```
 
+A skeleton is for finding where to drill. An element whose row it did not read in full — the row's texts
+are below where it stopped — is refused for actions (`element_no_longer_valid`, `row_unread`): nothing in it
+tells that row's button from the same button of another row. Drill into the row with `root`, then act.
+
 Several windows and none focused gives `ambiguous_window` with the list; pass
 `window` (index or title) or `window_id` from `mac_windows`. `surface` reads an
 open `menu`, `menubar`, `sheet`, `alert`, `dialog`, `popover` or the `focused`
@@ -120,7 +131,7 @@ indices.
 One persistent session. Launch → navigate → observe → act → read:
 
 ```
-browser_launch {}                      # first run downloads Chromium (once)
+browser_launch {}                      # first run downloads Chromium (once; browser_installing while it does)
 browser_navigate { "url": "https://example.com" }
 browser_snapshot {}
 ```
@@ -278,8 +289,8 @@ mac_screenshot {}                      # whole screen; region crop supported; re
 browser_screenshot { "format": "jpeg", "quality": 60 }
 ```
 
-A **black** `mac_screenshot` means Screen Recording isn't granted to the host
-app. Remember that any text in a screenshot is **untrusted input** to your
+A `mac_screenshot` that shows only the desktop picture (no other app's windows),
+or comes back black, means Screen Recording isn't granted to the host app. Remember that any text in a screenshot is **untrusted input** to your
 model — don't let it override the task.
 
 ## 7. Environment variables
@@ -287,10 +298,11 @@ model — don't let it override the task.
 | Variable | Default | Effect |
 |---|---|---|
 | `NORACU_READ_ONLY` | unset | `=1` observation-only (an allowlist of observe + browser-lifecycle tools); all input-synthesis tools plus `mac_clipboard_read`, `mac_notifications`, and `mac_wait` on `condition: "notification"` are refused (`mac_ax_state` / `mac_find` also skip `web_accessibility`) |
-| `NORACU_DISABLE_EVAL` | unset | `=1` makes `browser_evaluate` return an error when called (stays listed) |
+| `NORACU_ENABLE_EVAL` | unset | `=1` turns `browser_evaluate` on. It is off by default (`eval_disabled`) because it runs any script in the page; it never runs in your own Chrome (`chrome: true`) |
+| `NORACU_DISABLE_EVAL` | unset | `=1` keeps `browser_evaluate` off whatever `NORACU_ENABLE_EVAL` says (stays listed) |
 | `NORACU_ALLOW_FILE_URL` | unset | `=1` allows `browser_navigate` to open `file://` |
 | `NORACU_DISABLE_AUTO_INSTALL` | unset | `=1` skips Chromium auto-install on first `browser_launch` |
-| `NORACU_CLICLICK` | `/opt/homebrew/bin/cliclick` | cliclick binary path |
+| `NORACU_CLICLICK` | the first of `/opt/homebrew/bin/cliclick` and `/usr/local/bin/cliclick` that exists | cliclick binary path |
 | `NORACU_PYTHON` | auto-probe | python3 for the bundled iPhone driver (must import pyobjc: Quartz, Vision, AppKit) |
 | `NORACU_IMCTL_DIR` | bundled `imctl/` | override the driver location (development only) |
 | `NORACU_PHONE_TIMEOUT_MS` | 30000 (45000 for `phone_open` / `phone_type`) | time limit for each iPhone-layer step, 1000–600000 ms (`imctl_timeout` on expiry) |
@@ -301,13 +313,16 @@ model — don't let it override the task.
 | `NORACU_CHROME_TABS` | unset | `all`: with `chrome: true`, your other tabs are listed and can be selected, read and acted on (never closed) |
 | `NORACU_CHROME_DIR` | `~/Library/Application Support/Google/Chrome` | profile folder whose `DevToolsActivePort` `chrome: true` reads |
 | `NORACU_ALLOW_CDP` | unset | `=1` allows `mac_app` launch with `cdp_port` and `browser_launch` with `cdp_port` for ports opened by this `noracu` process (`=any` for external loopback ports; refused under `NORACU_READ_ONLY=1`) |
-| `NORACU_TRACE` | unset | file path for a JSON-lines call log (`{ts, tool, args, ms, error, code}` — argument names/sizes and error code prefix only, never result or error text; opened `0600` with `O_NOFOLLOW`) |
-| `NORACU_USER_IDLE_S` | `2` | seconds without the person's keyboard or mouse input before a Mac or iPhone Mirroring (`phone_*`) input tool acts (the `ios_*` tools do not wait: they do not use this Mac's keyboard or mouse) (`user_active` sooner); also puts the pointer back after pointer actions; `0` turns both off |
+| `NORACU_TRACE` | unset | file path for a JSON-lines call log (`{ts, tool, args, ms, error, code}` — argument names/sizes and error code prefix only, never result or error text; opened `0600` with `O_NOFOLLOW`; a call the client cancelled is logged with code `cancelled`, or `cancelled_queued` if it was still waiting in the input queue) |
+| `NORACU_USER_IDLE_S` | `2` | seconds without the person's keyboard or mouse input before a Mac or iPhone Mirroring (`phone_*`) input tool acts (the `ios_*` tools do not wait: they do not use this Mac's keyboard or mouse); a call that comes sooner waits out the rest once and answers `user_active` if they are still using it; also puts the pointer back after pointer actions; `0` turns both off |
 | `NORACU_NO_BGPOST` | unset | `=1` turns off background input (physical clicks and named keys use the real pointer and the HID key path) |
 | `NORACU_STOP_FILE` | unset | file path: while it exists, every input tool — Mac, iPhone and the browser's input tools (navigate, click, type, fill, press_key, scroll, evaluate, `browser_tabs` new/close) — returns `user_stopped` and sends nothing; set but blank, it refuses all input |
 | `NORACU_DENY_APPS` | the common terminal apps and IDEs with a built-in terminal | comma-separated bundle ids / app names (`*`, `?`) that never get input; a list of your own adds to the default, blank keeps the default, a list starting with `none` drops it |
-| `NORACU_APPROVAL_FILE` | unset | `0600` JSON `{allow, ask, deny}` of bundle-id / app-name patterns, judged on the app that receives the input; `ask` or unlisted → `approval_required`; a broken file refuses all Mac and iPhone input (app rules do not judge the browser layer) |
+| `NORACU_APPROVAL_FILE` | unset | `0600` JSON `{allow, ask, deny}` of bundle-id / app-name patterns, judged on the app that receives the input; `ask` or unlisted → `approval_required`; an `allow` entry that names an app exactly (its bundle id or name, no `*` or `?`) lets that app through the default deny list — `NORACU_DENY_APPS` entries still win; a broken file refuses all Mac and iPhone input (app rules do not judge the browser layer) |
 | `NORACU_LAYERS` | unset (`mac,browser`) | comma-separated `mac`, `browser`, `iphone`: only those layers' tools are listed and callable (the experimental iPhone layer only when `iphone` is named); a call to a tool of a layer that is off says how to turn it on; a name that is not one of the three stops the server at start |
+| `NORACU_PHONE_BACKEND` | `mirror` | with the iPhone layer on: `xcuitest` lists the nine `ios_*` tools (section 10) in place of `phone_*`; any other value falls back to `mirror` with a warning on stderr |
+| `NORACU_IOS_UDID` | unset | XCUITest backend: the device (or booted simulator) to use; needed when several iPhones are connected (`device_ambiguous` lists them) |
+| `NORACU_IOS_RUNNER_DIR` | `~/.noracu/ios-runner` | XCUITest backend: where `npx noracu ios-setup` builds the runner and where the server looks for it |
 | `NORACU_CI` | unset | `=1` only affects `npm test` (skips hardware-gated checks) |
 
 ## 8. Error reference
@@ -327,7 +342,7 @@ model — don't let it override the task.
 | `notification_not_found: …` | `mac_notifications` dismiss/act target id or index is no longer on screen or no longer matches `expected_app` / `expected_title` |
 | `input_busy: …` | an earlier phone or Mac action held the input queue past its wait limit; nothing was sent — retry |
 | `ax_timeout: …` | the target app did not answer accessibility calls in time (busy or hung) |
-| black `mac_screenshot` | Screen Recording not granted to the host app |
+| `mac_screenshot` shows only the desktop picture, or is black | Screen Recording not granted to the host app |
 | `ENOENT` cliclick | `brew install cliclick` or set `NORACU_CLICLICK` |
 | `… blocked by NORACU_READ_ONLY=1` | you're in observation-only mode — unset it to act |
 | `browser_evaluate disabled by NORACU_DISABLE_EVAL=1` | eval kill-switch is on |
@@ -337,6 +352,39 @@ model — don't let it override the task.
 | `menu_unknown: …` | `phone_home` or `phone_app_switcher` menu command timed out (`delivery=unknown, retry=unsafe`) — inspect `phone_screenshot` before retrying |
 | `imctl_timeout: …` | a phone step ran past its time limit and was stopped — check `phone_status` / `phone_screenshot` before retrying (after `phone_open`, noracu goes back to the Home Screen); raise `NORACU_PHONE_TIMEOUT_MS` on a slow Mac |
 | `imctl unavailable: no python3 with pyobjc found …` | install pyobjc for a python3 (`python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-Cocoa`) or set `NORACU_PYTHON` |
+| `ax_empty: …` | the app has no window that accessibility can read from the desktop in view. The message says which case it is: the window server lists windows of the app off screen — on another Space, minimized, or the app is hidden (`mac_windows` with `include_offscreen: true` lists them; `mac_app` `activate` brings the app forward and may switch the person's desktop to it) — or the app has no window open. A window on another Space cannot be read |
+| `ambiguous_app: …` | two or more running apps share that name or bundle id; nothing was done — name the one you mean as `pid:<number>` (the message and `mac_apps` list the pids) |
+| `app_not_found: …` | no running app has that name or bundle id — `mac_apps` lists what runs; `mac_app` with `launch` starts one |
+| `app_unresponsive: …` | the app did not answer accessibility in time (busy or hung) |
+| `surface_absent: …` | the `surface` asked for is not there: no menu is open, or the app exposes no menu bar |
+| `invalid_args: …` | an argument is missing, of the wrong type or out of range, or two that exclude each other were given; nothing was sent — the message names the argument |
+| `action_not_supported: …` | the element does not support that action — for text: it takes text only by rewriting its whole value, or no key of the keyboard layout types a character; nothing was sent |
+| `action_failed: …` | accessibility or cliclick reported an error for an action that may already have gone out — read `delivery` / `retry`, and observe before repeating |
+| `activate_failed: …` | macOS did not bring the app forward |
+| `ax_error: …` | the accessibility engine gave no readable answer — call again; if it stays, report it with the message |
+| `display_unknown: …` | `mac_screenshot` named a display that is not there (`mac_windows` lists the displays), or the displays could not be read; nothing was captured |
+| `no_window: …` | `mac_scroll` without `element_index`: the frontmost app has no window on screen — pass an `element_index` |
+| `user_active: …` | the person used the keyboard or mouse in the last `NORACU_USER_IDLE_S` seconds (2 by default), and again while noracu waited out the rest of that time once; nothing was sent — call again once they have stopped |
+| `user_stopped: …` | the file named by `NORACU_STOP_FILE` exists; no input is sent until the person removes it |
+| `approval_required: …` | `NORACU_APPROVAL_FILE` lists the app under `ask` or not at all; nothing was sent, and it stays so until the person adds the app to `allow` |
+| `approval_file_error` / `approval_file_insecure` / `approval_file_owner` / `stop_check_error` | `NORACU_APPROVAL_FILE` or `NORACU_STOP_FILE` is set but blank, cannot be read, is not mode `0600` or is not owned by this user — Mac and iPhone input is refused until the person fixes it (fail closed) |
+| `internal_error: …` | an input tool failed in a way noracu did not plan for; what it had sent by then is not known (`delivery=unknown, retry=unsafe`) — observe before acting again, and report it with the message |
+| `server_shutting_down: …` | the server is closing; nothing was done |
+| `eval_disabled: …` | `browser_evaluate` is off by default — start the server with `NORACU_ENABLE_EVAL=1`; it never runs in your own Chrome (`chrome: true`) |
+| `browser_installing: …` | the first `browser_launch` on this Mac: Playwright's Chromium is being downloaded, which can take minutes, so the call answered after 20 s while the download goes on — call `browser_launch` again in a minute (a download that failed is reported by that call) |
+| `invalid_element_index: …` | the `element_index` is not in the last `browser_snapshot` — take a new one |
+| `navigate_failed: …` | the navigation ended in an error after it had started (`delivery=unknown`) — `browser_snapshot` shows where the page is now |
+| `tab_not_found` / `tab_is_last` / `tab_not_owned` / `tab_not_selectable` | `browser_tabs`: no open tab has that `tab_id` (list them again); the only open tab is not closed (`browser_close` ends the session); only a tab opened with `browser_tabs` is closed; only a tab on an http(s) page can be selected |
+| `cdp_port_in_use` / `cdp_connect_failed` | the DevTools port is taken (pass another, or `0` for a free one), or nothing answers DevTools on it |
+| `cdp_session_active` / `chrome_session_active` | a session attached to a DevTools port, or to your own Chrome, is open — `browser_close` it before launching the standalone browser |
+| `chrome_disconnected: …` | the connection to your own Chrome ended; tabs noracu opened there may still be open, and noracu did not quit Chrome |
+| `imctl_error: …` / `imctl_output_overflow: …` | the bundled iPhone driver failed, or printed more than 10 MB and was stopped — the step may have partly run; check `phone_status` / `phone_screenshot` before retrying |
+| `expect_not_found: …` | the text given as `expect` is not on the phone's screen; nothing was sent |
+| `out_of_screen: …` | the point is on the iPhone Mirroring window's margin, not on the phone's screen — or the screen's edges could not be told; nothing was sent |
+| `spotlight_unavailable: …` | `phone_open` could not open Spotlight (the Home Screen was not reached, the menu command failed, or the screen did not change); the Home Screen command or the Spotlight gesture may have gone out — `phone_screenshot` before retrying |
+| `scroll_no_effect: …` | the phone's screen did not change after the scroll (the end of the list, or nothing there scrolls) |
+| `keyboard_layout: …` | no key of the Mac's keyboard layout types a character the step needs; nothing was sent |
+| `capture_failed: …` | the iPhone Mirroring window (or, on the XCUITest backend, the phone) gave no image — no other kind of capture is used in its place |
 
 ## 9. iPhone layer
 
@@ -469,9 +517,15 @@ ios_home                                    → Home Screen; earlier indexes end
 | `runner_not_started` | `NORACU_READ_ONLY=1` is set: observation-only mode does not start the runner (starting it puts the runner's app in front on the iPhone) — unset it to read the screen |
 | `xctest_issue` | XCTest reported a failure while the command ran, or after an earlier one had answered. The test session is ended either way and the next call starts a new one. For an input that may have gone out the delivery is unknown; a command that was not run says `delivery=not_delivered`. Look with `ios_snapshot` before acting again |
 | `app_not_running` / `app_not_foreground` | the app is not in front — `ios_launch` it first; nothing was sent |
+| `system_overlay` | the iPhone is showing something of its own over the app (Control Center pulled down, or the Home Screen while an app is still coming forward) while the app still reports that it is in front, so a tap would land on that instead — nothing was sent. Look again with `ios_snapshot` in a moment; if it is still there, `ios_home` closes it but leaves the app for the Home Screen (`ios_launch` brings the app back) |
 | `no_keyboard` | no keyboard is up — tap a text field, or give `ios_type` an `element_index` |
 | `type_not_confirmed` | the text was typed but the field that took it does not hold its old value with the text put in at one place (autocorrection or completion changed it, the field hides its value, part of the text was lost, or the text went to another field) — read the field before typing again |
 | `launch_not_confirmed` | the app was started but is not in front after 10 s (a system prompt may cover it), or its state could not be read to the end of that wait — the result says which; `ios_screenshot` |
 | `launch_failed` | `devicectl` / `simctl` refused (not installed, wrong bundle id) — nothing was sent |
 | `ios_timeout` | the phone did not answer in time — delivery unknown, never re-sent; look before acting again |
 | `runner_start_failed` / `runner_start_timeout` / `runner_version_mismatch` | the runner did not start (the message says why) — a version mismatch means the runner on the device was built by another noracu version (it names its build, and so does the message): run `ios-setup` again; `the runner that was stopped has not exited yet` means the last test session is still ending: try again in a moment |
+| `runner_restarted` | the runner started during this call, which puts its own app in front — the screen the points or the focus were meant for is gone; nothing was sent, look again (`ios_snapshot`) before acting |
+| `runner_unreachable` / `runner_busy` | the runner stopped or its connection closed (the next call that asks for the iPhone starts it), or another runner call is still in flight; nothing was sent |
+| `device_not_ready` | the simulator is not booted, or the iPhone is not paired, has Developer Mode off, or has no tunnel to this Mac — the message says which |
+| `devicectl_failed` / `devicectl_timeout` / `simctl_failed` / `simctl_timeout` | Xcode's device tool (`devicectl` for an iPhone, `simctl` for a simulator) failed or gave no answer in time — the message quotes it |
+| `not_a_text_field` | `ios_type` was given an `element_index` that is not a text field; nothing was typed |

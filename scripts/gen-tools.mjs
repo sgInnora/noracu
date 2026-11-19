@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // scripts/gen-tools.mjs — 从运行中的 server 生成 docs/tools.md
-// 通过 MCP tools/list 拉取（与实际实现永远同步，避免手改漂移——T17 建议）
+// 通过 MCP tools/list 拉取（与实际实现永远同步，避免手改漂移）
 // 用法：node scripts/gen-tools.mjs
 
 import { spawn } from "node:child_process";
@@ -17,13 +17,19 @@ const OUT = join(__dirname, "..", "docs", "tools.md");
 async function listTools(env) {
   // all three layers: the reference lists every layer whatever the shell that runs this has set (unset is
   // mac,browser since S1)
-  // no NORACU_* setting of the shell that runs this reaches the server (audit S5A-s28-D-1: NORACU_READ_ONLY or a
+  // no NORACU_* setting of the shell that runs this reaches the server (NORACU_READ_ONLY or a
   // kill switch would change what the reference says)
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("NORACU_")));
   const proc = spawn("node", [SERVER], { stdio: ["pipe", "pipe", "ignore"], env: { ...clean, NORACU_LAYERS: "mac,browser,iphone", ...env } });
   let buf = "";
   const pending = new Map();
   let msgId = 0;
+  // a server that exits answers nothing more: every request still waiting gets an error at once
+  proc.stdin.on("error", () => { /* the exit below says it */ });
+  proc.on("exit", (code, signal) => {
+    for (const done of pending.values()) done({ error: { message: `the server exited (${signal || `code ${code}`})` } });
+    pending.clear();
+  });
   proc.stdout.on("data", (d) => {
     buf += d.toString();
     let nl;
@@ -36,17 +42,25 @@ async function listTools(env) {
       } catch {}
     }
   });
+  // a request with no answer within 15 s ends the run (the server answers in about a second)
   const rpc = (method, params) => new Promise((res) => {
     const id = ++msgId;
-    pending.set(id, res);
-    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    const timer = setTimeout(() => { pending.delete(id); res({ error: { message: `the server did not answer ${method} within 15 s` } }); }, 15000);
+    pending.set(id, (m) => { clearTimeout(timer); res(m); });
+    if (proc.exitCode === null && proc.signalCode === null) proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   });
   const init = await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "gen-tools" } });
+  const version = init.result?.serverInfo?.version;
+  if (typeof version !== "string" || !version) {
+    proc.kill();
+    console.error(`gen-tools: initialize gave no server version (${JSON.stringify(init.error || init).slice(0, 200)})`);
+    process.exit(1);
+  }
   const tl = await rpc("tools/list", {});
   proc.kill();
-  // an error or no answer is not an empty tool list: docs/tools.md is not overwritten from it (audit S5A-s28-D-2)
+  // an error or no answer is not an empty tool list: docs/tools.md is not overwritten from it
   if (!Array.isArray(tl.result?.tools) || !tl.result.tools.length) { console.error(`gen-tools: tools/list gave no tools (${JSON.stringify(tl.error || tl).slice(0, 200)})`); process.exit(1); }
-  return { version: init.result?.serverInfo?.version || "?", tools: tl.result.tools };
+  return { version, tools: tl.result.tools };
 }
 
 const mirror = await listTools({ NORACU_PHONE_BACKEND: "mirror" });

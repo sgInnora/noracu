@@ -45,7 +45,8 @@ the previous build once (simulator, 2026-11-11) — so the client starts such a 
 reports `runner_version_mismatch`.
 
 If it cannot start it prints `NORACU_RUNNER error <code>` (`bad_token`, `bad_bind`, `bad_port`,
-`bind_failed`) and ends the test.
+`bind_failed`) and ends the test. A listener that is still waiting for the network is waited for up to 10 s.
+If the listener goes away after the ready line, the runner prints `NORACU_RUNNER error listener_failed` and ends.
 
 The runner ends when it receives `quit`, when the client's `xcodebuild` process is stopped, or after
 12 hours.
@@ -93,9 +94,24 @@ All points and frames are in screen points, origin at the top-left of the screen
 `drag`, `type` and `keys` are refused — text goes wherever the keyboard focus is, which the public API does
 not show, and a second Return would land on whatever the alert was covering. See Refusals. noracu's own Mac
 side refuses those, and a `tap` with a `count` above 1, before it starts a runner — a starting runner puts its
-app in front of what the iPhone was showing — so the runner's refusal is what any other client gets. Since
-2026-11-12 noracu no longer sends `springboard_only`: while app rules are in force it refuses every input that
-names `com.apple.springboard` on the Mac side, a single tap on an alert's button included.
+app in front of what the iPhone was showing — so the runner's refusal is what any other client gets. While
+app rules are in force noracu refuses every input that names `com.apple.springboard` on the Mac side, a single
+tap on an alert's button included. Without them it sends `springboard_only` in one case:
+`com.apple.springboard` always reads `runningForeground`, also while an app or Spotlight is what the iPhone
+shows, so before an input named for it noracu looks first. When the app the session last launched, acted on or read in front still reads
+`runningForeground` (a call that names the Home Screen in between does not change which app that is), or when `front` shows no Home Screen icon — asked again up to four times over 1.6 s while
+no alert shows either, as icons can be on their way in right after `home` — the input goes out with
+`springboard_only: true`: one tap on an alert's button is sent, anything else is refused. When either read
+fails, nothing is sent.
+
+SpringBoard's alerts are not the only thing of its own that can cover an app: with Control Center pulled down
+over it the app still reads `runningForeground`, and a tap lands on Control Center. The runner does not look
+for that. Before an input that names an app, noracu's Mac side asks `front`: when SpringBoard shows icons while
+the app reports that it is in front, the input is refused there with `system_overlay` and nothing is sent. An
+icon can still be showing for a moment right after an app comes to the front, so while icons show `front` is
+asked again, up to four times over 1.6 s, before the refusal. A `front` or `app_state` read that fails here is
+answered under its own error, with nothing sent. Another client that talks to the runner directly gets no such
+check.
 
 An optional field must have the right type when it is present: a `count` of `"2"` is `invalid_args`, not the
 default. `args` itself must be an object (`invalid_args` otherwise), and `id` a whole number: a missing `id`, or any

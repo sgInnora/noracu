@@ -49,10 +49,19 @@ proc.stdout.on("data", (d) => {
   }
 });
 
+// A call that gets no answer ends the wait instead of hanging the whole run: after the limit it resolves with an
+// error result, so the checks made on it fail, and it is counted — the count is checked at the end of the run.
+const CALL_TIMEOUT_MS = Number(process.env.NORACU_E2E_CALL_TIMEOUT_MS) || 120000;
+const unanswered = [];
+let expectedUnanswered = 0;
+const noAnswer = (what, ms) => ({ timedOut: true, error: { code: -32001, message: `e2e: no answer in ${ms} ms` }, result: { isError: true, content: [{ type: "text", text: `E2E_TIMEOUT: ${what} got no answer in ${ms} ms` }] } });
+const named = (method, params) => (method === "tools/call" ? `tools/call ${params?.name}` : method);
+
 function rpc(method, params) {
   return new Promise((resolve) => {
     const id = ++msgId;
-    pending.set(id, resolve);
+    const timer = setTimeout(() => { if (pending.delete(id)) { unanswered.push(named(method, params)); resolve(noAnswer(named(method, params), CALL_TIMEOUT_MS)); } }, CALL_TIMEOUT_MS);
+    pending.set(id, (msg) => { clearTimeout(timer); resolve(msg); });
     proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   });
 }
@@ -91,7 +100,7 @@ async function call(name, args = {}) {
 }
 
 // G1：起第二个 server 进程（自定义 env）验证行为关门；用完 finally kill
-async function spawnServer(env = {}, serverPath = new URL("../src/server.mjs", import.meta.url).pathname) {
+async function spawnServer(env = {}, serverPath = new URL("../src/server.mjs", import.meta.url).pathname, callTimeoutMs = CALL_TIMEOUT_MS) {
   const p = spawn("node", [serverPath], {
     stdio: ["pipe", "pipe", "inherit"],
     env: { ...process.env, ...env },
@@ -111,9 +120,15 @@ async function spawnServer(env = {}, serverPath = new URL("../src/server.mjs", i
       } catch {}
     }
   });
+  // A call still open when the server goes away is answered with an error, so a test that waits for it fails
+  // instead of hanging; one left open on purpose (a cancelled call) is dropped with its server and not counted.
+  const open = new Map();   // id → { what, timer, resolve }
+  p.on("exit", () => { for (const [id, o] of open) { clearTimeout(o.timer); pend.delete(id); o.resolve(noAnswer(`${o.what} (the server exited)`, 0)); } open.clear(); });
   const rpcOn = (method, params = {}) => new Promise((resolve) => {
-    const id = ++mid;
-    pend.set(id, resolve);
+    const id = ++mid, what = named(method, params);
+    const timer = setTimeout(() => { if (pend.delete(id)) { open.delete(id); unanswered.push(what); resolve(noAnswer(what, callTimeoutMs)); } }, callTimeoutMs);
+    open.set(id, { what, timer, resolve });
+    pend.set(id, (msg) => { clearTimeout(timer); open.delete(id); resolve(msg); });
     p.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   });
   const callOn = (name, args = {}) => rpcOn("tools/call", { name, arguments: args }).then((msg) => msg.result);
@@ -124,6 +139,15 @@ async function spawnServer(env = {}, serverPath = new URL("../src/server.mjs", i
 const init = await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test" } });
 check("initialize", init.result?.serverInfo?.name === "noracu", init.result?.serverInfo?.name);
 check("B4：initialize 带使用说明 instructions", typeof init.result?.instructions === "string" && init.result.instructions.includes("element_index") && init.result.instructions.includes("retry=safe"), String(init.result?.instructions).slice(0, 60));
+
+// the handshake answers in the revision the client asked for when this server speaks it
+{
+  const ver = async (v) => (await rpc("initialize", { ...(v === undefined ? {} : { protocolVersion: v }), capabilities: {}, clientInfo: { name: "test" } })).result?.protocolVersion;
+  const got = [];
+  for (const v of ["2024-11-05", "2025-06-18", "2025-11-25", "2025-03-26", "2099-01-01", "1999-01-01", undefined, 20251125]) got.push(await ver(v));
+  check("initialize: 2024-11-05, 2025-06-18 and 2025-11-25 are answered as asked; 2025-03-26 (it needs batches) gets 2024-11-05; anything else gets the latest",
+    JSON.stringify(got) === JSON.stringify(["2024-11-05", "2025-06-18", "2025-11-25", "2024-11-05", "2025-11-25", "2025-11-25", "2025-11-25", "2025-11-25"]), JSON.stringify(got));
+}
 
 // 2. tools/list
 const tl = await rpc("tools/list", {});
@@ -433,6 +457,12 @@ if (LOCAL && TE_READY()) {
   }
   const mm = await call("mac_menu_command", { app: "TextEdit", command: "Select All", force: "yes" });
   check("B2：mac_menu_command 非法 force 被拒", mm?.isError && String(mm?.content?.[0]?.text).includes("force must be a boolean"), String(mm?.content?.[0]?.text).slice(0, 80));
+  const dp = await call("mac_ax_state", { depth: 2.5 });
+  check("mac_ax_state: a depth that is not a whole number is refused", dp?.isError && String(dp?.content?.[0]?.text).includes("depth integer 1-40"), String(dp?.content?.[0]?.text).slice(0, 80));
+  const rootWith = [];
+  for (const extra of [{ app: "Finder" }, { window: 0 }, { window_id: 1 }, { surface: "menubar" }]) rootWith.push(await call("mac_ax_state", { root: 3, ...extra }));
+  check("mac_ax_state: root with app, window, window_id or surface is refused before anything is read (they were not looked at)",
+    rootWith.every((x) => x?.isError && String(x?.content?.[0]?.text).includes("without app, window, window_id or surface")), rootWith.map((x) => String(x?.content?.[0]?.text).slice(0, 60)).join(" | "));
   const sv = await call("mac_set_value", { element_index: 0 });
   check("B2：mac_set_value 缺 value 被拒", sv?.isError && String(sv?.content?.[0]?.text).includes("value"), String(sv?.content?.[0]?.text).slice(0, 80));
   const mc = await call("mac_click", { element_index: 0, mechanism: "bogus" });
@@ -620,6 +650,28 @@ if (LOCAL && TE_READY()) {
     const stRes = await s2.call("mac_status");
     check("t10：NORACU_TRACE 使用 O_NOFOLLOW 拒绝符号链接且不影响工具调用", !stRes?.isError && rf(target, "utf8") === "untouched", rf(target, "utf8"));
   } finally { s2.proc.kill(); rmSync(dir2, { recursive: true, force: true }); }
+  // a call refused before the tool runs gets its line too: unknown tool, invalid arguments, read-only mode, stop file
+  const dir3 = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const file3 = join(dir3, "trace.jsonl"), stop3 = join(dir3, "stop");
+  wf(stop3, "");
+  const s3 = await spawnServer({ NORACU_TRACE: file3, NORACU_READ_ONLY: "1", NORACU_STOP_FILE: stop3 });
+  try {
+    await s3.call("no_such_tool", { secret: "s3cret-token" });
+    await s3.call("mac_ax_state", { depth: 2.5 });
+    await s3.call("mac_click", { x: 1, y: 1 });
+    await s3.call("browser_navigate", { url: "https://example.com/" });
+    let raw3 = "";
+    try { raw3 = rf(file3, "utf8"); } catch { /* nothing was written */ }
+    const lines = raw3.trim() ? raw3.trim().split("\n").map((l) => JSON.parse(l)) : [];
+    check("NORACU_TRACE：工具运行之前就被拒的调用也各记一行（未知工具 / 参数不合法 / 只读模式 / 停止文件），只有代码",
+      lines.length === 4 && lines.every((l) => l.error === true && l.ms === 0 && JSON.stringify(Object.keys(l)) === JSON.stringify(["ts", "tool", "args", "ms", "error", "code"]))
+        && lines[0].tool === "unknown(12)" && lines[0].code === "unknown_tool" && lines[0].args.secret === "string(12)" && !raw3.includes("no_such_tool")
+        && lines[1].tool === "mac_ax_state" && lines[1].code === "invalid_args" && lines[1].args.depth === 2.5
+        && lines[2].tool === "mac_click" && lines[2].code === "read_only"
+        && lines[3].tool === "browser_navigate" && lines[3].code === "user_stopped" && lines[3].args.url === "string(20)"
+        && !raw3.includes("s3cret-token") && !raw3.includes("example.com") && !raw3.includes(stop3),
+      JSON.stringify(lines).slice(0, 400));
+  } finally { s3.proc.kill(); rmSync(dir3, { recursive: true, force: true }); }
 }
 
 // 0.2.7：电脑前的人优先（NORACU_USER_IDLE_S）—— 解析（CI 安全）；本机：有人刚动过键鼠就不发、只读工具不受影响、
@@ -641,8 +693,11 @@ if (LOCAL && TE_READY()) {
     const s = await spawnServer({ NORACU_USER_IDLE_S: "2" });
     const s0 = await spawnServer({ NORACU_USER_IDLE_S: "0" });
     try {
-      spawnSync(cc, ["m:+0,+0"], { timeout: 5000 });  // "the person": a zero-distance mouse move from this test process
+      // "the person": zero-distance mouse moves from this test process, for 3.5 s — one move alone is waited out (R3)
+      const mover = spawn("/bin/bash", ["-c", `for i in $(seq 1 14); do "${cc}" m:+0,+0; sleep 0.25; done`], { stdio: "ignore" });
+      await sleepMs(300);
       const busy = await s.call("mac_key", NOAPP);
+      await new Promise((r) => (mover.exitCode !== null ? r() : mover.on("exit", r)));
       const read = await s.call("phone_status");
       const off = await s0.call("mac_key", NOAPP);
       check("0.2.7：刚有人动过键鼠 → 输入工具返回 user_active、什么都不发；只读工具不受影响；=0 时不拦",
@@ -698,7 +753,7 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
   const node = (name, i) => ({ d: 1, role: "AXButton", path: [i], fp: { role: "AXButton", subrole: "", id: "", name }, title: name, frame: [10 * i, 0, 10, 10], interactive: true });
   // "Ghost" is an app whose pid the frontmost op cannot name; "Term" is Terminal (bundle com.apple.Terminal);
   // "Neg" has a pid the bgpost script refuses before it creates any event (bad-pid: nothing posted)
-  const base = { ok: true, app: "Fake", bundle_id: "test.fake", pid: req.app === "Ghost" ? 31337 : req.app === "Term" ? 555 : req.app === "Neg" ? -7 : req.app === "Plain" ? 556 : 4242, surface: "window", complete: true, visited: 2, ms: 1, container: { kind: "window", wid: 1, title: "W", subrole: "", frame: [0, 0, 100, 100], n: 0 } };
+  const base = { ok: true, app: "Fake", bundle_id: "test.fake", pid: req.app === "Front" ? 777 : req.app === "Ghost" ? 31337 : req.app === "Term" ? 555 : req.app === "Neg" ? -7 : req.app === "Plain" ? 556 : req.app === "pid:12" ? 12 : req.app === "Nameless" ? 557 : req.app === "MenuGone" ? 808 : req.app === "BarItem" ? 809 : 4242, surface: "window", complete: true, visited: 2, ms: 1, container: { kind: "window", wid: 1, title: "W", subrole: "", frame: [0, 0, 100, 100], n: 0 } };
   const webAx = req.app === "ChromeNoWeb" ? { web_accessibility: "unsupported" } : req.app === "ChromeWeb" ? { web_accessibility: "exposed" } : req.app === "NoIdApp" ? { window_identity: "unverifiable" } : {};
   if (req.op === "snapshot") return say({ ...base, ...webAx, nodes: [node("One", 0), node("Two", 1)] });
   if (req.op === "find") return say({ ...base, ...webAx, nodes: [node("Three", 0), node("Four", 1)] });
@@ -706,16 +761,27 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
   if (req.op === "physical_prep") return req.target.fp.name === "Two" ? say({ ok: false, code: "OCCLUDED", message: "a window of Other is on top", delivery: "not_delivered", retry: "safe" })
     : req.target.fp.name === "Four" ? say({ ok: true, point: [700, 70], hit: "reaches", pid: 4242, wid: 1, before: {} })
     : req.target.pid === -7 ? say({ ok: true, point: [6, 6], hit: "reaches", pid: -7, wid: 1, before: {} })
+    : req.target.pid === 777 ? say({ ok: true, point: [50, 50], hit: "reaches", pid: 777, wid: 5, before: {} })
+    : req.target.pid === 808 ? say({ ok: true, point: [5, 205], hit: "reaches", pid: 808, wid: null, top_wid: 88, before: {} })
+    : req.target.pid === 809 ? say({ ok: true, point: [40, 205], hit: "reaches", pid: 809, wid: null, top_wid: 3, before: {} })
     : say({ ok: true, point: [5, 5], hit: "reaches", pid: req.target.pid ?? 4242, wid: 1, before: {} });
+  // "Two" sits where a window of "Other" (wid 6) is on top by the time of the late re-check (410,110)
+  if (req.op === "scroll_prep") return say({ ok: true, point: req.target?.fp?.name === "Two" ? [410, 110] : [5, 5], hit: "reaches", pid: 4242, wid: 1, before: {} });
   if (req.op === "observe_after") return say({ ok: true, delivery: "delivered_verified", retry: "unsafe", changed: ["focus"], surfaces: [], ...(req.physical === true ? { note: "physical-flag-seen point=" + JSON.stringify(req.point) + " wid=" + req.wid } : {}) });
+  // two running copies of "Twin"; pid:12 is the one that is not in front
+  if (req.op === "app_info" && req.app === "pid:12") return say({ ok: true, running: true, name: "Twin", pid: 12, bundle_id: "x.twin", path: "/Applications/Twin.app" });
+  if (req.op === "app_ctl" && req.action === "activate" && req.app === "pid:12") return say({ ok: true, sent: true, name: "Twin", pid: 12 });
   if (req.op === "frontmost") {
     // the engine's own shape: { pid, name, bundle } (not bundle_id); a pid is looked up, an unknown one has no app
-    const APPS = { 777: { pid: 777, name: "Other", bundle: "x.other" }, 4242: { pid: 4242, name: "Fake", bundle: "test.fake" }, 999: { pid: 999, name: "NotificationCenter", bundle: "com.apple.notificationcenterui" }, 555: { pid: 555, name: "Terminal", bundle: "com.apple.Terminal" }, "-7": { pid: -7, name: "Neg", bundle: "test.neg" }, 556: { pid: 556, name: "Plain" }, 301: { pid: 301, name: "Finder", bundle: "com.apple.finder" } };
+    const APPS = { 777: { pid: 777, name: "Other", bundle: "x.other" }, 4242: { pid: 4242, name: "Fake", bundle: "test.fake" }, 999: { pid: 999, name: "NotificationCenter", bundle: "com.apple.notificationcenterui" }, 555: { pid: 555, name: "Terminal", bundle: "com.apple.Terminal" }, "-7": { pid: -7, name: "Neg", bundle: "test.neg" }, 556: { pid: 556, name: "Plain" }, 12: { pid: 12, name: "Twin", bundle: "x.twin" }, 557: { pid: 557, bundle: "test.nameless" }, 808: { pid: 808, name: "MenuGone", bundle: "test.menugone" }, 809: { pid: 809, name: "BarItem", bundle: "test.baritem" }, 301: { pid: 301, name: "Finder", bundle: "com.apple.finder" } };
     const t = req.pid !== undefined ? APPS[req.pid] || null : req.app === "Other" ? APPS[777] : req.app === "com.apple.finder" ? APPS[301] : req.app === "NotRunning" ? null : APPS[4242];
     const o = { ok: true, front: APPS[777], target: t, match: Boolean(t && t.pid === 777) };
+    // "Twin": two running apps share the name — the engine names no target and hands its refusal along
+    if (req.app === "Twin") { o.target = null; o.match = false; o.ambiguous = { code: "AMBIGUOUS_APP", message: "Twin names 2 running apps (pid 11, frontmost; pid 12)", delivery: "not_delivered", retry: "safe", details: { apps: [{ pid: 11, name: "Twin", bundle_id: "x.twin", frontmost: true }, { pid: 12, name: "Twin", bundle_id: "x.twin", frontmost: false }] } }; }
     // at: x >= 500 is under a notification banner, y < 30 is the menu bar, anything else is the frontmost app's window
     // 300,300 is the bare desktop (no window); 410,110 is a second window of "Other" (wid 6) over window 5
-    if (req.at) o.top = req.at[0] === 300 && req.at[1] === 300 ? null : req.at[0] === 410 && req.at[1] === 110 ? { pid: 777, owner: "Other", layer: 0, wid: 6 } : req.at[0] === 6 && req.at[1] === 6 ? { pid: -7, owner: "Neg", layer: 0, wid: 1 } : req.at[0] === 5 && req.at[1] === 5 ? { pid: 4242, owner: "Fake", layer: 0, wid: 1 } : req.at[0] >= 500 ? { pid: 999, owner: "NotificationCenter", layer: 23, wid: 9 } : req.at[1] < 30 ? { pid: 640, owner: "Window Server", layer: 24, wid: 1 } : { pid: 777, owner: "Other", layer: 0, wid: 5 };
+    // 5,205: the menu of "MenuGone" (window 88 at the hit test) has closed, its own window 2 is there now; 40,205: the menu bar (the window server's window 3)
+    if (req.at) o.top = req.at[0] === 5 && req.at[1] === 205 ? { pid: 808, owner: "MenuGone", layer: 0, wid: 2 } : req.at[0] === 40 && req.at[1] === 205 ? { pid: 1, owner: "Window Server", layer: 24, wid: 3 } : req.at[0] === 300 && req.at[1] === 300 ? null : req.at[0] === 410 && req.at[1] === 110 ? { pid: 777, owner: "Other", layer: 0, wid: 6 } : req.at[0] === 6 && req.at[1] === 6 ? { pid: -7, owner: "Neg", layer: 0, wid: 1 } : req.at[0] === 5 && req.at[1] === 5 ? { pid: 4242, owner: "Fake", layer: 0, wid: 1 } : req.at[0] >= 500 ? { pid: 999, owner: "NotificationCenter", layer: 23, wid: 9 } : req.at[1] < 30 ? { pid: 640, owner: "Window Server", layer: 24, wid: 1 } : { pid: 777, owner: "Other", layer: 0, wid: 5 };
     return say(o);
   }
   // the frontmost app ("Other") has one window whose center (600,200) lies under the banner (x >= 500)
@@ -761,6 +827,9 @@ if [ "$3" = "type" ] && [ "$IN" = "X" ]; then echo "typed 1 chars (the screen ch
 if [ "$3" = "type" ] && [ "$IN" = "Y" ]; then echo "typed 1 chars (one character: OCR saw it appear, which is no proof of where it landed — check the field; the clipboard still holds the typed text)"; exit 0; fi
 if [ "$3" = "type" ] && [ "$IN" = "LATEtext" ]; then echo "typed 8 chars (the text showed up late, during an extra 3s check after the 2.5s confirmation window — OCR cannot tell whether that is the paste or a line repeating it, such as a search result: check the field before typing again; the clipboard still holds the typed text)"; exit 0; fi
 if [ "$3" = "type" ] && [ "$IN" = "Seen here" ]; then echo "typed 9 chars"; exit 0; fi
+if [ "$3" = "type" ] && [ "$IN" = "NEWform" ]; then echo "typed 7 chars (sent to the keyboard; the screen was not looked at)"; exit 0; fi
+if [ "$3" = "open" ] && [ "$IN" = "NewWay" ]; then echo "started 'NewWay' from the App Library"; exit 0; fi
+if [ "$3" = "open" ] && [ "$IN" = "Maps" ]; then echo "opened 'Maps' (label read with confidence 0.90)"; exit 0; fi
 if [ "$3" = "type" ] && [ "$IN" = "ok" ]; then echo "typed 2 chars (the screen changed after the paste, but a text of fewer than four characters, spaces and case aside, is never confirmed by OCR — check the field; the clipboard still holds the typed text)"; exit 0; fi
 if [ "$3" = "type" ] && [ "$IN" = "STRIPtext" ]; then echo "typed 9 chars (OCR saw the text appear only in the strip at the top of the screen, where a field cannot be told from a notification banner — check the field; the clipboard still holds the typed text)"; exit 0; fi
 if [ "$3" = "type" ] && [ "$IN" = "AZERTY" ]; then echo "keyboard_layout: the Mac keyboard layout types \\"q\\" on the key that ⌘A is sent from (key code 0), so iPhone Mirroring would get ⌘Q — nothing was sent; switch the Mac to a QWERTY-style input source (U.S., ABC, Pinyin) and retry" >&2; exit 2; fi
@@ -821,11 +890,48 @@ echo "home gesture sent"
     const rx2 = await s.call("mac_click", { x: 600, y: 100 });
     check("0.2.1：x,y 点击处被别的应用（通知横幅）盖住 → occluded，不发送", rx2?.isError && /^ERROR: occluded: 600,100 is covered by "NotificationCenter" \(window layer 23\), not "Other" \(the frontmost app\)/.test(say(rx2)) && /delivery=not_delivered, retry=safe/.test(say(rx2)) && !/c:600,100/.test(sent()), `${say(rx2).slice(0, 120)} | cliclick: ${JSON.stringify(sent())}`);
     // review R39: mac_scroll's refusal uses scroll wording — it takes no force and no app
+    // two ways to name the target at once, or a snapshot_id with nothing it could be checked against
+    const twoWays = [
+      await s.call("mac_click", { element_index: one, x: 5, y: 5 }),
+      await s.call("mac_click", { x: 5, y: 5, snapshot_id: "s1" }),
+      await s.call("mac_scroll", { direction: "down", snapshot_id: "s1" }),
+      await s.call("mac_type", { text: "x", snapshot_id: "s1" }),
+    ];
+    check("mac_click with element_index and x,y, and mac_click / mac_scroll / mac_type with a snapshot_id but no element_index: refused, nothing is sent",
+      twoWays.every((r) => r?.isError && /delivery=not_delivered, retry=safe/.test(say(r))) && /one of the two/.test(say(twoWays[0])) && [1, 2, 3].every((i) => /snapshot_id goes with element_index/.test(say(twoWays[i]))),
+      twoWays.map((r) => say(r).slice(0, 80)).join(" | "));
+    // an app name that two running apps share: nothing is sent to either, and the answer lists them
+    const twinLog = sent();
+    const twin = [await s.call("mac_key", { key: "a", app: "Twin" }), await s.call("mac_type", { text: "hi", app: "Twin" }), await s.call("mac_click", { x: 5, y: 5, app: "Twin" })];
+    check("an app name that two running apps share: mac_key, mac_type and mac_click at x,y answer ambiguous_app and send nothing",
+      twin.every((r) => r?.isError && /^ERROR: ambiguous_app: Twin names 2 running apps/.test(say(r)) && /delivery=not_delivered, retry=safe/.test(say(r))) && sent() === twinLog,
+      twin.map((r) => say(r).slice(0, 90)).join(" | "));
+    // …and pid:<n>, which the answer names, works with mac_app activate: that process is brought forward by the
+    // engine (open -a would pick whichever copy macOS likes)
+    // …but an element_index names its process: with that name, mac_type types into the element when its process is
+    // one of the copies, and refuses an element of another app
+    const i12 = jsonOf(await s.call("mac_ax_state", { app: "pid:12" })).elements?.find((e) => e.title === "One")?.i;
+    const i4242 = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
+    const own12 = await s.call("mac_type", { element_index: i12, text: "hi", app: "Twin" });
+    const notTwin = await s.call("mac_type", { element_index: i4242, text: "hi", app: "Twin" });
+    check("mac_type with element_index and an app name two running copies share: the element's own copy is one of them → typed; an element of another app → focus_lost, nothing sent",
+      Number.isInteger(i12) && !own12?.isError && /^typed /.test(say(own12)) && notTwin?.isError && /belongs to another app than "Twin" — nothing was sent/.test(say(notTwin)),
+      `${say(own12).slice(0, 110)} | ${say(notTwin).slice(0, 110)}`);
+    const actPid = await s.call("mac_app", { action: "activate", app: "pid:12" });
+    check("mac_app activate pid:12: that process is brought forward through the engine, not by open -a",
+      !actPid?.isError && /^activated "Twin"/.test(say(actPid)), say(actPid).slice(0, 120));
     const sc0 = await s.call("mac_scroll", { direction: "down" });
     check("0.2.6（R39）：mac_scroll 中心被盖住 → occluded，提示只指向 element_index，不出现 force:true / pass app",
       sc0?.isError && /^ERROR: occluded: 600,200 is covered by "NotificationCenter" \(window layer 23\), not "Other" \(the frontmost app\)/.test(say(sc0))
         && /pass element_index to scroll a specific element$/.test(say(sc0)) && !/force:true|pass app:/.test(say(sc0)) && /delivery=not_delivered, retry=safe/.test(say(sc0)),
       say(sc0).slice(0, 200));
+    // mac_type with element_index and an app the element does not belong to: refused before anything is written, on
+    // the accessibility path too (it was checked only before physical keystrokes)
+    const snapFake = await s.call("mac_ax_state", { app: "Fake" });
+    const idxFake = (() => { try { return JSON.parse(say(snapFake)).elements[0].i; } catch { return null; } })();
+    const tyOther = await s.call("mac_type", { element_index: idxFake, app: "Other", text: "hi" });
+    check("mac_type with element_index and an app the element does not belong to: refused on the accessibility path too, nothing written",
+      Number.isInteger(idxFake) && tyOther?.isError && /belongs to another app than "Other"/.test(say(tyOther)) && /delivery=not_delivered/.test(say(tyOther)), say(tyOther).slice(0, 160));
     // review 0.2.6 #2: mac_type into the focused element names the app; an app with no focused element
     // gets keystrokes only when app names it; a text view accessibility cannot write still gets them
     const ty1 = await s.call("mac_type", { text: "hello" });
@@ -943,7 +1049,7 @@ echo "home gesture sent"
     const tu = await s.call("phone_type", { text: "X" });
     check("B5/device：phone_type 只有画面变化、OCR 读不回 → delivered_unverified",
       !tu?.isError && /OCR cannot read this text back/.test(say(tu)) && /delivery=delivered_unverified, retry=unsafe/.test(say(tu)), say(tu).slice(-70));
-    // 0.2.5 (Andy's call): only a sighting in the field confirms phone_type; phone_scroll never claims verified
+    // 0.2.5: only a sighting in the field confirms phone_type; phone_scroll never claims verified
     const tY = await s.call("phone_type", { text: "Y" });
     const tL = await s.call("phone_type", { text: "LATEtext" });
     const tS = await s.call("phone_type", { text: "Seen here" });
@@ -951,6 +1057,13 @@ echo "home gesture sent"
     check("0.2.5：phone_type 单字符、迟到（R38：不论看到在哪）→ delivered_unverified；在输入处看到 → delivered_verified；phone_scroll → delivered_unverified",
       /delivery=delivered_unverified/.test(say(tY)) && /showed up late/.test(say(tL)) && /delivery=delivered_unverified/.test(say(tL)) && /delivery=delivered_verified/.test(say(tS)) && /delivery=delivered_unverified/.test(say(sc)),
       [say(tY), say(tL), say(tS), say(sc)].map((t) => t.slice(-40)).join(" | "));
+    // a line that comes with exit code 0 and is not the driver's confirmed one is not read as verified
+    const tN = await s.call("phone_type", { text: "NEWform" });
+    const oN = await s.call("phone_open", { app: "NewWay" });
+    const oM = await s.call("phone_open", { app: "Maps" });
+    check("phone_type / phone_open: only the driver's own confirmed line is delivered_verified; another line with exit code 0 is delivered_unverified",
+      !tN?.isError && /delivery=delivered_unverified, retry=unsafe/.test(say(tN)) && !oN?.isError && /delivery=delivered_unverified, retry=unsafe/.test(say(oN)) && /delivery=delivered_verified/.test(say(oM)),
+      [say(tN), say(oN), say(oM)].map((t) => t.slice(-70)).join(" | "));
     const tO = await s.call("phone_type", { text: "ok" });
     const tT = await s.call("phone_type", { text: "STRIPtext" });
     check("0.2.6（#7）：phone_type 太短 / 只在顶部横幅带看到 → 写明原因，delivered_unverified",
@@ -969,6 +1082,14 @@ echo "home gesture sent"
     check("B5/t06：menu_item_absent 回退 imctl；find/open 文本经 stdin（argv 只有 `-- -`）；key 带 `--`；非导入异常报 imctl_error",
       !mhFb?.isError && /-m imctl\.cli home/.test(logAfter) && /find -- -\n/.test(logAfter) && /stdin:--exact/.test(logAfter) && /open -- -\n/.test(logAfter) && /stdin:-Settings/.test(logAfter) && !/cli (find|open) -- (--exact|-Settings)/.test(logAfter) && /key --expect=Home -- return/.test(logAfter) && /key --expect=--replace -- return/.test(logAfter) && psBoom?.isError && /imctl_error: RuntimeError: synthetic boom/.test(say(psBoom)) && !/imctl unavailable/.test(say(psBoom)),
       `${say(psBoom).slice(0, 60)} | log=${JSON.stringify(logAfter.trim())}`);
+    // a name with a line break or another control character is refused before imctl is started
+    const ctl = [await s.call("phone_open", { app: "Weather\n" }), await s.call("phone_open", { app: "\rSettings" }), await s.call("phone_open", { app: "Maps\u2028" }), await s.call("phone_open", { app: "Notes\u0085" })];
+    // an accented letter, a no-break space and an emoji are part of real names: not refused here
+    const named = await s.call("phone_open", { app: "Caf\u00e9\u00a0\ud83d\ude42" });
+    check("phone_open：名字里带换行等控制字符在参数校验时就拒，不交给 imctl",
+      ctl.length === 4 && ctl.every((r) => r?.isError && /^ERROR: phone_open: app must not contain control characters/.test(say(r)) && /delivery=not_delivered, retry=safe/.test(say(r)))
+        && !/control characters/.test(say(named)),
+      `${ctl.map((r) => say(r).slice(0, 60)).join(" | ")} | ${say(named).slice(0, 60)}`);
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
@@ -1023,7 +1144,7 @@ echo "home gesture sent"
       rs.filter(([, r]) => !/user_stopped/.test(say(r))).map(([n, r]) => `${n}: ${say(r).slice(0, 80)}`).join(" | ") + ` | ops=${JSON.stringify(read(opsLog))} click=${JSON.stringify(read(clickLog))} imctl=${JSON.stringify(read(imctlLog))}`);
     const obs = await s.call("mac_ax_state", { app: "Fake" });
     check("0.3.0（T1）：stop file 不挡观察类工具", !obs?.isError && /snapshot_id/.test(say(obs)), say(obs).slice(0, 80));
-    // S4A-s14-grok-1: the browser's input tools stop too; its observation tools do not
+    // the browser's input tools stop too; its observation tools do not
     const bs = [];
     for (const [n, a] of [["browser_navigate", { url: "https://example.com" }], ["browser_click", { selector: "a" }], ["browser_type", { text: "x" }], ["browser_tabs", { action: "new" }]]) bs.push([n, await s.call(n, a)]);
     const bList = await s.call("browser_tabs", { action: "list" });
@@ -1035,9 +1156,14 @@ echo "home gesture sent"
     const tOne = await idx("Term");
     const gOne = await idx("Ghost");
     const pOne = await idx("Plain");
+    const qOne = await idx("Nameless");
+    clear();
+    const nn = await s.call("mac_click", { element_index: qOne });
+    check("审计：读不到名字、只有 bundle id 的 app，在按名字写的规则生效时（默认拒绝列表就有）→ input_denied，不发",
+      nn?.isError && /^ERROR: input_denied: the name of the app that would receive the input could not be read/.test(say(nn)) && !ACTION_OPS.test(read(opsLog)), say(nn).slice(0, 140));
     clear();
     const nb = await s.call("mac_click", { element_index: pOne });
-    check("0.3.0（A0 Grok-2）：只有名字、读不到 bundle id 的 app（\"Plain\"）在默认拒绝列表生效时 → input_denied，不发",
+    check("0.3.0：只有名字、读不到 bundle id 的 app（\"Plain\"）在默认拒绝列表生效时 → input_denied，不发",
       nb?.isError && /^ERROR: input_denied: "Plain" has no readable bundle id/.test(say(nb)) && !ACTION_OPS.test(read(opsLog)), say(nb).slice(0, 120));
     const d1 = await s.call("mac_click", { element_index: tOne });
     const d2 = await s.call("mac_set_value", { element_index: tOne, value: "x" });
@@ -1066,7 +1192,7 @@ echo "home gesture sent"
     const ok1 = await s2.call("mac_click", { x: 100, y: 100 });
     const ok2 = await s2.call("mac_key", { key: "shift-z" });
     const dk = await s2.call("mac_click", { x: 300, y: 300, force: true });
-    check("0.3.0（A0 Grok-1）：force 点在空桌面上 → 按 Finder 判（这里 Finder 被拒）→ input_denied，不按前台 app 放行",
+    check("0.3.0：force 点在空桌面上 → 按 Finder 判（这里 Finder 被拒）→ input_denied，不按前台 app 放行",
       dk?.isError && /^ERROR: input_denied: "Finder" — denied by NORACU_DENY_APPS \("com\.apple\.finder"\)/.test(say(dk)) && !/c:300,300/.test(read(clickLog)), say(dk).slice(0, 140));
     check("0.3.0（CR1/CR2 T1）：审批按目标 app 判 —— 前台 Other 允许，后台被拒的 Fake（test.fake）的 set_value、语义点击、drag、菜单命令、type 都 input_denied 且没有动作请求；Other 上的 x,y 点击与按键照常",
       rs.every((r) => r?.isError && /^ERROR: input_denied: "Fake" — denied by NORACU_DENY_APPS \("test\.fake"\)/.test(say(r))) && !ACTION_OPS.test(read(opsLog))
@@ -1110,7 +1236,7 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
     const c4 = await s.call("mac_click", { screenshot_id: shots[0].screenshot_id, x: 10, y: 20 });
     const c5 = await s.call("mac_click", { screenshot_id: m.screenshot_id, x: 20, y: 20 });
     const c6 = await s.call("mac_click", { screenshot_id: m.screenshot_id, x: 799, y: 399, force: true });
-    check("0.3.0（A0 Gemini-1/5）：截图窗口被同一 app 的另一个窗口盖住 → occluded，不发；最右下的像素 799,399 → 落在窗口内 799,299（不四舍五入出界）",
+    check("0.3.0：截图窗口被同一 app 的另一个窗口盖住 → occluded，不发；最右下的像素 799,399 → 落在窗口内 799,299（不四舍五入出界）",
       c5?.isError && /^ERROR: occluded: 410,110 is covered by another window of "Other" \(window 6\), not the screenshot's window 5/.test(say(c5)) && !/c:410,110/.test(read(clickLog))
         && !c6?.isError && /c:799,299/.test(read(clickLog)),
       `${say(c5).slice(0, 130)} | ${say(c6).slice(0, 80)} | click=${JSON.stringify(read(clickLog))}`);
@@ -1190,6 +1316,27 @@ require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
       const pong = await s.rpc("ping");
       check("B6：坏 JSON → -32700、批量 → -32600（id null），之后照常应答",
         got && msgs[0]?.error?.code === -32700 && msgs[0]?.id === null && msgs[1]?.error?.code === -32600 && pong?.result !== undefined, JSON.stringify(msgs).slice(0, 120));
+    } finally { s.proc.kill(); }
+  }
+  // one message is one line, whatever its text holds: JSON leaves U+2028 and U+2029 as they are inside a string (a
+  // reader that ends lines there cut such a call in two and never answered it); a line may come in pieces, cut inside
+  // a character, and may end in \r\n
+  {
+    const s = await spawnServer();
+    try {
+      const sep = await Promise.race([Promise.all([s.call("no_such_tool", { t: "a\u2028b" }), s.call("no_such_tool", { t: "a\u2029b" })]), sleepMs(4000).then(() => null)]);
+      const lines = raw(s.proc);
+      const msg = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 9001, method: "tools/call", params: { name: "no_such_tool", arguments: { t: "\u00e9" } } }), "utf8");
+      const cut = msg.indexOf(0xc3) + 1;   // between the two bytes of the "é"
+      s.proc.stdin.write(msg.subarray(0, cut));
+      await sleepMs(150);
+      s.proc.stdin.write(Buffer.concat([msg.subarray(cut), Buffer.from("\r\n")]));
+      const whole = await waitFor(() => lines.some((l) => l.includes('"id":9001')), 4000);
+      const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } });
+      check("协议：参数文本里的 U+2028 / U+2029 不把一条消息切成两行；一行分两段到（断在多字节字符中间）、以 CRLF 结尾都算一条",
+        Array.isArray(sep) && sep.every((r) => r?.isError && /^unknown tool: no_such_tool/.test(String(r?.content?.[0]?.text ?? "")))
+          && whole && cut > 0 && !parsed.some((m) => m?.error?.code === -32700),
+        `${JSON.stringify(sep).slice(0, 120)} | ${JSON.stringify(parsed).slice(0, 120)}`);
     } finally { s.proc.kill(); }
   }
   // the client closes stdin → the server exits by itself (does not linger)
@@ -1405,15 +1552,15 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
   // pre-review P8 — what a tab must show to become the active page it must show to be read: the active tab takes
   // itself to a blob it made (a page can; a local file or chrome:// it cannot reach — measured). It stays the
   // active page, every page tool but browser_navigate refuses with nothing read and nothing sent (the blob page
-  // would retitle itself on any input), and browser_navigate takes the tab back to a page
+  // would leave for another address on any input), and browser_navigate takes the tab back to a page
   await call("browser_snapshot");
-  await call("browser_evaluate", { js: "location.href = URL.createObjectURL(new Blob(['<title>quiet</title><p>ACTIVE-TAB-BLOB</p><script>for (const e of [`click`, `keydown`, `wheel`, `mousemove`]) addEventListener(e, () => { document.title = `GOT-INPUT`; });</script>'], { type: 'text/html' })); 1" });
+  await call("browser_evaluate", { js: "location.href = URL.createObjectURL(new Blob(['<title>quiet</title><p>ACTIVE-TAB-BLOB</p><script>for (const e of [`click`, `keydown`, `wheel`, `mousemove`]) addEventListener(e, () => { location.href = `https://example.com/?GOT-INPUT`; });</script>'], { type: 'text/html' })); 1" });
   const own6 = await waitTab((t) => t.active && String(t.url).startsWith("blob:"));
   const refused = [await call("browser_read"), await call("browser_snapshot"), await call("browser_screenshot"), await call("browser_click", { xy: [20, 20] }), await call("browser_click", { element_index: 0 }), await call("browser_evaluate", { js: "document.body.innerText" }),
     await call("browser_type", { text: "x" }), await call("browser_press_key", { key: "Tab" }), await call("browser_fill", { selector: "input", value: "x" }), await call("browser_scroll", {})];
   const after6 = (await tabs()).find((t) => t.active);
   check("the active tab took itself to a blob: it stays the active page and every page tool but browser_navigate returns active_page_not_allowed — nothing of the page read, nothing sent to it",
-    Boolean(own6) && refused.every((r) => r?.isError === true && T(r).startsWith(`ERROR: active_page_not_allowed: the active tab ${own6?.tab_id} shows blob:`) && T(r).endsWith("(delivery=not_delivered, retry=safe)") && !T(r).includes("ACTIVE-TAB-BLOB")) && after6?.tab_id === own6?.tab_id && after6?.title === "quiet",
+    Boolean(own6) && refused.every((r) => r?.isError === true && T(r).startsWith(`ERROR: active_page_not_allowed: the active tab ${own6?.tab_id} shows blob:`) && T(r).endsWith("(delivery=not_delivered, retry=safe)") && !T(r).includes("ACTIVE-TAB-BLOB")) && after6?.tab_id === own6?.tab_id && String(after6?.url).startsWith("blob:") && after6?.title === null && after6?.not_read === true,
     `${T(refused[0]).slice(0, 150)} | ${refused.map((r) => (r?.isError ? "E" : "ok")).join("")} | ${JSON.stringify(after6).slice(0, 100)}`);
   const nav6 = await call("browser_navigate", { url: "https://example.com" });
   const read7 = await call("browser_read");
@@ -1644,8 +1791,10 @@ check("browser 无效索引/导航后报错", badIdx2?.isError && (String(badIdx
 const bc = await call("browser_close");
 check("browser_close", bc?.content?.[0]?.text?.includes("closed"), bc?.content?.[0]?.text);
 
-// 7b. t07 本机受控页面回归（file:// 夹具：遮挡不回退 JS click / placeholder 命名区分 / window.open 不切活动页 / >100 截断与滚动回报）
-if (LOCAL) {
+// 7b. Browser fixture pages (file://, headless — nothing reaches the desktop, so this runs in CI too): a covered
+// or disabled button is refused and not clicked from script, placeholders name inputs, window.open leaves the
+// active page alone, long lists and long pages say what was cut, a scroll that did not move says so
+{
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -1692,6 +1841,16 @@ if (LOCAL) {
     const snapTyped = say(await s.call("browser_snapshot"));
     const elPart = snapTyped.split("[clickable")[1] || "";
     check("t07 复核：输入的文字不进入元素名；submit 按 value 命名", elPart.length > 0 && !elPart.includes("typed-xyz-123") && elPart.includes('input "Send Form"'), elPart.slice(0, 120));
+    // a fill without `value` (a client that passes `text`, as the typing tools take) must not clear the field and
+    // call that verified
+    const noValue = await s.call("browser_fill", { selector: "#in3", text: "other" });
+    const kept = await s.call("browser_evaluate", { js: "document.querySelector('#in3').value" });
+    const cleared = await s.call("browser_fill", { selector: "#in3", value: "" });
+    const emptied = await s.call("browser_evaluate", { js: "document.querySelector('#in3').value" });
+    check("browser_fill without value is refused and the field keeps its text; an explicit empty value clears it",
+      noValue?.isError && /value is required/.test(say(noValue)) && /passed as text/.test(say(noValue)) && say(noValue).includes("delivery=not_delivered")
+        && say(kept).includes("typed-xyz-123") && !cleared?.isError && say(cleared).includes("delivery=delivered_verified") && /^""$/m.test(say(emptied)),
+      `${say(noValue).slice(0, 90)} | kept=${say(kept).split("\n")[0]} | ${say(cleared).slice(0, 50)} | now=${say(emptied).split("\n")[0]}`);
 
     const mUnder = snapText.match(/\[(\d+)\] button "Covered Action"/);
     const clickUnder = mUnder ? await s.call("browser_click", { element_index: Number(mUnder[1]) }) : null;
@@ -1736,6 +1895,26 @@ if (LOCAL) {
       !scDown?.isError && /scrollY 0 → [1-9]\d*/.test(say(scDown)) && say(scDown).includes("delivery=delivered_verified")
         && !scTop?.isError && say(scTop).includes("did not move") && say(scTop).includes("delivery=delivered_unverified"),
       `${say(scDown).slice(0, 50)} | ${say(scTop).slice(0, 50)}`);
+
+    // a control nested deeper than 20 elements is listed and can be clicked by its index (the walk used to stop
+    // at depth 20 and say nothing); a page nested deeper than the walk says its list may be incomplete
+    const nest = (n, inner) => "<div>".repeat(n) + inner + "</div>".repeat(n);
+    const deepPath = join(dir, "deep.html"), abyssPath = join(dir, "abyss.html");
+    writeFileSync(deepPath, `<!doctype html><html><head><meta charset='utf-8'><title>Deep</title></head><body>${nest(30, "<button onclick='window.__deep = true'>Deep Button</button>")}</body></html>`);
+    writeFileSync(abyssPath, `<!doctype html><html><head><meta charset='utf-8'><title>Abyss</title></head><body><button>Shallow Button</button>${nest(80, "<button>Abyss Button</button>")}</body></html>`);
+    await s.call("browser_navigate", { url: pathToFileURL(deepPath).href });
+    const snapDeep = say(await s.call("browser_snapshot"));
+    const mDeep = (snapDeep.split("[clickable")[1] || "").match(/\[(\d+)\] button "Deep Button"/);
+    const clickDeep = mDeep ? await s.call("browser_click", { element_index: Number(mDeep[1]) }) : null;
+    const deepClicked = await s.call("browser_evaluate", { js: "window.__deep === true" });
+    check("browser_snapshot lists a button nested 30 elements deep, and browser_click reaches it by element_index",
+      Boolean(mDeep) && !clickDeep?.isError && /^true$/m.test(say(deepClicked)) && !snapDeep.includes("some may be missing"),
+      `${(snapDeep.split("[clickable")[1] || "").slice(0, 110)} | ${say(clickDeep).slice(0, 60)}`);
+    await s.call("browser_navigate", { url: pathToFileURL(abyssPath).href });
+    const listAbyss = say(await s.call("browser_snapshot")).split("[clickable")[1] || "";
+    check("browser_snapshot of a page nested deeper than the walk says its list may be incomplete, instead of a short list that reads as complete",
+      listAbyss.includes('button "Shallow Button"') && !listAbyss.includes('button "Abyss Button"') && listAbyss.includes("some may be missing"),
+      listAbyss.slice(0, 160));
   } finally {
     await s.call("browser_close").catch(() => {});
     const exited = new Promise((r) => s.proc.once("exit", r));
@@ -1743,21 +1922,9 @@ if (LOCAL) {
     await Promise.race([exited, sleepMs(3000)]);
     rmSync(dir, { recursive: true, force: true });
   }
-} else {
-  skipLocal(
-    "t07：同文档导航回报 no response 与 delivery",
-    "t07：不同 placeholder 的两个 input 获得不同名称",
-    "t07 复核：输入的文字不进入元素名；submit 按 value 命名",
-    "t07：被遮挡按钮点击报 occluded/not_actionable 且不触发 onclick",
-    "t07：disabled 按钮点击报 not_actionable",
-    "t07：window.open 打开新页后活动页不变",
-    "t07：超过 100 个可交互元素时提示 truncated 与遗漏数",
-    "0.2.6（#8）：长页面的 ARIA 快照 / browser_read 被截断时写明截断与原长度",
-    "t07：browser_scroll 回报 scrollY 变化与 did not move"
-  );
 }
 
-// 7b2. first_tab（pre-review P16 的提示补测试；Andy 11-12 R16/R17）：第一个标签页不算干净空白页时，browser_launch 当场说明。
+// 7b2. first_tab：第一个标签页不算干净空白页时，browser_launch 当场说明。
 // 测试开关 NORACU_TEST_FIRST_TAB_UNCOUNTED 只在 NORACU_CI=1 下生效，只会让第一个标签页不算数
 {
   const say = (r) => String(r?.content?.[0]?.text || "");
@@ -1782,7 +1949,7 @@ if (LOCAL) {
     `${on.l.slice(0, 160)} | ${say(on.snap).slice(0, 60)} | ${off.l.slice(0, 80)}`);
 }
 
-// 7b3. browser_launch chrome:true（Andy 11-13）：在"你自己的 Chrome"里干活，只碰 noracu 自己开的标签。
+// 7b3. browser_launch chrome:true：在"你自己的 Chrome"里干活，只碰 noracu 自己开的标签。
 // 用一个带调试端口的 Chromium 扮演你的 Chrome（它同样写 DevToolsActivePort），里面先开着"你的"两个标签：一个 http 页、一个 chrome://version
 {
   const { mkdtempSync, rmSync, existsSync: fexists, writeFileSync: wf } = await import("node:fs");
@@ -1904,7 +2071,7 @@ if (LOCAL) {
           && (again.includes("chrome_not_reachable") || again.includes("chrome_attach_failed")) && !again.includes("already open"),
         `${attached.slice(0, 40)} | ${gone.slice(0, 120)} | ${again.slice(0, 60)}`);
     }
-    // NORACU_CHROME_TABS=all (Andy 11-13): your http(s) tabs are listed, selectable and read; still never closed by noracu
+    // NORACU_CHROME_TABS=all: your http(s) tabs are listed, selectable and read; still never closed by noracu
     const a = await spawnServer({ NORACU_ALLOW_CHROME: "1", NORACU_CHROME_DIR: dir, NORACU_CHROME_TABS: "all", NORACU_ENABLE_EVAL: "1", NORACU_ALLOW_FILE_URL: "1" });
     try {
       // two attaches at once: one session (pre-review P22)
@@ -2036,6 +2203,263 @@ check("element_index：负数被校验层拒", badNeg?.isError && String(badNeg?
       r?.isError && t.startsWith("ERROR: eval_disabled: browser_evaluate is off by default") && t.includes("NORACU_ENABLE_EVAL=1") && t.includes("delivery=not_delivered, retry=safe") && listed === true,
       t.slice(0, 110));
   } finally { s.proc.kill(); }
+}
+// A session attached over a DevTools port never takes a DevTools window as its active page: keys typed into
+// its console would run as script, which browser_evaluate needs NORACU_ENABLE_EVAL for.
+{
+  const { chromium } = await import("playwright");
+  const { createServer: netServer } = await import("node:net");
+  const port = await new Promise((r) => { const t = netServer(); t.listen(0, "127.0.0.1", () => { const p = t.address().port; t.close(() => r(p)); }); });
+  const say = (r) => String(r?.content?.[0]?.text);
+  let app = null;
+  const s = await spawnServer({ NORACU_ALLOW_CDP: "any" });
+  try {
+    // the full browser in headless mode: the headless shell has no DevTools pages
+    app = await chromium.launch({ headless: true, channel: "chromium", args: [`--remote-debugging-port=${port}`] });
+    const ctx = await app.newContext();
+    const appPage = await ctx.newPage();
+    await appPage.goto("data:text/html,<title>app</title><p>app page</p>");
+    const dev = await ctx.newPage();
+    await dev.goto("devtools://devtools/bundled/devtools_app.html");
+    const at = await s.call("browser_launch", { cdp_port: port });
+    const before = say(await s.call("browser_read"));
+    await appPage.close();
+    await sleepMs(600);
+    const snap = await s.call("browser_snapshot");
+    const typed = await s.call("browser_type", { text: "1+1" });
+    check("attached over a DevTools port, the app's page closes and a DevTools window is what is left → there is no active page: nothing is read from it or typed into it",
+      !at?.isError && jsonOf(at).tabs === 1 && before.includes("app page") && snap?.isError === true && say(snap).includes("no_active_page") && typed?.isError === true && say(typed).includes("no_active_page"),
+      `${say(at).slice(0, 80)} | ${say(snap).slice(0, 90)} | ${say(typed).slice(0, 60)}`);
+    await s.call("browser_close");
+    const at2 = await s.call("browser_launch", { cdp_port: port });
+    const snap2 = await s.call("browser_snapshot");
+    check("attaching when only a DevTools window is open: it is not counted as a tab and is not the active page",
+      !at2?.isError && jsonOf(at2).tabs === 0 && snap2?.isError === true && say(snap2).includes("no_active_page"), `${say(at2).slice(0, 90)} | ${say(snap2).slice(0, 90)}`);
+    // the same front end as the app's DevTools port serves it over http, and the port's own endpoints
+    const insp = `http://127.0.0.1:${port}/devtools/inspector.html?ws=127.0.0.1:${port}/devtools/page/x`;
+    const httpDev = await ctx.newPage();
+    await httpDev.goto(insp);
+    await s.call("browser_close");
+    const at3 = await s.call("browser_launch", { cdp_port: port });
+    const snap3 = await s.call("browser_snapshot");
+    const navInsp = await s.call("browser_navigate", { url: insp });
+    const navJson = await s.call("browser_navigate", { url: `http://localhost:${port}/json/list` });
+    check("the DevTools front end that the app's DevTools port serves over http is not a tab either, and the browser tools do not navigate to that port",
+      !at3?.isError && jsonOf(at3).tabs === 0 && snap3?.isError === true && say(snap3).includes("no_active_page")
+        && navInsp?.isError === true && /DevTools/.test(say(navInsp)) && say(navInsp).includes("delivery=not_delivered") && navJson?.isError === true && /DevTools/.test(say(navJson)),
+      `${say(at3).slice(0, 80)} | ${say(snap3).slice(0, 70)} | ${say(navInsp).slice(0, 110)} | ${say(navJson).slice(0, 60)}`);
+  } catch (e) {
+    check("attached over a DevTools port: a DevTools window is never the active page (the test could not run)", false, String(e?.message || e).split("\n")[0].slice(0, 200));
+  } finally { s.proc.kill(); if (app) await app.close().catch(() => {}); }
+}
+// Browser results that were reported from another page, or with more certainty than there was (audit, the browser layer).
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-bfix-"));
+  const html = (name, body) => { writeFileSync(join(dir, name), `<!doctype html><html><head><meta charset='utf-8'><title>${name}</title></head>${body}</html>`); return pathToFileURL(join(dir, name)).href; };
+  const say = (r) => String(r?.content?.[0]?.text || "");
+  // a local web page, for addresses that must load
+  const { createServer: httpServer } = await import("node:http");
+  const web = httpServer((q, r) => {
+    r.setHeader("content-type", "text/html; charset=utf-8");
+    if (q.url.startsWith("/missing")) { r.statusCode = 404; r.end("<title>Not Found</title><p>no such page</p>"); return; }
+    r.end("<title>local</title><p>a local page</p>");
+  });
+  await new Promise((r) => web.listen(0, "127.0.0.1", r));
+  const webPort = web.address().port;
+  const s = await spawnServer({ NORACU_ALLOW_FILE_URL: "1", NORACU_ENABLE_EVAL: "1" });
+  try {
+    await s.call("browser_launch", { headless: true });
+    // browser_fill: the field goes away and the page moves on as it is filled; the page it lands on has a field
+    // of the same selector that already holds the same text
+    html("fill-b.html", `<body><input id='q' value='hello'></body>`);
+    const fillA = html("fill-a.html", `<body><input id='q' oninput="this.remove(); location.href='fill-b.html'"></body>`);
+    await s.call("browser_navigate", { url: fillA });
+    const filled = await s.call("browser_fill", { selector: "#q", value: "hello" });
+    check("browser_fill: the page navigates as the field is filled and the next page holds the same text in a field of that selector → not delivered_verified, and the result says the page navigated",
+      !filled?.isError && say(filled).includes("delivery=delivered_unverified") && /the page navigated/.test(say(filled)), say(filled).slice(0, 220));
+    // browser_type on a page that answers each key slowly: when the time runs out, the rest of the text must
+    // not keep arriving
+    const typeUrl = html("type.html", `<body><input id='t' onkeydown="const e = Date.now(); while (Date.now() - e < 700) {}"></body>`);
+    await s.call("browser_navigate", { url: typeUrl });
+    await s.call("browser_click", { selector: "#t" });
+    const typedSlow = await s.call("browser_type", { text: "abcdefghijklmnopqr" });
+    await sleepMs(4500);
+    const inField = say(await s.call("browser_evaluate", { js: "document.querySelector('#t').value.length" })).split("\n")[0];
+    check("browser_type: the time runs out on a page that answers each key slowly → the rest of the text is not sent afterwards, and the result says how much went out",
+      typedSlow?.isError && /\d+ of 18 character/.test(say(typedSlow)) && /one more was under way/.test(say(typedSlow)) && /the other \d+ are not sent/.test(say(typedSlow))
+        && say(typedSlow).includes("delivery=unknown, retry=unsafe") && Number(inField) > 0 && Number(inField) < 18,
+      `${say(typedSlow).slice(0, 230)} | characters in the field 4.5 s later: ${inField}`);
+    // browser_scroll: a page that answers the wheel by moving the other way, and one that navigates on it
+    const scrollUrl = html("scroll.html", `<body style='height:6000px;margin:0'><p>tall</p><script>addEventListener('wheel', (e) => { e.preventDefault(); scrollTo(0, 300); }, { passive: false }); scrollTo(0, 1500);</script></body>`);
+    await s.call("browser_navigate", { url: scrollUrl });
+    const wrongWay = await s.call("browser_scroll", { direction: "down" });
+    html("scroll-b.html", `<body style='height:6000px'><p>next</p></body>`);
+    const scrollNav = html("scroll-nav.html", `<body style='height:6000px;margin:0'><p>tall</p><script>addEventListener('wheel', () => { location.href = 'scroll-b.html'; }); scrollTo(0, 1500);</script></body>`);
+    await s.call("browser_navigate", { url: scrollNav });
+    const navScroll = await s.call("browser_scroll", { direction: "down" });
+    check("browser_scroll: the page moved the other way, or navigated on the wheel event → not delivered_verified, and the result says which",
+      !wrongWay?.isError && say(wrongWay).includes("scrollY 1500 → 300") && say(wrongWay).includes("delivery=delivered_unverified") && /not down/.test(say(wrongWay))
+        && /navigated/.test(say(navScroll)) && !say(navScroll).includes("delivered_verified"), `${say(wrongWay).slice(0, 170)} | ${say(navScroll).slice(0, 220)}`);
+    // a DevTools front end on a local port this server knows nothing of: refused by what it is
+    const anyInsp = "http://127.0.0.1:9/devtools/inspector.html?ws=127.0.0.1:9/devtools/page/x";
+    const navAny = await s.call("browser_navigate", { url: anyInsp }), tabAny = await s.call("browser_tabs", { action: "new", url: anyInsp });
+    // (a page that loads: a navigation that fails leaves an error page that can arrive after the next navigation)
+    const navLocal = await s.call("browser_navigate", { url: `http://127.0.0.1:${webPort}/devtools/readme.txt` });
+    check("browser_navigate / browser_tabs new: a DevTools front end on any local port is refused; another address on such a port is not taken for one",
+      navAny?.isError === true && /DevTools/.test(say(navAny)) && say(navAny).includes("delivery=not_delivered") && tabAny?.isError === true && /DevTools/.test(say(tabAny))
+        && !navLocal?.isError && say(navLocal).startsWith("navigated: "), `${say(navAny).slice(0, 110)} | ${say(tabAny).slice(0, 60)} | ${say(navLocal).slice(0, 80)}`);
+    // browser_type: the page leaves for one noracu does not act on while the text is being typed
+    const typeNav = html("type-nav.html", `<body><input id='t' onkeydown="if (event.key === 'c') location.href = 'about:blank'"></body>`);
+    await s.call("browser_navigate", { url: typeNav });
+    await s.call("browser_click", { selector: "#t" });
+    const typedAway = await s.call("browser_type", { text: "abcdefghijklmnop" });
+    check("browser_type: the tab goes to a page noracu does not act on while the text is typed → typing stops there, and the result says how much went out",
+      typedAway?.isError === true && /^ERROR: active_page_not_allowed/.test(say(typedAway)) && /\d+ of 16 character/.test(say(typedAway)) && say(typedAway).includes("delivery=unknown, retry=unsafe"), say(typedAway).slice(0, 260));
+    // browser_tabs list: a tab on a page the tools do not read gives no title, and only the start of its address
+    const clickTwo = await s.call("browser_click", { element_index: 0, selector: "#nothing" });
+    check("browser_click with element_index and a selector: refused — one way to name the target",
+      clickTwo?.isError && /one of the three/.test(say(clickTwo)) && /delivery=not_delivered, retry=safe/.test(say(clickTwo)), say(clickTwo).slice(0, 140));
+    // an address the server answers with 404: the navigation went through, and the result says what loaded
+    const nav404 = await s.call("browser_navigate", { url: `http://127.0.0.1:${webPort}/missing` });
+    const nav200 = await s.call("browser_navigate", { url: `http://127.0.0.1:${webPort}/found` });
+    check("browser_navigate to an address the server answers with 404: the result says an error page loaded; a page that loaded normally is not called one",
+      !nav404?.isError && /HTTP 404 — an error page/.test(say(nav404)) && /delivery=delivered_verified/.test(say(nav404)) && /HTTP 200/.test(say(nav200)) && !/error page/.test(say(nav200)),
+      `${say(nav404).slice(0, 130)} | ${say(nav200).slice(0, 70)}`);
+    await s.call("browser_navigate", { url: `http://127.0.0.1:${webPort}/start` });
+    await s.call("browser_evaluate", { js: "location.href = URL.createObjectURL(new Blob(['<title>SECRET-TITLE</title><p>made by the page</p>'], { type: 'text/html' })); 1" });
+    await sleepMs(800);
+    const listed = await s.call("browser_tabs", { action: "list" });
+    const blobTab = jsonOf(listed).tabs?.find((t) => String(t.url).startsWith("blob:"));
+    check("browser_tabs list: a tab on a page the tools do not read (a blob: page the site made) is listed without its title and with the start of its address only",
+      Boolean(blobTab) && blobTab.title === null && blobTab.not_read === true && blobTab.url.length <= 60 && !say(listed).includes("SECRET-TITLE"), say(listed).slice(0, 320));
+    // browser_type: the stop file appears while a long text is being typed → the rest is not typed
+    {
+      const stopPath = join(dir, "stop-now");
+      const s2 = await spawnServer({ NORACU_ALLOW_FILE_URL: "1", NORACU_STOP_FILE: stopPath });
+      try {
+        await s2.call("browser_launch", { headless: true });
+        await s2.call("browser_navigate", { url: html("long.html", `<body><textarea id='t'></textarea></body>`) });
+        await s2.call("browser_click", { selector: "#t" });
+        const typing = s2.call("browser_type", { text: "x".repeat(400) });
+        await sleepMs(900);
+        writeFileSync(stopPath, "");
+        const halted = await typing;
+        rmSync(stopPath, { force: true });
+        const m = /(\d+) of 400 character/.exec(say(halted));
+        check("browser_type: the stop file appears while a long text is being typed → the rest is not typed, and the result says how much went out",
+          Boolean(halted?.isError) && /user_stopped/.test(say(halted)) && Boolean(m) && Number(m[1]) > 0 && Number(m[1]) < 400 && /delivery=unknown/.test(say(halted)), say(halted).slice(0, 260));
+      } finally { s2.proc.kill(); }
+    }
+    // the client gives a call up (notifications/cancelled: its Stop button, or its own timeout) while a long text
+    // is being typed → the rest is not typed, and that call is not answered any more
+    {
+      const s4 = await spawnServer({ NORACU_ALLOW_FILE_URL: "1" });
+      try {
+        await s4.call("browser_launch", { headless: true });
+        await s4.call("browser_navigate", { url: html("cancel.html", `<body><textarea id='t' oninput="document.getElementById('n').textContent = 'count=' + this.value.length"></textarea><p id='n'>count=0</p></body>`) });
+        await s4.call("browser_click", { selector: "#t" });
+        const answers = [];
+        let buf = "";
+        s4.proc.stdout.on("data", (d) => { buf += d; let nl; while ((nl = buf.indexOf("\n")) !== -1) { const l = buf.slice(0, nl); buf = buf.slice(nl + 1); try { answers.push(JSON.parse(l).id); } catch { /* not a message */ } } });
+        const count = async () => Number((/count=(\d+)/.exec(say(await Promise.race([s4.call("browser_read", { selector: "#n" }), sleepMs(5000).then(() => null)]))) || [])[1]);
+        s4.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 990001, method: "tools/call", params: { name: "browser_type", arguments: { text: "x".repeat(400) } } }) + "\n");
+        await sleepMs(900);
+        s4.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 990001, reason: "stopped by the user" } }) + "\n");
+        await sleepMs(700);
+        const first = await count();
+        await sleepMs(1200);
+        const second = await count();
+        check("browser_type: the client cancels the call while a long text is being typed → the typing stops, and the call is not answered",
+          first > 0 && first < 400 && second === first && !answers.includes(990001), `typed ${first} then ${second} of 400; answered: ${answers.includes(990001)}`);
+      } finally { s4.proc.kill(); }
+    }
+    // a second call under a request id that is still under way is refused; the first goes on and is answered
+    {
+      const s5 = await spawnServer({ NORACU_ALLOW_FILE_URL: "1" });
+      try {
+        await s5.call("browser_launch", { headless: true });
+        await s5.call("browser_navigate", { url: html("dup.html", `<body><textarea id='t'></textarea></body>`) });
+        await s5.call("browser_click", { selector: "#t" });
+        const got = [];
+        let buf = "";
+        s5.proc.stdout.on("data", (d) => { buf += d; let nl; while ((nl = buf.indexOf("\n")) !== -1) { const l = buf.slice(0, nl); buf = buf.slice(nl + 1); try { const m = JSON.parse(l); if (m.id === 990002) got.push(m); } catch { /* not a message */ } } });
+        s5.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 990002, method: "tools/call", params: { name: "browser_type", arguments: { text: "y".repeat(60) } } }) + "\n");
+        await sleepMs(300);
+        s5.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 990002, method: "tools/call", params: { name: "browser_read", arguments: { selector: "#t" } } }) + "\n");
+        await sleepMs(3500);
+        const refused = got.find((m) => m.error), done = got.find((m) => m.result);
+        check("a second call under a request id that is still under way: refused with an error, and the first is answered as usual",
+          got.length === 2 && refused?.error?.code === -32600 && /already in use/.test(refused.error.message) && /typed 60/.test(String(done?.result?.content?.[0]?.text)), JSON.stringify(got).slice(0, 240));
+      } finally { s5.proc.kill(); }
+    }
+    // …also when the second call would be refused before its tool runs (a tool this server does not have, arguments
+    // that do not validate): the id is refused, so no tool result goes out under it before the first call's
+    {
+      const s6 = await spawnServer({ NORACU_ALLOW_FILE_URL: "1" });
+      try {
+        await s6.call("browser_launch", { headless: true });
+        await s6.call("browser_navigate", { url: html("dup2.html", `<body><textarea id='t'></textarea></body>`) });
+        await s6.call("browser_click", { selector: "#t" });
+        const got = [];
+        let buf = "";
+        s6.proc.stdout.on("data", (d) => { buf += d; let nl; while ((nl = buf.indexOf("\n")) !== -1) { const l = buf.slice(0, nl); buf = buf.slice(nl + 1); try { const m = JSON.parse(l); if (m.id === 990003) got.push(m); } catch { /* not a message */ } } });
+        s6.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 990003, method: "tools/call", params: { name: "browser_type", arguments: { text: "z".repeat(60) } } }) + "\n");
+        await sleepMs(300);
+        s6.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 990003, method: "tools/call", params: { name: "no_such_tool", arguments: {} } }) + "\n");
+        s6.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 990003, method: "tools/call", params: { name: "mac_click", arguments: { x: "a" } } }) + "\n");
+        await sleepMs(3500);
+        const refused = got.filter((m) => m.error), done = got.filter((m) => m.result);
+        check("a second call under a request id still under way that would be refused before its tool runs (unknown tool, bad arguments): the id is refused — no tool result goes out under it before the first call's",
+          got.length === 3 && refused.length === 2 && refused.every((m) => m.error.code === -32600 && /already in use/.test(m.error.message)) && done.length === 1 && /typed 60/.test(String(done[0].result?.content?.[0]?.text)), JSON.stringify(got).slice(0, 300));
+      } finally { s6.proc.kill(); }
+    }
+    // browser_click: a click that makes the page navigate says so
+    {
+      const navUrl = html("nav.html", `<body><a id='go' href='http://127.0.0.1:${webPort}/next'>go</a> <button id='stay'>stay</button></body>`);
+      await s.call("browser_navigate", { url: navUrl });
+      const stayed = await s.call("browser_click", { selector: "#stay" });
+      const went = await s.call("browser_click", { selector: "#go" });
+      check("browser_click: a click that makes the page navigate says so, one that does not, does not; neither is reported as verified",
+        !went?.isError && /the page navigated after the click/.test(say(went)) && say(went).includes(`127.0.0.1:${webPort}`) && say(went).includes("delivery=delivered_unverified")
+          && !stayed?.isError && !/navigated/.test(say(stayed)) && say(stayed).includes("delivery=delivered_unverified"), `${say(stayed).slice(0, 120)} | ${say(went).slice(0, 240)}`);
+    }
+    // browser_snapshot: the clickable list does not go into shadow roots or frames — it says so
+    {
+      const shadowUrl = html("shadow.html", `<body><button id='plain'>Plain</button><div id='host'></div><iframe srcdoc="<button>In frame</button>" width='200' height='60'></iframe><script>document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML = '<button>In shadow</button>';</script></body>`);
+      await s.call("browser_navigate", { url: shadowUrl });
+      const withInner = say(await s.call("browser_snapshot"));
+      await s.call("browser_navigate", { url: html("plain.html", `<body><button>Only</button></body>`) });
+      const plainOnly = say(await s.call("browser_snapshot"));
+      const listOf = (t) => t.slice(t.indexOf("[clickable elements"));
+      check("browser_snapshot: a page with a shadow root and a frame — the clickable list says what it leaves out; a page without them says nothing of it",
+        /not listed: what is inside 1 open shadow root\(s\) and 1 frame\(s\)/.test(listOf(withInner)) && /"Plain"/.test(listOf(withInner)) && !/"In shadow"/.test(listOf(withInner)) && !/not listed/.test(listOf(plainOnly)),
+        `${listOf(withInner).slice(0, 260)} | ${listOf(plainOnly).slice(0, 120)}`);
+    }
+    // browser_type: the stop file cannot be checked any more while a text is being typed (a file where its folder
+    // should be) → the rest is not typed, and the error is the one for that — not "the person stopped"
+    {
+      const blocker = join(dir, "sub");
+      const s3 = await spawnServer({ NORACU_ALLOW_FILE_URL: "1", NORACU_STOP_FILE: join(blocker, "stop") });
+      try {
+        await s3.call("browser_launch", { headless: true });
+        await s3.call("browser_navigate", { url: html("long2.html", `<body><textarea id='t'></textarea></body>`) });
+        await s3.call("browser_click", { selector: "#t" });
+        const typing = s3.call("browser_type", { text: "é".repeat(400) });
+        await sleepMs(900);
+        writeFileSync(blocker, "");
+        const res = await typing;
+        rmSync(blocker, { force: true });
+        const m = /(\d+) of 400 character/.exec(say(res));
+        check("browser_type: the stop file can no longer be checked while a text is being typed → the rest is not typed; the error names that, not a stop by the person",
+          Boolean(res?.isError) && /stop_check_error: could not check/.test(say(res)) && !/user_stopped|appeared/.test(say(res)) && Boolean(m) && Number(m[1]) > 0 && Number(m[1]) < 400 && /delivery=unknown/.test(say(res)), say(res).slice(0, 280));
+      } finally { s3.proc.kill(); }
+    }
+    // (more checks of this block go above this line)
+  } finally { s.proc.kill(); web.close(); try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 }
 // 10b. t07 CI 安全门禁（各起独立 server 进程）：READ_ONLY 优先拒 cdp_port / 未记录端口需 ALLOW_CDP=any / browser_scroll direction 校验
 {
@@ -2194,6 +2618,42 @@ check("imctl bundled (imctl/src/imctl/cli.py)", existsSync(new URL("../imctl/src
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
+// 11b-2. imctl that prints without end is stopped; the answer says that the action may have run in part, as the
+// one for a timeout does (CI-safe: a fake python, no hardware)
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const fake = join(dir, "python3");
+  writeFileSync(fake, "#!/bin/bash\nif [ \"$1\" = \"-c\" ]; then exit 0; fi\nhead -c 12000000 /dev/zero | tr '\\0' 'x'\nsleep 5\n", { mode: 0o700 });
+  const s = await spawnServer({ NORACU_PYTHON: fake, NORACU_IMCTL_DIR: dir });
+  try {
+    const r = await s.call("phone_tap", { x: 0.5, y: 0.5 });
+    const text = String(r?.content?.[0]?.text);
+    check("phone_*: imctl stopped for printing more than 10 MB — the answer says the action may have partly run and to look before retrying",
+      r?.isError && /imctl_output_overflow/.test(text) && /may have partly run/.test(text) && /phone_screenshot/.test(text), text.slice(0, 260));
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// 11b-3. The python that was picked lacks a module: the install command in the answer names that python, not
+// whatever "python3" is on the PATH (CI-safe: a fake python, no hardware)
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const fake = join(dir, "python3");
+  writeFileSync(fake, "#!/bin/bash\nif [ \"$1\" = \"-c\" ]; then exit 0; fi\necho \"ModuleNotFoundError: No module named 'Vision'\" >&2\nexit 1\n", { mode: 0o700 });
+  const s = await spawnServer({ NORACU_PYTHON: fake, NORACU_IMCTL_DIR: dir });
+  try {
+    const r = await s.call("phone_status");
+    const text = String(r?.content?.[0]?.text);
+    check("phone_*: a missing python module — the install command names the python that was picked",
+      r?.isError && /is missing the Vision module/.test(text) && text.includes(`${fake} -m pip install pyobjc-framework-Quartz`), text.slice(0, 300));
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
 // 11c. F40：并发的 phone_* 调用必须串行执行（不交错点击/粘贴/剪贴板）—— 假 python 记录每次 imctl
 // 调用的起止时刻；两个调用同时发出，第二个必须在第一个结束后才开始（CI 安全：不碰硬件）
 {
@@ -2280,6 +2740,84 @@ echo '{"running": false}'
     const pong = await s.rpc("ping");             // the queue and the server still work
     const runs = rf(log, "utf8").trim().split("\n").length;
     check("F40：已取消的排队调用不执行、不应答", !r1?.isError && !secondReplied && runs === 1 && pong?.result !== undefined, `runs=${runs} replied=${secondReplied}`);
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// Playwright's Chromium is missing (an empty PLAYWRIGHT_BROWSERS_PATH): the first browser_launch answers
+// browser_installing within the wait (shortened here) while the download goes on; one download at a time; one that
+// failed after its call had answered is reported by the next browser_launch (CI safe: a stand-in installer)
+{
+  const { mkdtempSync, writeFileSync, readFileSync: rf, existsSync: ex, mkdirSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const log = join(dir, "install.log");
+  const cli = join(dir, "fake-playwright-cli.js");
+  writeFileSync(cli, `require("fs").appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(" ") + "\\n");
+setTimeout(() => { process.stderr.write("fake download failed"); process.exit(1); }, 1500);
+`);
+  mkdirSync(join(dir, "browsers")); mkdirSync(join(dir, "home"));
+  const s = await spawnServer({ NORACU_CI: "1", NORACU_TEST_PLAYWRIGHT_CLI: cli, NORACU_TEST_CHROMIUM_WAIT_MS: "300", PLAYWRIGHT_BROWSERS_PATH: join(dir, "browsers"), HOME: join(dir, "home"), NORACU_LAYERS: "browser" });
+  try {
+    const say = (r) => String(r?.content?.[0]?.text || "");
+    const t0 = Date.now();
+    const first = await s.call("browser_launch", { headless: true });
+    const ms = Date.now() - t0;
+    const second = await s.call("browser_launch", { headless: true });   // the download still runs: no second one
+    await new Promise((r) => setTimeout(r, 2000));                       // it has failed by now
+    const third = await s.call("browser_launch", { headless: true });
+    const runs = ex(log) ? rf(log, "utf8").trim().split("\n").length : 0;
+    check("Chromium missing: browser_launch answers browser_installing within the wait while the download goes on (one at a time), and the next call reports the download that failed",
+      first?.isError && /^ERROR: browser_installing: /.test(say(first)) && ms < 8000 && /^ERROR: browser_installing: /.test(say(second))
+        && third?.isError && /auto-install failed.*fake download failed/.test(say(third)) && runs === 1,
+      `${ms} ms | ${say(first).slice(0, 60)} | ${say(second).slice(0, 40)} | ${say(third).slice(0, 120)} | runs ${runs}`);
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// the client cancels a running mac_wait and a running phone_type → the engine / imctl child is stopped at
+// once (SIGTERM), neither call is answered, and the trace logs both with code cancelled; a phone_type still waiting
+// in the queue does not run and is logged cancelled_queued (CI safe: a fake engine and a fake python)
+{
+  const { mkdtempSync, writeFileSync, readFileSync: rf, existsSync: ex, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-e2e-"));
+  const log = join(dir, "events.log");
+  const trace = join(dir, "trace.jsonl");
+  const fakePy = join(dir, "python3");
+  writeFileSync(fakePy, `#!/bin/bash\nif [ "$1" = "-c" ]; then exit 0; fi\ntrap 'echo imctl-term >> "${log}"; exit 143' TERM\necho imctl-run >> "${log}"\nsleep 20 &\nwait $!\necho imctl-done >> "${log}"\n`, { mode: 0o700 });
+  const fakeAx = join(dir, "fake-ax");
+  writeFileSync(fakeAx, `#!/bin/bash\ntrap 'echo ax-term >> "${log}"; exit 143' TERM\ncat > /dev/null\necho ax-run >> "${log}"\nsleep 20 &\nwait $!\necho ax-done >> "${log}"\n`, { mode: 0o700 });
+  const s = await spawnServer({ NORACU_PYTHON: fakePy, NORACU_IMCTL_DIR: dir, NORACU_AX_ENGINE: fakeAx, NORACU_TRACE: trace, NORACU_USER_IDLE_S: "0" });
+  try {
+    const replied = new Set();
+    s.proc.stdout.on("data", (d) => { for (const line of String(d).split("\n")) { try { const m = JSON.parse(line); if (m.id !== undefined) replied.add(m.id); } catch {} } });
+    const send = (m) => s.proc.stdin.write(JSON.stringify(m) + "\n");
+    const call = (id, name, args) => send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+    const cancel = (id) => send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "test" } });
+    const lines = () => (ex(log) ? rf(log, "utf8").trim().split("\n").filter(Boolean) : []);
+    const until = async (f, ms) => { const end = Date.now() + ms; while (Date.now() < end) { if (f()) return true; await new Promise((r) => setTimeout(r, 50)); } return f(); };
+    call(991601, "mac_wait", { condition: "app_gone", app: "Nothing", timeout_ms: 20000 });
+    call(991602, "phone_type", { text: "hello there" });
+    call(991603, "phone_type", { text: "second one" });
+    await until(() => lines().includes("ax-run") && lines().includes("imctl-run"), 5000);
+    const t0 = Date.now();
+    cancel(991601); cancel(991602); cancel(991603);
+    const stopped = await until(() => lines().includes("ax-term") && lines().includes("imctl-term"), 4000);
+    const ms = Date.now() - t0;
+    // the queued phone_type's turn comes once the stopped imctl has been reaped: wait for its trace line (a loaded
+    // machine takes longer than the 0.8 s this waited at first), at most 6 s
+    const traced = () => (ex(trace) ? rf(trace, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+    await until(() => traced().some((x) => x.code === "cancelled_queued"), 6000);
+    await new Promise((r) => setTimeout(r, 300));  // and a moment for anything that should not happen
+    const pong = await s.rpc("ping");
+    const tr = traced();
+    const codes = tr.map((x) => `${x.tool}:${x.error ? x.code : "ok"}`);
+    const ok = stopped && ms < 3000 && lines().filter((l) => l === "imctl-run").length === 1 && !lines().some((l) => /done/.test(l))
+      && ![991601, 991602, 991603].some((id) => replied.has(id)) && pong?.result !== undefined
+      && codes.includes("mac_wait:cancelled") && codes.includes("phone_type:cancelled") && codes.includes("phone_type:cancelled_queued");
+    check("the client cancels a running mac_wait and phone_type: their engine / imctl is stopped at once, neither is answered, the trace logs cancelled; the queued phone_type does not run and logs cancelled_queued",
+      ok, `${ms} ms | ${lines().join(",")} | ${codes.join(" ")} | replied ${[...replied].join(",")}`);
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
@@ -2462,8 +3000,10 @@ if (LOCAL) {
   const { execFileSync } = await import("node:child_process");
   const dir = mkdtempSync(join(tmpdir(), "noracu-idle-"));
   const fake = join(dir, "fake-ax-engine"), fakeClick = join(dir, "cliclick"), fakeIoreg = join(dir, "ioreg"), clickLog = join(dir, "cliclick.log"), ctl = join(dir, "idle.json");
+  const fakeWheel = join(dir, "wheel"), wheelLog = join(dir, "wheel.log"), wheelFail = join(dir, "wheel.fail");
   writeFileSync(fake, FAKE_AX, { mode: 0o700 });
   writeFileSync(fakeClick, `#!/bin/bash\necho "$@" >> "${clickLog}"\n`, { mode: 0o700 });
+  writeFileSync(fakeWheel, `#!/bin/bash\necho "wheel $#" >> "${wheelLog}"\nif [ -f "${wheelFail}" ]; then echo "the event target was not found" >&2; exit 1; fi\n`, { mode: 0o700 });
   // every run answers with the next time of the list (the last one repeats); a time in the future reads as "just now"
   writeFileSync(fakeIoreg, `#!/usr/bin/env node
 const fs = require("fs");
@@ -2483,13 +3023,13 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
   for (const f of [fake, fakeClick, fakeIoreg]) { try { execFileSync(f, [], { input: '{"op":"warm"}', timeout: 30000 }); } catch {} }
   const read = (f) => { try { return readFileSync(f, "utf8"); } catch { return ""; } };
   const say = (r) => String(r?.content?.[0]?.text);
-  const s = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_IOREG: fakeIoreg, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "2", NORACU_NO_BGPOST: "1" });
+  const s = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_IOREG: fakeIoreg, NORACU_TEST_WHEEL: fakeWheel, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "2", NORACU_NO_BGPOST: "1" });
   try {
     // RF-3: a call that sent nothing must not make the person's event of that moment look like noracu's own
     writeFileSync(clickLog, ""); idle(QUIET());
     const t1 = Date.now();
     const refused = await s.call("mac_click", { x: 600, y: 100 });   // occluded: refused, nothing sent
-    idle(t1);                                                         // the person used the mouse while that call ran
+    idle(t1, NOW());                                                  // the person used the mouse while that call ran, and goes on
     const after = await s.call("mac_click", { x: 100, y: 100 });
     check("RF-3：一次什么都没发的调用（occluded）之后，那一刻有人动过键鼠 → 下一个输入返回 user_active、不发（那次事件不算 noracu 自己的）",
       refused?.isError && /^ERROR: occluded: /.test(say(refused)) && after?.isError && /^ERROR: user_active: /.test(say(after)) && read(clickLog) === "",
@@ -2515,7 +3055,7 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
     idle(QUIET(), NOW()); writeFileSync(clickLog, "");
     const taken = await s.call("mac_click", { x: 100, y: 100 });
     check("GH-1：出队时没人用键鼠、动指针前一刻有人用了 → user_active，一个事件都不发；两次检查都做了；delivery 只写一遍",
-      taken?.isError && /^ERROR: user_active: /.test(say(taken)) && say(taken).split("delivery=not_delivered").length === 2 && read(clickLog) === "" && samples() === 2,
+      taken?.isError && /^ERROR: user_active: /.test(say(taken)) && say(taken).split("delivery=not_delivered").length === 2 && read(clickLog) === "" && samples() === 3,
       `${say(taken).slice(0, 70)} | samples=${samples()} | click=${JSON.stringify(read(clickLog))}`);
     idle(QUIET()); writeFileSync(clickLog, "");
     const calm = await s.call("mac_click", { x: 100, y: 100 });
@@ -2535,11 +3075,94 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
     idle(QUIET()); writeFileSync(clickLog, "");
     const t4 = Date.now();
     const pressed = await s.call("mac_click", { element_index: one, mechanism: "semantic" });
-    idle(t4 + 1);                                                     // the person moved the mouse while it ran
+    idle(t4 + 1, NOW());                                              // the person moved the mouse while it ran, and goes on
     const afterPress = await s.call("mac_click", { x: 100, y: 100 });
     check("S4A：语义点击（AXPress，不发键鼠事件）之后，那一刻有人动过键鼠 → 下一个输入 user_active、不发",
       !pressed?.isError && afterPress?.isError && /^ERROR: user_active: /.test(say(afterPress)) && read(clickLog) === "",
       `${say(pressed).slice(0, 50)} | ${say(afterPress).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
+    // a wheel scroll on an element is noracu's own event too: the next input is not taken for the person's
+    idle(QUIET()); writeFileSync(clickLog, ""); writeFileSync(wheelLog, "");
+    const oneNow = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
+    const t5 = Date.now();
+    const wheel = await s.call("mac_scroll", { element_index: oneNow, direction: "down" });
+    idle(t5 + 1);                                                     // the wheel event of that moment
+    const afterWheel = await s.call("mac_click", { x: 100, y: 100 });
+    check("mac_scroll on an element: the wheel event is noracu's own — the next input goes out instead of being refused as user_active",
+      !wheel?.isError && /^wheel /.test(read(wheelLog)) && !afterWheel?.isError && /c:100,100/.test(read(clickLog)),
+      `${say(wheel).slice(0, 60)} | ${say(afterWheel).slice(0, 70)} | wheel=${JSON.stringify(read(wheelLog))}`);
+    // keyboard events get the same late check as the pointer
+    idle(QUIET(), NOW()); writeFileSync(clickLog, "");
+    const keyTaken = await s.call("mac_key", { key: "shift-z" });      // keys sent by cliclick
+    const keySamples = samples() - 1;                                  // the second look after the wait
+    idle(QUIET(), NOW());
+    const engKeyTaken = await s.call("mac_key", { key: "return" });    // a key sent by the engine
+    check("keyboard: quiet when the call left the queue, in use right before the key events → user_active, nothing sent (cliclick keys and engine keys alike)",
+      keyTaken?.isError && /^ERROR: user_active: /.test(say(keyTaken)) && /delivery=not_delivered, retry=safe/.test(say(keyTaken)) && read(clickLog) === "" && keySamples === 2
+        && engKeyTaken?.isError && /^ERROR: user_active: /.test(say(engKeyTaken)) && samples() === 3,
+      `${say(keyTaken).slice(0, 60)} | samples=${keySamples} | ${say(engKeyTaken).slice(0, 60)} | samples=${samples()} | click=${JSON.stringify(read(clickLog))}`);
+    // a click and then keystrokes in one call: the click is noracu's own event, not the person's; the person
+    // taking the keyboard after the click stops the keystrokes, and the result says that the click went out
+    const frontOne = jsonOf(await s.call("mac_ax_state", { app: "Front" })).elements?.find((e) => e.title === "One")?.i;
+    writeFileSync(clickLog, "");
+    const t6 = Date.now();
+    idle(QUIET(), QUIET(), t6 + 1);                                   // third reading: an event during this call — its own click
+    const typed = await s.call("mac_type", { element_index: frontOne, text: "abc", mechanism: "physical" });
+    const typedLog = read(clickLog);
+    idle(QUIET(), QUIET(), NOW()); writeFileSync(clickLog, "");       // third reading: the person, after the click
+    const cutShort = await s.call("mac_type", { element_index: frontOne, text: "abc", mechanism: "physical" });
+    check("mac_type, a click then keystrokes: the click of the same call is not taken for the person; the person taking over after the click stops the keystrokes, and the result says an earlier part went out",
+      !typed?.isError && /c:50,50/.test(typedLog) && /t:abc/.test(typedLog)
+        && cutShort?.isError && /^ERROR: user_active: /.test(say(cutShort)) && /an earlier part of it was/.test(say(cutShort)) && /delivery=unknown, retry=unsafe/.test(say(cutShort)) && /c:50,50/.test(read(clickLog)) && !/t:abc/.test(read(clickLog)),
+      `${say(typed).slice(0, 60)} | ${JSON.stringify(typedLog)} | ${say(cutShort).slice(0, 150)} | ${JSON.stringify(read(clickLog))}`);
+    idle(QUIET(), NOW()); writeFileSync(wheelLog, "");
+    const wheelTaken = await s.call("mac_scroll", { element_index: oneNow, direction: "down" });
+    check("mac_scroll on an element: quiet when the call left the queue, in use right before the wheel event → user_active, no wheel event",
+      wheelTaken?.isError && /^ERROR: user_active: /.test(say(wheelTaken)) && read(wheelLog) === "" && samples() === 3,
+      `${say(wheelTaken).slice(0, 70)} | samples=${samples()} | wheel=${JSON.stringify(read(wheelLog))}`);
+    // a window that came on top of the element's point since the hit test: no wheel event (it would scroll that window)
+    idle(QUIET()); writeFileSync(wheelLog, "");
+    const twoNow = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "Two")?.i;
+    const covered = await s.call("mac_scroll", { element_index: twoNow, direction: "down" });
+    check("mac_scroll on an element: another window on top at its point at the late re-check → occluded, no wheel event",
+      covered?.isError && /^ERROR: occluded: a window of "Other" came on top at 410,110/.test(say(covered)) && read(wheelLog) === "",
+      `${say(covered).slice(0, 120)} | wheel=${JSON.stringify(read(wheelLog))}`);
+    // an element with no window id of its own (a menu item, a menu bar item): what was on top at its point at
+    // the hit test must still be on top right before the click
+    idle(QUIET()); writeFileSync(clickLog, "");
+    const menuOne = jsonOf(await s.call("mac_ax_state", { app: "MenuGone" })).elements?.find((e) => e.title === "One")?.i;
+    const menuGone = await s.call("mac_click", { element_index: menuOne, mechanism: "physical" });
+    const goneLog = read(clickLog);
+    idle(QUIET()); writeFileSync(clickLog, "");
+    const barOne = jsonOf(await s.call("mac_ax_state", { app: "BarItem" })).elements?.find((e) => e.title === "One")?.i;
+    const barItem = await s.call("mac_click", { element_index: barOne, mechanism: "physical" });
+    check("physical click on an element with no window id: another window on top at its point since the hit test (its menu closed) → occluded, nothing sent; the same window still on top (the menu bar, the window server's) → the click goes out",
+      menuGone?.isError && /^ERROR: occluded: /.test(say(menuGone)) && goneLog === "" && !barItem?.isError && /c:40,205/.test(read(clickLog)),
+      `${say(menuGone).slice(0, 120)} | ${JSON.stringify(goneLog)} | ${say(barItem).slice(0, 90)} | ${JSON.stringify(read(clickLog))}`);
+    // whether the wheel script ran is read from how it ended, not from the words of its message
+    const { chmodSync } = await import("node:fs");
+    const oneWheel = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
+    await sleepMs(200);
+    idle(QUIET()); writeFileSync(clickLog, ""); writeFileSync(wheelLog, ""); writeFileSync(wheelFail, "");
+    const t7 = Date.now();
+    const wheelFailed = await s.call("mac_scroll", { element_index: oneWheel, direction: "down" });
+    idle(t7 + 1);                                                     // the wheel event of that moment
+    const afterFailed = await s.call("mac_click", { x: 100, y: 100 });
+    rmSync(wheelFail);
+    check("mac_scroll on an element: a wheel script that ran and failed (its message says \"not found\") → delivery=unknown, retry=unsafe, and its event counts as noracu's own",
+      wheelFailed?.isError && /delivery=unknown, retry=unsafe/.test(say(wheelFailed)) && !/not_delivered/.test(say(wheelFailed)) && /^wheel /.test(read(wheelLog)) && !afterFailed?.isError && /c:100,100/.test(read(clickLog)),
+      `${say(wheelFailed).slice(0, 110)} | ${say(afterFailed).slice(0, 60)} | wheel=${JSON.stringify(read(wheelLog))}`);
+    const oneWheel2 = jsonOf(await s.call("mac_ax_state", { app: "Fake" })).elements?.find((e) => e.title === "One")?.i;
+    await sleepMs(200);
+    idle(QUIET()); writeFileSync(clickLog, ""); writeFileSync(wheelLog, ""); chmodSync(fakeWheel, 0o600);
+    const t8 = Date.now();
+    const wheelNoStart = await s.call("mac_scroll", { element_index: oneWheel2, direction: "down" });
+    chmodSync(fakeWheel, 0o700);
+    idle(t8 + 1, NOW());                                              // the person, while that call ran, and goes on
+    const afterNoStart = await s.call("mac_click", { x: 100, y: 100 });
+    check("mac_scroll on an element: a wheel script that could not be started → delivery=not_delivered, retry=safe, and nothing is stamped as noracu's own (the person's event of that moment still refuses the next input)",
+      wheelNoStart?.isError && /could not be started/.test(say(wheelNoStart)) && /delivery=not_delivered, retry=safe/.test(say(wheelNoStart)) && read(wheelLog) === ""
+        && afterNoStart?.isError && /^ERROR: user_active: /.test(say(afterNoStart)) && read(clickLog) === "",
+      `${say(wheelNoStart).slice(0, 130)} | ${say(afterNoStart).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
     // audit S5A-s2-D-2: a left double / triple click through cliclick is its dc: / tc: verb, not two or three c:
     idle(QUIET()); writeFileSync(clickLog, "");
     const dbl = await s.call("mac_click", { x: 100, y: 100, count: 2 });
@@ -2573,7 +3196,20 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
     check("复审 S5C：读空闲时间（ioreg）期间客户端取消 → 输入不发、不应答，队列照常",
       !cancelReplied && read(clickLog) === "" && samples() === 1 && pongC?.result !== undefined,
       `replied=${cancelReplied} samples=${samples()} click=${JSON.stringify(read(clickLog))}`);
-    // S4B-s10-gemini-1: a phone input that imctl refused before sending anything does not stamp noracu's own input
+    // R3 (2026-11-17): a key of the person's that is less than 2 s old — the Return that sent the request — is
+    // waited out once: with nothing more from them the click goes out after the rest of the 2 s; when they go on,
+    // it is refused after the wait, and the answer says that noracu waited
+    idle(Date.now() - 600); writeFileSync(clickLog, "");
+    const w0 = Date.now();
+    const waited = await s.call("mac_click", { x: 100, y: 100 });
+    const waitedMs = Date.now() - w0, waitedSamples = samples(), waitedLog = read(clickLog);
+    idle(Date.now() - 600, NOW()); writeFileSync(clickLog, "");
+    const goesOn = await s.call("mac_click", { x: 100, y: 100 });
+    check("R3: the person's key 0.6 s ago, nothing more from them → noracu waits out the rest of the 2 s and clicks; they go on → user_active after the wait, nothing sent",
+      !waited?.isError && /c:100,100/.test(waitedLog) && waitedMs >= 1300 && waitedSamples >= 2
+        && goesOn?.isError && /^ERROR: user_active: /.test(say(goesOn)) && /after noracu had waited/.test(say(goesOn)) && read(clickLog) === "",
+      `${say(waited).slice(0, 50)} ${waitedMs}ms samples=${waitedSamples} | ${say(goesOn).slice(0, 120)}`);
+    // a phone input that imctl refused before sending anything does not stamp noracu's own input
     const fakePy = join(dir, "python3");
     writeFileSync(fakePy, `#!/bin/bash\nif [ "$1" = "-c" ]; then exit 0; fi\necho "out_of_screen: the point is on the iPhone Mirroring window's margin; nothing was sent" >&2\nexit 2\n`, { mode: 0o700 });
     const s2 = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_IOREG: fakeIoreg, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "2", NORACU_NO_BGPOST: "1", NORACU_PYTHON: fakePy, NORACU_IMCTL_DIR: dir });
@@ -2581,16 +3217,104 @@ console.log('    | |   "HIDIdleTime" = ' + Math.max(0, Math.round((Date.now() - 
       idle(QUIET()); writeFileSync(clickLog, "");
       const t5 = Date.now();
       const phoneNo = await s2.call("phone_tap", { x: 0.5, y: 0.001 });
-      idle(t5 + 1);                                                   // the person moved the mouse while imctl ran
+      idle(t5 + 1, NOW());                                            // the person moved the mouse while imctl ran, and goes on
       const afterPhone = await s2.call("mac_click", { x: 100, y: 100 });
       check("S4B：手机输入被 imctl 先拒（什么都没发）之后，那一刻有人动过键鼠 → 下一个输入 user_active、不发",
         phoneNo?.isError && /out_of_screen/.test(say(phoneNo)) && afterPhone?.isError && /^ERROR: user_active: /.test(say(afterPhone)) && read(clickLog) === "",
         `${say(phoneNo).slice(0, 60)} | ${say(afterPhone).slice(0, 60)} | click=${JSON.stringify(read(clickLog))}`);
+      // an imctl that could not import its modules sent nothing either: the person's event of that moment still
+      // refuses the next input (it was stamped as noracu's own)
+      writeFileSync(fakePy, `#!/bin/bash\nif [ "$1" = "-c" ]; then exit 0; fi\necho 'Traceback (most recent call last):' >&2\necho "ModuleNotFoundError: No module named 'Quartz'" >&2\nexit 1\n`, { mode: 0o700 });
+      idle(QUIET()); writeFileSync(clickLog, "");
+      const t9 = Date.now();
+      const phoneBroken = await s2.call("phone_tap", { x: 0.5, y: 0.5 });
+      idle(t9 + 1);                                                   // the person moved the mouse while imctl ran, then stopped
+      const w9 = Date.now();
+      const afterBroken = await s2.call("mac_click", { x: 100, y: 100 });
+      const waited9 = Date.now() - w9;
+      check("an imctl that could not import its modules sent nothing: the person's event of that moment is theirs — the next input waits it out before clicking",
+        phoneBroken?.isError && /imctl unavailable/.test(say(phoneBroken)) && !afterBroken?.isError && /c:100,100/.test(read(clickLog)) && waited9 >= 1300,
+        `${say(phoneBroken).slice(0, 70)} | ${say(afterBroken).slice(0, 60)} | ${waited9} ms | click=${JSON.stringify(read(clickLog))}`);
     } finally { s2.proc.kill(); }
+    // the pointer's position could not be read before a click: the click goes out, and the result says the pointer
+    // was not put back (it said nothing)
+    const fakePointer = join(dir, "pointer");
+    writeFileSync(fakePointer, `#!/bin/bash\nexit 1\n`, { mode: 0o700 });
+    const s5 = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_CLICLICK: fakeClick, NORACU_IOREG: fakeIoreg, NORACU_AX_TIMEOUT_MS: "3000", NORACU_USER_IDLE_S: "2", NORACU_NO_BGPOST: "1", NORACU_TEST_POINTER: fakePointer });
+    try {
+      idle(QUIET()); writeFileSync(clickLog, "");
+      const blind = await s5.call("mac_click", { x: 100, y: 100 });
+      check("a click when the pointer's position could not be read: sent, and the result says the pointer was not put back",
+        !blind?.isError && /c:100,100/.test(read(clickLog)) && /the pointer's position could not be read before the click, so it was not put back/.test(say(blind)), say(blind).slice(0, 240));
+    } finally { s5.proc.kill(); }
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
 
 // mac_screenshot display + region (device run 2026-11-14): region is in screen points as mac_windows reports them;
+// without Screen Recording (the engine's status says screen_recording false) mac_screenshot says so in its
+// meta; with it, nothing is added, and the status is not asked again after it was seen granted
+for (const granted of [false, true]) {
+  const { mkdtempSync, writeFileSync, readFileSync: rf, existsSync: ex, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-srec-"));
+  const ops = join(dir, "ops.log");
+  const fake = join(dir, "fake-ax-engine");
+  writeFileSync(fake, `#!/usr/bin/env node
+let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", () => {
+  const req = JSON.parse(d);
+  require("fs").appendFileSync(${JSON.stringify(ops)}, req.op + "\\n");
+  if (req.op === "status") return process.stdout.write(JSON.stringify({ ok: true, accessibility: true, screen_recording: ${granted}, displays: [] }));
+  process.stdout.write(JSON.stringify({ ok: false, code: "INVALID_ARGS", message: "fake engine: op " + req.op + " not scripted" }));
+});
+`, { mode: 0o700 });
+  const fakeCap = join(dir, "screencapture");
+  writeFileSync(fakeCap, `#!/usr/bin/env node
+const b = Buffer.alloc(33); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(b, 0); b.writeUInt32BE(13, 8); b.write("IHDR", 12);
+b.writeUInt32BE(800, 16); b.writeUInt32BE(600, 20); require("fs").writeFileSync(process.argv[process.argv.length - 1], b);
+`, { mode: 0o700 });
+  const s = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_SCREENCAPTURE: fakeCap });
+  try {
+    const metaOf = (r) => { try { return JSON.parse(r?.content?.find((c) => c.type === "text")?.text || "{}"); } catch { return {}; } };
+    const one = metaOf(await s.call("mac_screenshot", {}));
+    const two = metaOf(await s.call("mac_screenshot", {}));
+    const statusAsked = ex(ops) ? rf(ops, "utf8").split("\n").filter((l) => l === "status").length : 0;
+    const ok = granted
+      ? !one.screen_recording_note && !two.screen_recording_note && statusAsked === 1
+      : /Screen Recording looks not granted/.test(one.screen_recording_note || "") && /Screen & System Audio Recording/.test(one.screen_recording_note || "") && Boolean(two.screen_recording_note) && statusAsked === 2;
+    check(granted ? "mac_screenshot with Screen Recording granted: no note, and the status is asked once only" : "mac_screenshot without Screen Recording: the meta says so (screen_recording_note), at every screenshot",
+      ok, `${JSON.stringify(one.screen_recording_note || null).slice(0, 80)} | status asked ${statusAsked}`);
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// an input tool that fails with an exception nobody planned for (here: an engine answering "null" to the action)
+// says that what it sent is not known — delivery=unknown, retry=unsafe
+{
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-throw-"));
+  const fake = join(dir, "fake-ax-engine");
+  writeFileSync(fake, `#!/usr/bin/env node
+let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", () => {
+  const req = JSON.parse(d); const say = (o) => process.stdout.write(JSON.stringify(o));
+  const app = { pid: 4242, name: "Fake", bundle: "test.fake" };
+  if (req.op === "snapshot") return say({ ok: true, app: "Fake", bundle_id: "test.fake", pid: 4242, surface: "window", complete: true, visited: 1, ms: 1, container: { kind: "window", wid: 1, title: "W", subrole: "", frame: [0, 0, 100, 100] }, nodes: [{ d: 1, role: "AXButton", path: [0], fp: { role: "AXButton", subrole: "", id: "", name: "One" }, title: "One", frame: [0, 0, 10, 10], interactive: true }] });
+  if (req.op === "frontmost") return say({ ok: true, front: app, target: app, match: true });
+  process.stdout.write("null");
+});
+`, { mode: 0o700 });
+  const s = await spawnServer({ NORACU_AX_ENGINE: fake, NORACU_USER_IDLE_S: "0" });
+  try {
+    const say = (r) => String(r?.content?.[0]?.text || "");
+    const snap = await s.call("mac_ax_state", { app: "Fake" });
+    const i = (() => { try { return JSON.parse(say(snap)).elements[0].i; } catch { return null; } })();
+    const boom = await s.call("mac_click", { element_index: i, mechanism: "semantic" });
+    check("an input tool that fails with an unplanned exception: internal_error, delivery=unknown, retry=unsafe",
+      Number.isInteger(i) && boom?.isError && /^ERROR: internal_error: /.test(say(boom)) && /\(delivery=unknown, retry=unsafe\)$/.test(say(boom)), say(boom).slice(0, 200));
+  } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
 // a region outside the display named is refused before anything is captured
 {
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
@@ -2658,6 +3382,117 @@ let d = ""; process.stdin.on("data", (c) => (d += c)); process.stdin.on("end", (
       r?.isError && /^ERROR: input_denied: "Cursor" — /.test(t) && /delivery=not_delivered/.test(t), t.slice(0, 160));
   } finally { s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
 }
+
+// the port answered by a process that is not the launched app is not recorded as the app's. A stand-in
+// for open starts a loopback listener on the port it is given; the fake engine names the launched app's pid
+{
+  const { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "noracu-cdpown-"));
+  const appDir = join(dir, "CdpFake.app");
+  mkdirSync(join(appDir, "Contents"), { recursive: true });
+  writeFileSync(join(appDir, "Contents", "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>test.cdpfake</string></dict></plist>
+`);
+  const at = (f) => join(dir, f);
+  // the listener: answers /json/version with the websocket address it is given, and writes its pid when it listens
+  writeFileSync(at("listener.cjs"), [
+    "const [port, ws, out] = process.argv.slice(2);",
+    "require('node:http').createServer((q, s) => s.end(JSON.stringify({ Browser: 'Fake/1', webSocketDebuggerUrl: ws })))",
+    "  .listen(Number(port), '127.0.0.1', () => require('node:fs').writeFileSync(out, String(process.pid)));",
+  ].join("\n"));
+  // the stand-in for open: mode "wrongws" gives a websocket on another port; "other" and "own" give this port's
+  writeFileSync(at("open"), [
+    "#!/usr/bin/env node",
+    "const fs = require('node:fs'), cp = require('node:child_process'), path = require('node:path');",
+    "const dir = " + JSON.stringify(dir) + ";",
+    "const port = Number((process.argv.find((a) => a.startsWith('--remote-debugging-port=')) || '=').split('=')[1]);",
+    "const mode = fs.readFileSync(path.join(dir, 'mode'), 'utf8').trim();",
+    "fs.writeFileSync(path.join(dir, 'port'), String(port));",
+    "const ws = mode === 'wrongws' ? 'ws://127.0.0.1:1/devtools/browser/fake' : 'ws://127.0.0.1:' + port + '/devtools/browser/fake';",
+    "cp.spawn(process.execPath, [path.join(dir, 'listener.cjs'), String(port), ws, path.join(dir, 'listener')], { detached: true, stdio: 'ignore' }).unref();",
+    "const end = Date.now() + 5000;",
+    "(function wait() { if (fs.existsSync(path.join(dir, 'listener')) || Date.now() > end) process.exit(0); setTimeout(wait, 50); })();",
+  ].join("\n"), { mode: 0o700 });
+  // the fake engine: an installed Electron app that is not running; app_wait names the listener's pid ("own") or
+  // the server's own pid, which does not listen on the port
+  writeFileSync(at("engine"), [
+    "#!/usr/bin/env node",
+    "const fs = require('node:fs'), path = require('node:path');",
+    "const dir = " + JSON.stringify(dir) + ";",
+    "let d = ''; process.stdin.on('data', (c) => (d += c)); process.stdin.on('end', () => {",
+    "  const req = JSON.parse(d);",
+    "  if (req.op === 'app_info') return process.stdout.write(JSON.stringify({ ok: true, running: false, path: " + JSON.stringify(appDir) + ", chromium: true, electron: true }));",
+    "  if (req.op === 'app_wait') {",
+    "    const own = fs.readFileSync(path.join(dir, 'mode'), 'utf8').trim() === 'own' && fs.existsSync(path.join(dir, 'listener'));",
+    "    return process.stdout.write(JSON.stringify({ ok: true, name: 'CdpFake', pid: own ? Number(fs.readFileSync(path.join(dir, 'listener'), 'utf8')) : process.ppid }));",
+    "  }",
+    "  process.stdout.write(JSON.stringify({ ok: false, code: 'INVALID_ARGS', message: 'fake engine: op ' + req.op + ' not scripted' }));",
+    "});",
+  ].join("\n"), { mode: 0o700 });
+  const s = await spawnServer({ NORACU_AX_ENGINE: at("engine"), NORACU_TEST_OPEN: at("open"), NORACU_ALLOW_CDP: "1" });
+  const stopListener = () => {
+    if (existsSync(at("listener"))) { try { process.kill(Number(readFileSync(at("listener"), "utf8"))); } catch { /* gone */ } rmSync(at("listener"), { force: true }); }
+  };
+  const launch = async (mode) => {
+    writeFileSync(at("mode"), mode);
+    const r = await s.call("mac_app", { action: "launch", app: "CdpFake", cdp_port: 0, timeout_ms: 4000 });
+    const port = existsSync(at("port")) ? Number(readFileSync(at("port"), "utf8")) : null;
+    // attaching for real needs a browser behind the port: only the ports that must be refused are tried
+    const attach = port && mode !== "own" ? await s.call("browser_launch", { cdp_port: port }) : null;
+    stopListener();
+    return { r, j: jsonOf(r), port, attach: String(attach?.content?.[0]?.text || "") };
+  };
+  try {
+    const wrong = await launch("wrongws");
+    const other = await launch("other");
+    const own = await launch("own");
+    check("审计：带 cdp_port 启动后，答话的端点不是这个 App 的（websocket 不在本端口 / 监听进程不是它）→ 不记录（cdp:null），browser_launch 附着被拒；是它自己的照常记录",
+      !wrong.r?.isError && wrong.j.cdp === null && /is not the launched app's own/.test(wrong.j.note || "") && /was not opened by this noracu process/.test(wrong.attach)
+      && !other.r?.isError && other.j.cdp === null && /was not opened by this noracu process/.test(other.attach)
+      && own.j.cdp?.port === own.port && own.j.cdp?.websocket_url === `ws://127.0.0.1:${own.port}/devtools/browser/fake`,
+      `wrong: ${JSON.stringify(wrong.j).slice(0, 110)} | ${wrong.attach.slice(0, 60)} || other: ${JSON.stringify(other.j).slice(0, 90)} || own: ${JSON.stringify(own.j.cdp ?? null).slice(0, 90)}`);
+  } finally { stopListener(); s.proc.kill(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+{
+  // One message is one line: a line of more than 4 MB is dropped while it arrives and answered with an error — under
+  // its id, which stands before the params here — and the next message is read as usual
+  const big = await spawnServer();
+  try {
+    const got = [];
+    let buf = "";
+    big.proc.stdout.on("data", (d) => { buf += d; let nl; while ((nl = buf.indexOf("\n")) !== -1) { const l = buf.slice(0, nl); buf = buf.slice(nl + 1); try { got.push(JSON.parse(l)); } catch { /* not a message */ } } });
+    big.proc.stdin.write(`{"jsonrpc":"2.0","id":991001,"method":"tools/call","params":{"name":"mac_paste","arguments":{"text":"${"a".repeat(5 * 1024 * 1024)}"}}}\n`);
+    await sleepMs(1500);
+    const ans = got.find((m) => m.id === 991001);
+    const pong = await Promise.race([big.rpc("ping"), sleepMs(4000).then(() => null)]);
+    check("a request line of more than 4 MB: dropped unread and answered with an error under its id; the next request is answered as usual",
+      ans?.error?.code === -32600 && /too large/.test(ans.error.message) && pong?.result !== undefined, `${JSON.stringify(ans ?? null).slice(0, 150)} | ping: ${pong?.result !== undefined ? "answered" : "no answer"}`);
+    // …and a line just past the limit, whose end arrives in the chunk that takes it there, is not read either;
+    // an id that is the string "params" is still found
+    const pre = '{"jsonrpc":"2.0","id":"params","method":"tools/call","params":{"name":"mac_paste","arguments":{"text":"', post = '"}}}';
+    big.proc.stdin.write(pre + "b".repeat(4 * 1024 * 1024 + 10 - pre.length - post.length) + post + "\n");
+    await sleepMs(1500);
+    const ans2 = got.find((m) => m.id === "params");
+    check("a request line ten characters past the limit: not read either, and answered under its id",
+      ans2?.error?.code === -32600 && /too large/.test(ans2.error.message), JSON.stringify(ans2 ?? got.at(-1) ?? null).slice(0, 170));
+  } finally { big.proc.kill(); }
+}
+{
+  // the harness's own limit: a server that never answers ends the wait, and the call reads as an error
+  const mute = await spawnServer({}, new URL("./mute-server.mjs", import.meta.url).pathname, 600);
+  try {
+    const t0 = Date.now();
+    const r = await mute.call("mac_status");
+    expectedUnanswered++;
+    check("测试自身：对方一直不应答时，调用在限时后以错误结束，不会挂住整轮",
+      r?.isError && /^E2E_TIMEOUT/.test(String(r?.content?.[0]?.text)) && Date.now() - t0 < 5000, `${Date.now() - t0} ms`);
+  } finally { mute.proc.kill(); }
+}
+check("每个调用都在限时内得到应答（故意不应答的那一个除外）", unanswered.length === expectedUnanswered, unanswered.join(", ").slice(0, 200));
 
 const failed = results.filter(r => !r.pass);
 console.log(`\n=== noracu MCP: ${results.length - failed.length}/${results.length} PASS ===`);

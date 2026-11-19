@@ -46,7 +46,7 @@ def app_switcher() -> None:
     x0, y0 = b.denormalize(0.5, 0.90)
     x1, y1 = b.denormalize(0.5, 0.45)
     src = inp._source()
-    inp._require_focus()  # F26 / R13 §3: before mouse-down
+    inp._require_focus()  # before mouse-down
     cx, cy = x0, y0
     inp._mouse_event(inp.kCGEventLeftMouseDown, cx, cy, src)
     try:
@@ -60,7 +60,7 @@ def app_switcher() -> None:
             inp._mouse_event(inp.kCGEventLeftMouseDragged, nx, ny, src)
             cx, cy = nx, ny
             time.sleep(0.016)
-        inp._require_focus()  # R18: before the hold, the mirror must still be in front
+        inp._require_focus()  # before the hold, the mirror must still be in front
         time.sleep(0.55)  # hold to trigger the switcher
     finally:
         inp._mouse_event(inp.kCGEventLeftMouseUp, cx, cy, src)
@@ -75,7 +75,7 @@ def scroll_down(distance: float = 0.5) -> None:
     """Reveal content further down a list by about `distance` window heights.
 
     Uses trackpad-style scroll events; a vertical mouse drag does not scroll
-    lists in iPhone Mirroring (F16). Swipes stay for gestures such as paging.
+    lists in iPhone Mirroring. Swipes stay for gestures such as paging.
     """
     b = get_bounds()
     inp.scroll_trackpad(-distance * b.height * _SCROLL_PX_PER_PT, bounds=b)
@@ -93,7 +93,7 @@ SCROLL_MIN_DIFF = 2.0
 
 def scroll_checked(direction, distance=0.5, *, luma=None, scroller=None,
                    sleep=time.sleep, settle_s=0.6) -> bool:
-    """Scroll by `distance` window heights and confirm the screen moved (F20).
+    """Scroll by `distance` window heights and confirm the screen moved.
 
     `direction` is "up" or "down"; `distance` is in window heights and
     must satisfy 0 < distance <= 3. Both are validated before anything
@@ -113,7 +113,7 @@ def scroll_checked(direction, distance=0.5, *, luma=None, scroller=None,
 
     Returns True when the screen changed by at least SCROLL_MIN_DIFF.
 
-    Capture failures are never swallowed (F25): a WindowError or
+    Capture failures are never swallowed: a WindowError or
     CaptureError from the luma captures propagates to the caller (the
     CLI reports capture_failed) — an unreadable screen is not evidence
     that the scroll had no effect.
@@ -137,7 +137,7 @@ def scroll_checked(direction, distance=0.5, *, luma=None, scroller=None,
     return verify.mean_abs_diff(before, after) >= SCROLL_MIN_DIFF
 
 
-# F45 (device run 2026-11-07): iPhone Mirroring turns a mouse drag into pointer input, and a
+# Device run 2026-11-07: iPhone Mirroring turns a mouse drag into pointer input, and a
 # pointer drag that starts on an app icon picks the icon up at once. A page swipe at mid-height
 # starts on an icon row: twice it carried an icon onto another one and made a folder (and left the
 # Home Screen in edit mode, where every icon shows a "−" delete badge). Page swipes start in the
@@ -149,19 +149,19 @@ PAGE_SWIPE_TO_NX = 0.1
 
 
 def page_left() -> None:
-    """Swipe right-to-left: go to the next home-screen page (from the strip above the Dock, F45)."""
+    """Swipe right-to-left: go to the next home-screen page (from the strip above the Dock)."""
     inp.swipe(PAGE_SWIPE_FROM_NX, PAGE_SWIPE_NY, PAGE_SWIPE_TO_NX, PAGE_SWIPE_NY, duration_ms=280)
 
 
 def page_right() -> None:
-    """Swipe left-to-right: go to the previous home-screen page (from the strip above the Dock, F45)."""
+    """Swipe left-to-right: go to the previous home-screen page (from the strip above the Dock)."""
     inp.swipe(PAGE_SWIPE_TO_NX, PAGE_SWIPE_NY, PAGE_SWIPE_FROM_NX, PAGE_SWIPE_NY, duration_ms=280)
 
 
 def pull_down_search() -> None:
     """Swipe down from mid-screen (DEPRECATED — never use for Spotlight).
 
-    F13: iOS sometimes reads this swipe as an icon long-press-drag, which
+    iOS sometimes reads this swipe as an icon long-press-drag, which
     drops the home screen into edit (jiggle) mode — a stray tap on a "−"
     badge there offers to DELETE apps. open_spotlight() replaces it.
     Kept only as a raw gesture primitive; nothing in imctl calls it.
@@ -273,7 +273,7 @@ def open_spotlight() -> bool:
     """Open the phone's Spotlight search (View ▸ Spotlight).
 
     Never a swipe: the old pull-down could be misread by iOS as a
-    long-press-drag that triggers home-screen edit mode (F13).
+    long-press-drag that triggers home-screen edit mode.
     """
     return _run_view_menu_command("Spotlight")
 
@@ -288,7 +288,7 @@ SPOTLIGHT_MIN_DIFF = 6.0
 
 def open_spotlight_checked(settle_s=1.0, *, luma=None, sleep=time.sleep, opener=None, home=None,
                            home_settle_s=0.8, read_screen=None) -> bool:
-    """Go to the Home Screen, open Spotlight, and confirm it (F17 guard).
+    """Go to the Home Screen, open Spotlight, and confirm it.
 
     Two layers of protection, in order:
 
@@ -308,7 +308,7 @@ def open_spotlight_checked(settle_s=1.0, *, luma=None, sleep=time.sleep, opener=
     SPOTLIGHT_MIN_DIFF (calibrated for the single home-screen →
     Spotlight transition).
 
-    ③ F43 (2026-11-05 real-device, iOS 27): going Home from an app that
+    ③ 2026-11-05 real-device, iOS 27: going Home from an app that
     was opened from Spotlight lands back IN Spotlight, with the previous
     query and its Top Hit card. The Spotlight command then closed it, and
     that big change fooled layer ② into "opened" while the paste went to
@@ -351,7 +351,7 @@ def open_spotlight_checked(settle_s=1.0, *, luma=None, sleep=time.sleep, opener=
     if not home():
         return False
     sleep(home_settle_s)
-    # F43: Home itself brought up a Top Hit card — Spotlight with the previous query: do not
+    # Home itself brought up a Top Hit card — Spotlight with the previous query: do not
     # toggle it shut. A card that was already there before Home may be another app's own
     # (Safari shows one too) with Home ignored; then, and when unsure, the gate below decides.
     if before_home == "none" and card() == "card":
@@ -381,7 +381,7 @@ SPOTLIGHT_HEADER_MAX_NY = 0.3
 
 # Spotlight's search field is in the bottom part of the window (ny >= SEARCH_FIELD_NY) and echoes
 # the typed query. choose_app_hit never takes a label there; open_app reads that echo as the proof
-# that a late paste has reached the phone (F42). 2026-11-06 device run (macOS 27.2 / iOS 27): the
+# that a late paste has reached the phone. 2026-11-06 device run (macOS 27.2 / iOS 27): the
 # field is not always at the very bottom — it sat at ny ≈ 0.93 on one screen and floated at
 # ny ≈ 0.82 on others ("Q Search" read at 0.821 before typing, the query at 0.821–0.823 after),
 # where the old 0.88 bound never saw it: every unmatched name waited out the late-paste reads and
@@ -434,7 +434,7 @@ def _norm_label(s: str) -> str:
     return "".join(_LABEL_LOOKALIKES.get(ch, ch) for ch in s)
 
 
-# Two matching labels closer than this in both axes are one label read twice (choose_app_hit, Y6).
+# Two matching labels closer than this in both axes are one label read twice (choose_app_hit).
 SAME_SPOT_EPS = 0.03
 
 
@@ -453,14 +453,14 @@ def choose_app_hit(hits: list, name: str, ambiguous: list | None = None) -> visi
     forbidden: "X" must never hit "Xcode" or "X Corp". Returns None
     when nothing qualifies.
 
-    Y6 (review R37, 2026-11-07): when labels that match sit at two or
+    When labels that match sit at two or
     more different spots inside the card (more than SAME_SPOT_EPS apart
     in either axis), nothing says which one is the app, so none is
     chosen: the result is None and, when the caller passes a list as
     ``ambiguous``, True is appended to it. Matches at one spot (the same
     label read twice) are one label; the topmost of them is returned.
 
-    F35 (2026-11-05 real-device): an exact label is not an app. The
+    2026-11-05 real-device: an exact label is not an app. The
     query "Pinduoduo" matched a Chrome *suggestion* row of that name
     (the app's own Top Hit label reads 拼多多), the tap opened a web
     search, and the open was reported as confirmed. Only a row INSIDE
@@ -499,7 +499,7 @@ def choose_app_hit(hits: list, name: str, ambiguous: list | None = None) -> visi
         if hit.ny >= SEARCH_FIELD_NY:
             continue  # the search field echoing the query
         if not lo < hit.ny <= hi:
-            continue  # outside the Top Hit card (F35) / the block under the top field
+            continue  # outside the Top Hit card / the block under the top field
         found.append(hit)
     if not found:
         return None
@@ -507,7 +507,7 @@ def choose_app_hit(hits: list, name: str, ambiguous: list | None = None) -> visi
     if any(abs(h.nx - best.nx) > SAME_SPOT_EPS or abs(h.ny - best.ny) > SAME_SPOT_EPS for h in found):
         if ambiguous is not None:
             ambiguous.append(True)
-        return None  # Y6: several labels of the same name are never tapped
+        return None  # several labels of the same name are never tapped
     return best
 
 
@@ -518,7 +518,7 @@ def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep,
     Each pass calls ``read_screen()`` for OCR hits and hands them to
     choose_app_hit(); a match returns immediately. Between passes we
     wait ``delay_s`` — Spotlight results can lag the keystrokes, so a
-    single read races them (F17). No sleep after the last pass. Returns
+    single read races them. No sleep after the last pass. Returns
     None when no pass matches. ``read_screen`` and ``sleep`` are
     injectable so tests can drive this without a phone.
 
@@ -526,16 +526,16 @@ def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep,
     extra read per pass, with ``read_screen(language_correction=False)``:
     Vision's language correction tends to drop or rewrite
     single-character labels, and they are recognized more reliably
-    without it. F27: Vision's full-frame pass can also skip such a label
+    without it. Vision's full-frame pass can also skip such a label
     entirely (the app "X" on 2026-11-04), so a short name that both
     reads miss gets a third read that adds the minimumTextHeight sweep
     to the default pass on the same frame —
-    ``read_screen(language_correction=False, also_sweep=True)`` (F35:
+    ``read_screen(language_correction=False, also_sweep=True)`` (
     the Top Hit header must be in the same read as the label). The match
     stays exact either way. Long names keep the exact original
     read/sleep sequence. ``deadline`` (a ``clock()`` value) is checked
     before every read; once reached, no further read happens.
-    ``ambiguous`` is handed to every choose_app_hit() call (Y6).
+    ``ambiguous`` is handed to every choose_app_hit() call.
     """
     short = len(_norm_label(name)) <= 2
 
@@ -544,7 +544,7 @@ def find_app_hit(read_screen, name, attempts=2, delay_s=1.0, sleep=time.sleep,
 
     reads = [{}]
     if short:
-        # F35: the sweep finds the one-letter label, but choose_app_hit also
+        # The sweep finds the one-letter label, but choose_app_hit also
         # needs the "Top Hit" header from the SAME frame — the last read uses
         # both the default pass and the sweep (also_sweep), not the sweep alone.
         reads += [{"language_correction": False},
@@ -571,7 +571,7 @@ SPOTLIGHT_ICON_ABOVE_LABEL = 0.052
 # Top Hit 卡片的纵向范围：卡片内的行在 "Top Hit" 标题下方、且距标题不超过这个
 # 窗高比例。2026-11-05（macOS 27.2 / iOS 27）实测：标题 0.136，卡片内标签 0.24，
 # 下一个分区标题 "Suggestions" 0.294，第一条建议行 0.336 —— 0.15 落在卡片与
-# 建议区之间。choose_app_hit()（F35）与 open_app() 的图标兜底共用这一个值。
+# 建议区之间。choose_app_hit()与 open_app() 的图标兜底共用这一个值。
 TOP_HIT_CARD_SPAN = 0.15
 
 # 待真机标定：打开 App 前后整窗 luma 帧差下限。
@@ -580,10 +580,10 @@ OPEN_MIN_DIFF = 12.0
 # open_app's own time budget (seconds). The server stops `open` at 45 s from outside; a run
 # that is killed there can leave Spotlight open with the name typed in. open_app checks this
 # budget before every read pass and tap and, once it is spent, goes back to the Home Screen
-# and reports "deadline" instead (F39).
+# and reports "deadline" instead.
 OPEN_DEADLINE_S = 38.0
 
-# F42 (2026-11-05 real-device): a paste reached the phone anywhere from 1.5 s to more than 10 s
+# 2026-11-05 real-device: a paste reached the phone anywhere from 1.5 s to more than 10 s
 # after Cmd+V — the text travels to the iPhone only when it pastes. When type_text did not see
 # the paste arrive, open_app keeps reading Spotlight, one pass a second, for up to this long
 # (within its budget). Once the search field shows the name, the query is in, and one more pass
@@ -632,7 +632,7 @@ OCR_MIN_CONFIDENCE, OCR_MIN_CONFIDENCE_PROBLEM = _min_confidence(os.environ.get(
 
 
 def _field_echo(hits, name) -> bool:
-    """True when the search field shows ``name`` (F42).
+    """True when the search field shows ``name``.
 
     The field is the bottom zone (ny >= SEARCH_FIELD_NY); OCR may read the
     magnifier glyph in front of the text as a "Q". Compared after
@@ -711,7 +711,8 @@ def _top_field_for(hits, name):
 def _spotlight_up(hits, name=None) -> bool:
     """Spotlight is on screen: a "Top Hit" header near the top, or (top-field layout) the empty
     field's "Search or Ask", or a field line completed with a SPOTLIGHT_UP_ACTIONS word whose
-    query is exactly ``name`` — or, without a name (the F43 check), completed with "Open" AND
+    query is ``name`` (as the field echo matches it: a letter or two that OCR misread still count —
+    taking Spotlight for gone reports an app open that is not) — or, without a name (the check), completed with "Open" AND
     with that query's label in the label band under it. Any other line in that zone (the
     notification strip: a banner can read "X - Y" or even "X - Open") is no evidence."""
     header = _tophit_header(hits)
@@ -722,12 +723,12 @@ def _spotlight_up(hits, name=None) -> bool:
         if query == "search or ask":
             return True
         if want is not None:
-            if action in SPOTLIGHT_UP_ACTIONS and query == want:
+            if action in SPOTLIGHT_UP_ACTIONS and _echo_matches(query, want):
                 return True
         elif action in OPEN_COMPLETION_ACTIONS and any(
                 _norm_label(h.text) == query and ny + TOP_FIELD_LABEL_MIN < h.ny <= ny + TOP_FIELD_CARD_SPAN
                 for h in hits):
-            # without a name to match (the F43 check after Home), an "Open" completion counts
+            # without a name to match (the check after Home), an "Open" completion counts
             # only with Spotlight's own structure under it — that query's label in the label band;
             # a banner that happens to read "Calendar - Open" has none
             return True
@@ -740,10 +741,13 @@ def _tophit_header(hits):
     Matched exactly after _norm_label (case-folding, trailing
     punctuation) against TOP_HIT_LABELS, so a list row that merely
     contains the words can never pose as the card header. Several
-    matches → the first in reading order (the topmost).
+    matches → the first in reading order (the topmost). Only in the
+    top part of the screen (SPOTLIGHT_HEADER_MAX_NY), where Spotlight
+    draws the card: the same words further down — a row of a list, a
+    line of a page — are not the header, for any caller.
     """
     for hit in hits:
-        if _norm_label(hit.text) in TOP_HIT_LABELS:
+        if _norm_label(hit.text) in TOP_HIT_LABELS and hit.ny < SPOTLIGHT_HEADER_MAX_NY:
             return hit
     return None
 
@@ -759,7 +763,7 @@ def home_via_menu(timeout: float = TIDY_OSASCRIPT_TIMEOUT_S) -> bool:
 
 
 def _tap_and_confirm_open(nx, ny, *, luma, sleep, tap, read_screen, name=None):
-    """Tap (nx, ny) and confirm the app actually opened (F24 ②).
+    """Tap (nx, ny) and confirm the app actually opened.
 
     One luma frame before the tap, one after a 1.0s settle, then one
     OCR read. The tap counts as opened only when BOTH hold: the
@@ -801,21 +805,21 @@ def open_app(name: str, *, spotlight_open: bool = False,
     menu command silently failed, clear_text() (Cmd+A + Delete) would
     land in whatever focused text field the frontmost app shows (a
     note body, a message draft…) and wipe it — so on a failed gate
-    this does nothing at all: no clearing, no typing, no taps (F17
+    this does nothing at all: no clearing, no typing, no taps (the
     safety gate).
 
     The search field is cleared (Cmd+A + Delete) before typing: iOS
     keeps the previous Spotlight query, so the new name would be
-    appended to it and no result row would match (F17). Results are
+    appended to it and no result row would match. Results are
     then read up to twice (find_app_hit) because they can lag the
     keystrokes — or, when type_text did not see the paste arrive, once a
-    second for up to OPEN_LATE_PASTE_S (F42): once the search field shows
+    second for up to OPEN_LATE_PASTE_S: once the search field shows
     the name, one more pass.
 
     The top hit is never opened with Return — it may belong to a
     different app than the requested one.
 
-    F24 (2026-11-03 real-device retest): a tapped row is not an
+    2026-11-03 real-device retest: a tapped row is not an
     opened app. On iOS 27 Spotlight the OCR hit can be the Top Hit
     card's label UNDER the app icon, and tapping that label text
     does nothing — the screen stays on Spotlight while the caller
@@ -824,11 +828,12 @@ def open_app(name: str, *, spotlight_open: bool = False,
     ① stability — wait 0.5s, re-read, re-pick with choose_app_hit.
     When the row moved by more than 0.02 the results were still
     reflowing: the second read wins, with at most one more read
-    (still moving → the last read is authoritative).
+    (still moving → the last read is authoritative; the name gone from
+    that read → nothing is tapped, "gone").
     ② tap the row, then confirm via _tap_and_confirm_open (frame
     diff ≥ OPEN_MIN_DIFF and the "Top Hit" header gone).
     ③ when that tap did nothing and the post-tap read still shows the
-    exact label inside the Top Hit card (choose_app_hit, F35), tap the
+    exact label inside the Top Hit card (choose_app_hit), tap the
     icon SPOTLIGHT_ICON_ABOVE_LABEL above THAT label and confirm the
     same way. Otherwise NO second tap: an upward offset from a stale
     position could land on a different app's row.
@@ -836,7 +841,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
     Home Screen), reported as not_confirmed.
 
     A capture failure after the hit is found (WindowError /
-    CaptureError, F25) counts as unconfirmed — no further taps.
+    CaptureError) counts as unconfirmed — no further taps.
 
     Returns "opened"; "not_found" (a Top Hit card was seen, but never
     with exactly this name; back on the Home Screen); "no_top_hit" (no
@@ -853,9 +858,9 @@ def open_app(name: str, *, spotlight_open: bool = False,
     Top Hit card and the search field alike, so whether it was typed or
     the app exists is unknown — nothing was tapped; back on the Home Screen);
     "deadline" (the OPEN_DEADLINE_S budget ran out before a tap; back on
-    the Home Screen); "ambiguous" (Y6: the Top Hit card showed the name at
+    the Home Screen); "ambiguous" (the Top Hit card showed the name at
     two or more spots and no read showed it at one — nothing was tapped;
-    back on the Home Screen); "low_confidence" (NORACU_OCR_MIN_CONFIDENCE is set and the label was read below it: nothing tapped; back on the Home Screen); "focus_lost" (another app came to the front
+    back on the Home Screen); "gone" (the card showed the name, then no longer did — at two more reads, or at the read after the row moved: nothing tapped; back on the Home Screen); "low_confidence" (NORACU_OCR_MIN_CONFIDENCE is set and the label was read below it: nothing tapped; back on the Home Screen); "focus_lost" (another app came to the front
     during type_text's wait after the clipboard write: the paste was called
     off and nothing was tapped; Spotlight is left as it is — going Home
     would pull the mirror forward again); "clipboard_changed" (another app or
@@ -892,7 +897,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
     pending: list = []
     if type_text is None:
         def type_text(text):
-            # F42: never give the clipboard back here — the name can reach the phone more
+            # Never give the clipboard back here — the name can reach the phone more
             # than 10 s after Cmd+V, and Spotlight can show it in its own suggestions before
             # that; a restore in between would paste the user's clipboard into the search
             return inp.type_text(text, pending=pending, restore=False)
@@ -900,18 +905,18 @@ def open_app(name: str, *, spotlight_open: bool = False,
     deadline = None if deadline_s is None else clock() + deadline_s
     saw_top_hit = [False]
     saw_echo = [False]
-    ambiguous: list = []  # Y6: a read showed the name at two or more spots in the card
+    ambiguous: list = []  # a read showed the name at two or more spots in the card
 
     def read_screen(**kwargs):
-        # F33: every later read is also evidence for a clipboard restore an
-        # injected type_text may have handed over (the default never does: F42).
+        # Every later read is also evidence for a clipboard restore an
+        # injected type_text may have handed over (the default never does).
         hits = raw_read(**kwargs)
         for restore in pending:
             restore.offer(hits)
         if _tophit_header(hits) is not None:
             saw_top_hit[0] = True  # tells "not_found" apart from "no_top_hit"
         if _field_echo(hits, name):
-            saw_echo[0] = True  # F42: the name is in the search field — the paste arrived
+            saw_echo[0] = True  # the name is in the search field — the paste arrived
         return hits
 
     def out_of_time():
@@ -920,15 +925,15 @@ def open_app(name: str, *, spotlight_open: bool = False,
     short = len(_norm_label(name)) <= 2
 
     def reread():
-        # F32: the default pass alone keeps missing a one-letter label, and
+        # The default pass alone keeps missing a one-letter label, and
         # a missed row looked like a moved row — the tap then went to a
         # different row ("X" opened a Chrome search). Short names read the
         # same frame with the sweep too.
         return read_screen(also_sweep=True) if short else read_screen()
 
-    # F34: one retry — on the device the Spotlight command was once ignored
+    # One retry — on the device the Spotlight command was once ignored
     # right after an app closed. Each try goes Home first; when Home lands back in
-    # Spotlight (iOS 27, F43) the gate reports it open instead of toggling it shut.
+    # Spotlight (iOS 27) the gate reports it open instead of toggling it shut.
     if not spotlight_open and not (open_spotlight_checked()
                                    or open_spotlight_checked()):
         return "spotlight_unavailable"
@@ -937,11 +942,18 @@ def open_app(name: str, *, spotlight_open: bool = False,
         # NORACU_PHONE_TIMEOUT_MS, or a slow start) — do not clear or type at all
         tidy()
         return "deadline"
-    clear_text()  # iOS kept the last query; new input would append (F17)
+    clear_text()  # iOS kept the last query; new input would append
     sleep(0.3)
     try:
         typed = type_text(name)
-    except inp.PasteFocusLost:
+    except (WindowError, vision.CaptureError) as exc:
+        # the capture before ⌘V failed: open_app's caller reports capture_failed — with the clipboard's state
+        if report is not None and getattr(exc, "restore_failed", False):
+            report["restore_failed"] = exc.restore_failed
+        raise
+    except inp.PasteFocusLost as exc:
+        if report is not None and getattr(exc, "restore_failed", False):
+            report["restore_failed"] = exc.restore_failed
         # 0.2.7: another app came to the front during the wait after the clipboard write;
         # the paste was called off. No trip Home: that would pull the mirror forward again, the
         # very thing the paste refused to do (Spotlight closes by itself when left idle).
@@ -960,7 +972,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
         hit = find_app_hit(read_screen, name, attempts=2, sleep=sleep,
                            deadline=deadline, clock=clock, ambiguous=ambiguous)
     if hit is None and not saw_echo[0]:
-        # F33/F42: the name is not in the search field yet — the paste may still be on its
+        # The name is not in the search field yet — the paste may still be on its
         # way, whether type_text missed it or took another change for it (a clear that
         # landed late redraws the results: seen on the device after a back-to-back open)
         limit = clock() + (OPEN_LATE_SHORT_S if short else OPEN_LATE_PASTE_S)
@@ -993,13 +1005,13 @@ def open_app(name: str, *, spotlight_open: bool = False,
         if out_of_time():
             return "deadline"
         if ambiguous:
-            return "ambiguous"  # Y6: the card showed the name at more than one spot
+            return "ambiguous"  # the card showed the name at more than one spot
         if short:
             # OCR misses one- and two-letter text in the card and in the field alike: neither
             # "not typed" nor "not found" is known — say that instead (2026-11-06 device run)
             return "short_unreadable"
         if not saw_echo[0]:
-            return "not_typed"  # F42: the name never showed up in the search field
+            return "not_typed"  # the name never showed up in the search field
         return "not_found" if saw_top_hit[0] else "no_top_hit"
 
     try:
@@ -1012,9 +1024,24 @@ def open_app(name: str, *, spotlight_open: bool = False,
         split: list = []
         again = choose_app_hit(reread(), name, split)
         if split:
-            # Y6: this read shows the name at two or more spots — tap none of them
+            # This read shows the name at two or more spots — tap none of them
             tidy()
             return "ambiguous"
+        if again is None:
+            # The card does not show the name at this read. One missed read is common with OCR; a
+            # row that moved away or was replaced is what this re-read is for. So read once more,
+            # and tap nothing unless the name is back in the card: the first position is old by
+            # then, and a tap on whatever sits there now could open another app.
+            if out_of_time():
+                tidy()
+                return "deadline"
+            again = choose_app_hit(reread(), name, split)
+            if split:
+                tidy()
+                return "ambiguous"
+            if again is None:
+                tidy()
+                return "gone"
         if again is not None:
             if math.hypot(again.nx - hit.nx, again.ny - hit.ny) > 0.02:
                 # the row moved: the second read wins, with at most
@@ -1024,9 +1051,13 @@ def open_app(name: str, *, spotlight_open: bool = False,
                 if split:
                     tidy()
                     return "ambiguous"
-                if (once_more is not None
-                        and math.hypot(once_more.nx - hit.nx,
-                                       once_more.ny - hit.ny) > 0.02):
+                if once_more is None:
+                    # the results were still moving and this read does not show the name: the second
+                    # read's position is old by now, and a tap on whatever sits there could open another
+                    # app — tap nothing, as when the second read missed the name
+                    tidy()
+                    return "gone"
+                if math.hypot(once_more.nx - hit.nx, once_more.ny - hit.ny) > 0.02:
                     hit = once_more
             # else: the two reads agree — the first hit stands
 
@@ -1042,7 +1073,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
             return "low_confidence"  # opt-in: a label read below the minimum is not tapped
         # ② tap the row (the label inside the Top Hit card) and confirm.
         # The post-tap read uses reread(): for a short name it also sweeps,
-        # so ③ can find the label again (F32/F35).
+        # so ③ can find the label again.
         opened, hits = _tap_and_confirm_open(
             hit.nx, hit.ny, luma=luma, sleep=sleep, tap=tap,
             read_screen=reread, name=name)
@@ -1051,7 +1082,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
 
         # ③ the label tap did nothing → tap the icon above the label, but
         # only where the post-tap read shows that label inside the Top Hit
-        # card NOW (choose_app_hit, F35) — never the first read's position:
+        # card NOW (choose_app_hit) — never the first read's position:
         # the results may have changed. No such label → no second tap.
         again = choose_app_hit(hits, name)
         if (again is not None and OCR_MIN_CONFIDENCE is not None
@@ -1068,7 +1099,7 @@ def open_app(name: str, *, spotlight_open: bool = False,
     except Exception as exc:
         if not verify.is_capture_error(exc):
             raise
-        # F25: an unreadable screen is not evidence the app opened —
+        # An unreadable screen is not evidence the app opened —
         # no further taps; wrap up unconfirmed below.
 
     # ④ leave the phone tidy and say the taps were not confirmed
@@ -1087,7 +1118,7 @@ def status() -> dict:
     Keys: running; and when running: window {x,y,w,h} (AX bounds), window_id, onscreen, frontmost,
     live (True/False/null — is the phone stream up), overlay (text shown over the stream when not
     live, e.g. a paused/connecting notice), paused (True/False, or null when the state is unknown),
-    setup (True when the overlay is a setup / welcome screen the user must finish — F37; then
+    setup (True when the overlay is a setup / welcome screen the user must finish; then
     paused is False: there is no Resume control to press).
     """
     from .window import (
@@ -1129,7 +1160,7 @@ def launch() -> bool | None:
     """Ensure iPhone Mirroring is running, frontmost, and not paused.
 
     Returns the stream state afterwards: True live, False still paused or connecting,
-    None unknown. F29: resume()'s result used to be dropped, so phone_launch reported
+    None unknown. resume()'s result used to be dropped, so phone_launch reported
     "ready" while the overlay was still up.
     """
     ensure_running()

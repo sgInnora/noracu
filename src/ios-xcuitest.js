@@ -69,12 +69,16 @@ export function defaultRun(file, argv, { timeoutMs = 30000, env } = {}) {
 // the devicectl / simctl calls still running: ended when the server goes away
 export function killPending() { for (const c of pending) { try { c.kill("SIGKILL"); } catch { /* already gone */ } } pending.clear(); }
 
-// One devicectl call. Returns { ok: true, result } or { ok: false, error, message }.
-export async function devicectl(args, { run = defaultRun, timeoutMs = 30000 } = {}) {
+// One devicectl call. Returns { ok: true, result } or { ok: false, error, message }. beforeRun: the caller's last look
+// before devicectl starts, made after its temporary folder is; a result it returns is the answer, and devicectl is
+// not started.
+export async function devicectl(args, { run = defaultRun, timeoutMs = 30000, beforeRun } = {}) {
   let dir;
   try {
     dir = await mkdtemp(join(tmpdir(), "noracu-dc-"));           // 0700, ours alone
     const out = join(dir, "out.json");
+    const refused = beforeRun ? beforeRun() : null;
+    if (refused) return refused;
     const r = await run(XCRUN, ["devicectl", ...args, "--quiet", "--json-output", out], { timeoutMs });
     if (r.timedOut) return { ok: false, error: "devicectl_timeout", message: `devicectl ${args.slice(0, 3).join(" ")} gave no answer in ${timeoutMs} ms` };
     let doc = null;
@@ -131,7 +135,7 @@ export function bindAddressFor(device) {
   if (!device.developerMode) return { ok: false, error: "device_not_ready", message: "Developer Mode is off on the iPhone" };
   if (!device.tunnel || !device.tunnelIP) return { ok: false, error: "device_not_ready", message: "no CoreDevice tunnel to the iPhone (unlock it and check the cable or network)" };
   if (!net.isIPv6(device.tunnelIP)) return { ok: false, error: "device_not_ready", message: "the tunnel address is not an IPv6 address" };
-  // the CoreDevice tunnel's address is unique-local (fc00::/7); anything else would listen beyond it (review S4A-s7-grok-3)
+  // the CoreDevice tunnel's address is unique-local (fc00::/7); anything else would listen beyond it
   if (device.tunnelIP !== "::1" && !/^f[cd][0-9a-f]{0,2}:/i.test(device.tunnelIP)) return { ok: false, error: "device_not_ready", message: "the tunnel address is not a unique-local (fc00::/7) address" };
   return { ok: true, bind: device.tunnelIP };
 }
@@ -151,13 +155,15 @@ export async function launchApp(udid, bundleId, { terminateExisting = false, ...
   if (!validBundleId(bundleId)) return { ok: false, error: "invalid_args", message: "bundle_id is not a bundle identifier" };
   const r = await devicectl(["device", "process", "launch", "--device", udid, ...(terminateExisting ? ["--terminate-existing"] : []), bundleId], opts);
   if (!r.ok) return r;
-  return { ok: true, pid: r.result.process?.processIdentifier ?? null, activated: r.result.launchOptions?.activatedWhenStarted === true };  // never assumed (review S4A-s7-A-1)
+  return { ok: true, pid: r.result.process?.processIdentifier ?? null, activated: r.result.launchOptions?.activatedWhenStarted === true };  // never assumed
 }
 
 // The same for a simulator, which devicectl does not launch apps on: simctl, by exit code.
-export async function simLaunch(udid, bundleId, { terminateExisting = false, run = defaultRun, timeoutMs = 30000 } = {}) {
+export async function simLaunch(udid, bundleId, { terminateExisting = false, run = defaultRun, timeoutMs = 30000, beforeRun } = {}) {
   if (!isSimulatorUdid(udid)) return { ok: false, error: "invalid_args", message: "udid is not a simulator identifier" };
   if (!validBundleId(bundleId)) return { ok: false, error: "invalid_args", message: "bundle_id is not a bundle identifier" };
+  const refused = beforeRun ? beforeRun() : null;     // the caller's last look before simctl starts, as for devicectl
+  if (refused) return refused;
   const r = await run(XCRUN, ["simctl", "launch", ...(terminateExisting ? ["--terminate-running-process"] : []), udid, bundleId], { timeoutMs });
   if (r.timedOut) return { ok: false, error: "simctl_timeout", message: `simctl launch gave no answer in ${timeoutMs} ms` };
   if (r.code !== 0) return { ok: false, error: "simctl_failed", message: oneLine(r.stderr || r.stdout || `exit ${r.code}`) };
@@ -230,7 +236,7 @@ export function runnerSourceHash(dir = RUNNER_DIR) {
 }
 // What a runner must name to be used: the hash of this copy of its sources. The build line in them must say the
 // same — a change under ios-runner/ without scripts/gen-runner-build.mjs would otherwise build a runner that
-// passes for the one before it (pre-review P4).
+// passes for the one before it.
 export function expectedRunnerBuild(dir = RUNNER_DIR) {
   let hash;
   try { hash = runnerSourceHash(dir); } catch { return { ok: false, message: "this noracu's runner sources (ios-runner/) could not be read, so a runner cannot be checked against them" }; }
@@ -254,15 +260,17 @@ export function startRunner({ udid, xctestrun, bind, token = newToken(), port = 
   try { argv = xcodebuildArgv({ xctestrun, udid }); extra = runnerEnv({ token, bind, port }); }
   catch (e) { return Promise.resolve({ ok: false, error: "invalid_args", message: e.message }); }
   return new Promise((resolve) => {
-    let child, seen = "", settled = false, timer = null, exited = null;
+    let child, seen = "", settled = false, timer = null, exited = null, gone = false;
     // xcodebuild and what it started get a process group of their own (detached), so the whole group is
     // signalled; a child without one (a test's stand-in) is signalled alone
-    const signal = (sig) => { if (!child) return; try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* already gone */ } } };
+    // an xcodebuild that has exited is not signalled: its pid — and its group's — may be another process's by then
+    const signal = (sig) => { if (!child || gone) return; try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* already gone */ } } };
     const kill = () => { signal("SIGTERM"); const k = setTimeout(() => signal("SIGKILL"), 3000); k.unref?.(); };
     const finish = (v) => { if (settled) return; settled = true; clearTimeout(timer); if (!v.ok) kill(); resolve(v.ok || !exited ? v : { ...v, exited }); };
     try { child = spawnImpl(XCODEBUILD, argv, { env: { ...env, ...extra }, stdio: ["ignore", "pipe", "pipe"], detached: true }); }
     catch (e) { return finish({ ok: false, error: "runner_start_failed", message: oneLine(e && e.message) }); }
     exited = new Promise((res) => { child.once?.("exit", res); child.once?.("error", res); });
+    child.once?.("exit", () => { gone = true; });
     const onData = (chunk) => {
       if (settled) return;
       seen = (seen + String(chunk)).slice(-65536);
@@ -308,7 +316,14 @@ export class RunnerClient {
     this.sock = null; this.nextId = 1; this.pending = null; this.chunks = []; this.size = 0;
   }
 
-  close() { const s = this.sock; this.sock = null; this.chunks = []; this.size = 0; if (s) s.destroy(); }
+  // close() from outside (the session stopping the runner): a call in flight is answered now — it waited for its own
+  // timeout. Inside, a failure that answers the call itself drops the connection with _drop().
+  close() {
+    const p = this.pending;
+    this._drop();
+    if (p) p.settle({ ok: false, error: "runner_unreachable", message: "the connection to the runner was closed before it answered", delivery: p.sentBytes ? (INPUT_OPS.has(p.op) ? "unknown" : "not_applicable") : "not_delivered" });
+  }
+  _drop() { const s = this.sock; this.sock = null; this.chunks = []; this.size = 0; if (s) s.destroy(); }
 
   _connect() {
     return new Promise((resolve) => {
@@ -320,12 +335,14 @@ export class RunnerClient {
     });
   }
 
-  _fail(error, message) { const p = this.pending; this.close(); if (p) p.settle({ ok: false, error, message, delivery: p.sentBytes ? (INPUT_OPS.has(p.op) ? "unknown" : "not_applicable") : "not_delivered" }); }
+  _fail(error, message) { const p = this.pending; this._drop(); if (p) p.settle({ ok: false, error, message, delivery: p.sentBytes ? (INPUT_OPS.has(p.op) ? "unknown" : "not_applicable") : "not_delivered" }); }
   _onClose(s) { if (s !== this.sock) return; this._fail("runner_unreachable", "the connection to the runner closed before it answered"); }
 
   _onData(d) {
     let from = 0, nl;
     while ((nl = d.indexOf(10, from)) !== -1) {
+      // a whole line counts against the limit as a tail without a newline does
+      if (this.size + (nl - from) > this.maxAnswerBytes) return this._fail("runner_protocol", "the runner sent a line longer than the limit");
       this.chunks.push(d.subarray(from, nl));
       const line = Buffer.concat(this.chunks).toString("utf8");
       this.chunks = []; this.size = 0; from = nl + 1;
@@ -346,12 +363,14 @@ export class RunnerClient {
     const code = typeof msg.error === "string" && /^[a-z_]{1,40}$/.test(msg.error) ? msg.error : "runner_error";
     const input = INPUT_OPS.has(p.op);
     const delivery = !input ? "not_applicable" : (msg.sent === false || NOTHING_SENT.has(code)) ? "not_delivered" : "unknown";
-    if (code === "auth") this.close();
+    if (code === "auth") this._drop();
     p.settle({ ok: false, error: code, message: oneLine(msg.message), delivery });
   }
 
   // → { ok: true, result } | { ok: false, error, message, delivery: "not_delivered" | "unknown" | "not_applicable" }
-  async call(op, args = {}, { timeoutMs = 15000 } = {}) {
+  // beforeSend: the caller's last look before the command is written, made after the connection that may have to be
+  // opened first. A result it returns is the answer, and nothing is written.
+  async call(op, args = {}, { timeoutMs = 15000, beforeSend } = {}) {
     if (this.pending) return { ok: false, error: "runner_busy", message: "another runner call is in flight", delivery: "not_delivered" };
     const id = this.nextId++;
     const line = JSON.stringify({ id, token: this.token, op, args }) + "\n";
@@ -361,11 +380,13 @@ export class RunnerClient {
     const p = this.pending = { id, op, sentBytes: 0, settle: (v) => { if (this.pending === p) this.pending = null; clearTimeout(p.timer); settle(v); } };
     p.timer = setTimeout(() => {
       const delivery = p.sentBytes ? (INPUT_OPS.has(op) ? "unknown" : "not_applicable") : "not_delivered";
-      this.close();                                     // a late answer must not be read as the next call's
+      this._drop();                                     // a late answer must not be read as the next call's
       p.settle({ ok: false, error: "ios_timeout", message: `the runner did not answer ${op} in ${timeoutMs} ms`, delivery });
     }, timeoutMs);
     if (!this.sock && !(await this._connect())) { if (this.pending === p) p.settle({ ok: false, error: "runner_unreachable", message: "could not connect to the runner", delivery: "not_delivered" }); return done; }
     if (this.pending !== p) return done;                // timed out while connecting
+    const refused = beforeSend ? beforeSend() : null;
+    if (refused) { p.settle(refused); return done; }
     p.sentBytes = Buffer.byteLength(line);
     this.sock.write(line);
     return done;

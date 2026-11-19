@@ -122,7 +122,9 @@ def _save(path, sizes: dict) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         if len(sizes) > MAX_SIZES:  # keep the most recently written entries
-            newest = sorted(sizes, key=lambda k: max(sizes[k].get("measured_at", 0), sizes[k].get("untrusted_at", 0)))
+            # a time that is not a number (null in a file written by hand or cut short) counts as the oldest
+            num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+            newest = sorted(sizes, key=lambda k: max(num(sizes[k].get("measured_at")), num(sizes[k].get("untrusted_at"))))
             sizes = {k: sizes[k] for k in newest[-MAX_SIZES:]}
         tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps({"version": VERSION, "sizes": sizes}, indent=1) + "\n", encoding="utf-8")

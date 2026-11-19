@@ -89,7 +89,7 @@ export function makePhone() {
       if (phone.issueOnce === op) { phone.issueOnce = null; return no("xctest_issue", "recorded after an earlier command had answered: failed - late", INPUT_OPS.has(op) ? false : undefined); }
       if (phone.issue === op) return no("xctest_issue", "failed - Failed to synthesize event", INPUT_OPS.has(op) ? "unknown" : undefined);
       switch (op) {
-        case "front": return { ok: true, result: { home: phone.front === SPRINGBOARD, icons: phone.front === SPRINGBOARD ? 2 : 0, alerts: phone.alert ? [phone.alert.frame] : [], alert_buttons: phone.alert?.buttons?.length ?? 0, ms: 5 } };
+        case "front": return { ok: true, result: { home: phone.front === SPRINGBOARD || Boolean(phone.overlay), icons: phone.overlay ? 9 : phone.front === SPRINGBOARD ? 2 : 0, alerts: phone.alert ? [phone.alert.frame] : [], alert_buttons: phone.alert?.buttons?.length ?? 0, ms: 5 } };
         case "ping": return { ok: true, result: { v: 1, uptime_ms: 5, served: phone.log.length } };
         case "quit": phone.quit = true; return { ok: true, result: {} };
         case "app_state": {
@@ -151,7 +151,9 @@ export function makePhone() {
       return {
         closed: 0,
         close() { this.closed++; },
-        async call(op, args, { timeoutMs } = {}) {
+        async call(op, args, { timeoutMs, beforeSend } = {}) {
+          const refused = beforeSend ? beforeSend() : null;
+          if (refused) return refused;
           if (phone.hang === op || (phone.hangAfter?.op === op && phone.hangAfter.n-- <= 0)) { phone.log.push([op, args, "hung"]); return { ok: false, error: "ios_timeout", message: `the runner did not answer ${op} in ${timeoutMs} ms`, delivery: INPUT_OPS.has(op) ? "unknown" : "not_applicable" }; }
           const r = phone.handle(op, args);
           if (r.ok) return r;

@@ -39,6 +39,7 @@ function fakeRunner() {
           else if (req.op === "snapshot" && req.args.garbage) sock.write("this is not json\n");
           else if (req.op === "snapshot" && req.args.wrongId) sock.write(JSON.stringify({ id: req.id + 100, ok: true, result: {} }) + "\n");
           else if (req.op === "snapshot" && req.args.huge) sock.write("x".repeat(5000));          // no newline, over the test limit
+          else if (req.op === "snapshot" && req.args.hugeLine) send({ ok: true, result: { pad: "x".repeat(5000) } });  // a whole line over it
           else if (req.op === "snapshot" && req.args.split) { const s = JSON.stringify({ id: req.id, ok: true, result: { nodes: [{ label: "设置" }] } }) + "\n"; const b = Buffer.from(s); sock.write(b.subarray(0, 25)); setTimeout(() => sock.write(b.subarray(25)), 30); }
           else if (req.op === "odd") send({ ok: false, error: "Not A Code!", message: "x" });
           else send({ ok: true, result: {} });
@@ -78,6 +79,15 @@ const client = (extra = {}) => new RunnerClient({ host: "127.0.0.1", port: PORT,
   const after = await c.call("ping");
   ok(after.ok, "the next call works on a fresh connection", after);
 
+  // close() while a call is in flight answers it at once (it used to wait for its own timeout)
+  const t1 = Date.now();
+  const inflight = c.call("tap", { silent: true }, { timeoutMs: 5000 });
+  await new Promise((r) => setTimeout(r, 100));
+  c.close();
+  const closed = await inflight;
+  ok(!closed.ok && closed.error === "runner_unreachable" && closed.delivery === "unknown" && Date.now() - t1 < 1500, "close() answers the call in flight at once, delivery unknown for an input that went out", { closed, ms: Date.now() - t1 });
+  ok((await c.call("ping")).ok, "the next call after close() works on a fresh connection");
+
   const late = await c.call("tap", { late: true }, { timeoutMs: 100 });
   const next = await c.call("ping");
   await new Promise((r) => setTimeout(r, 350));
@@ -94,6 +104,10 @@ const client = (extra = {}) => new RunnerClient({ host: "127.0.0.1", port: PORT,
   const huge = await small.call("snapshot", { huge: true }, { timeoutMs: 2000 });
   ok(!huge.ok && huge.error === "runner_protocol", "an answer longer than the limit ends the connection", huge);
   small.close();
+  const small2 = client({ maxAnswerBytes: 1000 });
+  const line = await small2.call("snapshot", { hugeLine: true }, { timeoutMs: 2000 });
+  ok(!line.ok && line.error === "runner_protocol", "a whole line longer than the limit, newline and all, ends the connection too", line);
+  small2.close();
 
   const [a, b] = await Promise.all([c.call("tap", { late: true }, { timeoutMs: 2000 }), c.call("ping")]);
   ok(a.ok && !b.ok && b.error === "runner_busy" && b.delivery === "not_delivered", "a second call while one is in flight is refused, not queued behind it", { a, b });
@@ -156,6 +170,12 @@ const client = (extra = {}) => new RunnerClient({ host: "127.0.0.1", port: PORT,
   s.r.stop();
   ok(s.child.killed[0] === "SIGTERM", "stop() ends xcodebuild");
   ok(s.spawned.detached === true, "xcodebuild is given a process group of its own, whoever spawns it", s.spawned.detached);
+  // xcodebuild that has already exited is not signalled when the runner is stopped (or 3 s later)
+  s = await start((c) => c.stdout.emit("data", `NORACU_RUNNER ready v=1 port=50123 build=${BUILD}\n`));
+  s.child.emit("exit", 0);
+  s.r.stop();
+  await new Promise((r) => setTimeout(r, 20));
+  ok(s.r.ok && s.child.killed.length === 0, "stop() after xcodebuild has exited sends it no signal", s.child.killed);
   s = await start((c) => c.stdout.emit("data", "NORACU_RUNNER ready v=1 port=50123 build=0123456789ab\n"));
   ok(!s.r.ok && s.r.error === "runner_version_mismatch" && s.r.stale === true && /is build 0123456789ab, this noracu's is [0-9a-f]{12} — run the iOS set-up again/.test(s.r.message) && s.child.killed[0] === "SIGTERM", "a runner built from other sources is not used, and is stopped", s.r);
   s = await start((c) => c.stdout.emit("data", "NORACU_RUNNER ready v=1 port=50123\n"));
@@ -195,6 +215,18 @@ const client = (extra = {}) => new RunnerClient({ host: "127.0.0.1", port: PORT,
   ok(PROTOCOL_VERSION === 1, "protocol version");
 }
 
+// beforeSend: the caller's last look, after the connection is open and right before the command is written — its
+// answer stands and nothing is written (a fresh client connects first)
+{
+  const c = client();
+  const n0 = seen.length;
+  const stopped = await c.call("tap", { x: 1, y: 1 }, { beforeSend: () => ({ ok: false, error: "user_stopped", message: "stop", delivery: "not_delivered" }) });
+  const go = await c.call("ping", {}, { beforeSend: () => null });
+  ok(stopped.error === "user_stopped" && stopped.delivery === "not_delivered" && seen.slice(n0).join() === "ping" && go.ok,
+    "beforeSend: looked at after connecting, right before the write — its refusal is the answer and nothing is written; null lets the command go", { stopped, seen: seen.slice(n0) });
+  c.close();
+}
+
 // ---------- devicectl: JSON files only, argv only ----------
 {
   const calls = [];
@@ -223,7 +255,7 @@ const client = (extra = {}) => new RunnerClient({ host: "127.0.0.1", port: PORT,
   not((d) => { d.deviceProperties.developerModeStatus = "disabled"; }, /Developer Mode/);
   not((d) => { d.connectionProperties.tunnelState = "disconnected"; }, /tunnel/);
   not((d) => { d.connectionProperties.tunnelIPAddress = "192.168.80.90"; }, /IPv6/);
-  not((d) => { d.connectionProperties.tunnelIPAddress = "2001:db8::5"; }, /unique-local/);   // S4A-s7-grok-3: a global address listens beyond the tunnel
+  not((d) => { d.connectionProperties.tunnelIPAddress = "2001:db8::5"; }, /unique-local/);   // a global address listens beyond the tunnel
   not((d) => { d.connectionProperties.tunnelIPAddress = "fe80::1"; }, /unique-local/);
   ok(bindAddressFor(null).error === "device_not_found", "no device");
 
@@ -242,6 +274,11 @@ const client = (extra = {}) => new RunnerClient({ host: "127.0.0.1", port: PORT,
   ok(launched.ok && launched.pid === 812 && launched.activated && !calls.at(-1).argv.includes("--terminate-existing") && calls.at(-1).argv.at(-4) === "com.apple.Preferences", "launch: bundle id is the last devicectl argument before the output options; a running app is not terminated", calls.at(-1).argv);
   const relaunch = await launchApp(UDID, "com.apple.Preferences", { terminateExisting: true, run: fake(okDoc({ process: {} })) });
   ok(relaunch.ok && calls.at(-1).argv.includes("--terminate-existing"), "terminateExisting is explicit");
+  const n1 = calls.length;
+  const held = await launchApp(UDID, "com.apple.Preferences", { terminateExisting: true, run: fake(okDoc({})), beforeRun: () => ({ ok: false, error: "user_stopped", stopped: "user_stopped: x" }) });
+  const heldSim = await ios.simLaunch(SIM, "com.apple.Preferences", { run: fake(undefined), beforeRun: () => ({ ok: false, error: "user_stopped", stopped: "user_stopped: x" }) });
+  ok(held.stopped === "user_stopped: x" && heldSim.stopped === "user_stopped: x" && calls.length === n1,
+    "beforeRun: looked at right before devicectl / simctl starts (after devicectl's temporary folder is made) — its answer stands and nothing is started", { held, heldSim });
   const n0 = calls.length;
   const badBundle = await launchApp(UDID, "--payload-url=x", { run: fake(okDoc({})) });
   const badUdid = await launchApp("phone; open -a Calculator", "com.apple.Preferences", { run: fake(okDoc({})) });

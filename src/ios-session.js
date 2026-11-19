@@ -35,20 +35,20 @@ const stateName = (n) => STATE_NAMES[n] ?? "unknown";
 // What the two reads of an app's text fields say about text that was typed. `before` is null when the fields could
 // not be read before the text went in. A field "of mine" is one like the tapped field when one was tapped (same
 // type, identifier and label), any field otherwise. A field "gained" the text when its new value is its old value
-// with the text put in at one place ("hell" turning into "hello" is one letter arriving, not "hello": pre-review
-// P3) and neither value came back cut.
+// with the text put in at one place ("hell" turning into "hello" is one letter arriving, not "hello")
+// and neither value came back cut.
 //   "shown"        one field was singled out and gained the text: the tapped one, when it is the only one of its
 //                  kind in both reads and its value changed; otherwise, when both reads list the same fields, the
 //                  only field of mine whose value changed. What other fields did does not matter then.
 //   "cut"          that one field did not gain the text as far as its value was read, but the value came back
-//                  cut and was not cut before: the text could not be looked for in all of it (pre-review P15).
+//                  cut and was not cut before: the text could not be looked for in all of it.
 //                  A field whose value reads the same but came back cut, when it was not before, has changed
-//                  too: what was added is past where the read stops (pre-review P16). The other way round — cut
-//                  before, whole now, the same value — is no change: nothing was added (pre-review P17-Grok-1).
+//                  too: what was added is past where the read stops. The other way round — cut
+//                  before, whole now, the same value — is no change: nothing was added.
 //   "placeholder"  no field at all changed — or the fields were not read before, and none of mine holds the text —
 //                  and a field of mine reads empty with the text as its own placeholder: such a field reads the
 //                  same whether or not it took the text. Only a field that did not change can be that field: one
-//                  that had a value and reads empty now did not gain the text (pre-review P13).
+//                  that had a value and reads empty now did not gain the text.
 //   "unread"       not read before, and a field of mine has the text in its value or came back cut (any field, when
 //                  none of mine is listed): there is nothing to compare it with.
 //   "moved"        the two reads do not list the same fields (one appeared, went away, or changed its label), and
@@ -57,9 +57,9 @@ const stateName = (n) => STATE_NAMES[n] ?? "unknown";
 //                  before.
 //   "several"      the same fields, more than one of mine changed, and one of those gained the text, or came back
 //                  cut and was not cut before: it arrived, or may have, and was not tied to one field. A field
-//                  that is cut in both reads says nothing new (pre-review P14).
+//                  that is cut in both reads says nothing new.
 //   "mismatch"     everything else: the reads were compared and do not show the text arriving.
-// The text in a field that did not change proves nothing, wherever it is (pre-reviews P12, P13), and neither does
+// The text in a field that did not change proves nothing, wherever it is, and neither does
 // a field that is not mine.
 export function fieldShows(before, after, text, key) {
   const mine = (f) => !key || f.key === key;
@@ -103,6 +103,9 @@ export function fieldShows(before, after, text, key) {
 export function createIosSession({
   env = process.env, api = iosApi, approve = () => null, springboardDenied = () => false, spawnImpl, onChild = () => {},
   now = Date.now, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), runnerDir,
+  // the person's brake (NORACU_STOP_FILE): its refusal line, or null — looked at again where a read before an input
+  // can take seconds after the queue's own check
+  stopCheck = () => null,
 } = {}) {
   const dir = runnerDir || env.NORACU_IOS_RUNNER_DIR || join(homedir(), ".noracu", "ios-runner");
   const readOnly = env.NORACU_READ_ONLY === "1";
@@ -113,6 +116,10 @@ export function createIosSession({
   let starting = null;  // the start in flight, shared by calls that arrive meanwhile
   let suspect = false;  // the last call got no answer: ask for a sign of life before the next one
   let current = null;   // the app the last call named
+  // the app (not the Home Screen) this session last launched, acted on or read in front: a later call that names
+  // com.apple.springboard — a snapshot of the Home Screen, text typed there — does not change it, so the look before
+  // an input named for the Home Screen still asks whether that app is in front
+  let brought = null;
   let epoch = 0;        // goes up when a call changes what is in front; indexes of an older epoch are dead
   let nextIndex = 1, snapSeq = 0;
   const items = new Map();  // element_index → { snapshot_id, bundle, type, label, id, frame, ts, epoch }
@@ -146,8 +153,8 @@ export function createIosSession({
     trackExit(r.exited);
   }
   // A runner that was stopped (or a start that failed) is remembered until its xcodebuild has really exited, not
-  // for a fixed time: each start waits up to STOP_WAIT_MS for it and is refused while it is still there. (Pre-review
-  // P3: the first refusal used to forget it, so the start after that ran a second test session on the device; and
+  // for a fixed time: each start waits up to STOP_WAIT_MS for it and is refused while it is still there. (The
+  // first refusal used to forget it, so the start after that ran a second test session on the device; and
   // an exit that came late was still held against a start made minutes afterwards.)
   function trackExit(exited) {
     if (!exited) return;
@@ -155,13 +162,13 @@ export function createIosSession({
     stopping = p;
   }
 
-  // The lock (pre-review P1). gate() reads it before every input, as before. On top of that no runner op that
+  // The lock. gate() reads it before every input, as before. On top of that no runner op that
   // touches or shows the screen goes out on an "unlocked" answer older than a second: typing after the tap that
   // focuses the field reads it again, and so does a snapshot or screenshot on its own — a locked phone's screen
   // shows its notifications, so it is not read either. A tap right after its gate costs no second read.
   const LOCK_FRESH_MS = 1000;
   const STOP_WAIT_MS = 4000;
-  // app_state too: a locked phone's answer to "is it in front" is not read as one (review S4A-s6-grok-2)
+  // app_state too: a locked phone's answer to "is it in front" is not read as one
   const NEEDS_UNLOCKED = new Set(["snapshot", "screenshot", "app_state", "tap", "press", "drag", "type", "keys", "home"]);
   const INPUT_OPS = new Set(["tap", "press", "drag", "type", "keys", "home"]);
   let lockOkAt = -Infinity;
@@ -229,37 +236,139 @@ export function createIosSession({
   }
 
   // the runner that is up, asked for a sign of life when in doubt — never a new one
-  async function liveRunner() {
+  async function liveRunner(why = "the runner stopped before the input went out (input never starts one)") {
     if (runner && suspect) {
       const p = await runner.client.call("ping", {}, { timeoutMs: 5000 });
       if (p.ok) suspect = false; else stopRunner();
     }
-    return runner ? { ok: true } : { ok: false, error: "runner_unreachable", message: "the runner stopped before the input went out (input never starts one)" };
+    return runner ? { ok: true } : { ok: false, error: "runner_unreachable", message: why };
   }
+  // A read a tool makes inside its own call — the element read again before the input, the text fields around the
+  // typed text, the state of the app it launched or left — does not start a runner either: a runner that starts puts
+  // its own app in front of the screen the call is about. The read answers that the runner stopped; the next call
+  // that asks for the iPhone starts it.
+  const IN_CALL = "the runner stopped during this call, and a read inside the call does not start it again (a starting runner puts its own app in front of what the iPhone shows)";
 
   // an xctest_issue that an internal read met and the tool has not reported yet
   const takeHeld = () => { const h = heldIssue; heldIssue = null; return h; };
 
-  async function rcall(op, args, timeoutMs) {
+  async function rcall(op, args, timeoutMs, { inCall = false } = {}) {
     // Safety net: a failure XCTest recorded that an internal read was answered with, and that the tool which made
     // the read did not report itself, is not lost — the next input is not sent, and reports it. No runner is
     // started for that.
     if (heldIssue && INPUT_OPS.has(op)) { const h = takeHeld(); return { ok: false, error: "xctest_issue", message: h.message, delivery: "not_delivered" }; }
     // input never starts a runner: a runner that starts puts its own app in front, under the points and the focus the
-    // input was made for — only the gate (before anything is read for the call) may start one (review S4A-s6-gemini-1)
-    const up = INPUT_OPS.has(op) ? await liveRunner() : await ensureRunner();
+    // input was made for — only the gate (before anything is read for the call) may start one; a read inside a call
+    // (inCall) does not start one either
+    const up = INPUT_OPS.has(op) ? await liveRunner() : inCall ? await liveRunner(IN_CALL) : await ensureRunner();
     const cur = runner;
     if (!up.ok || !cur) return { ok: false, error: up.ok ? "runner_unreachable" : (up.error || "runner_unreachable"), message: up.ok ? "the runner stopped" : (up.message || "the runner stopped"), delivery: "not_delivered" };
     if (NEEDS_UNLOCKED.has(op)) {
       const l = await lockRefusal(false);
       if (l) return { ok: false, error: l.error, message: l.message, delivery: "not_delivered" };
     }
-    const r = await cur.client.call(op, args, { timeoutMs });
+    // An app that reports itself in front can be covered by something of SpringBoard's own that is not an alert:
+    // Control Center pulled down over it. The app's state stays "running in the foreground" and it is read as
+    // usual, but a tap goes to Control Center (seen on a device: the tap closed it; on a control it would have
+    // switched it). With an app in front SpringBoard shows no icons; with Control Center over it (or with the
+    // Home Screen) it does, and the runner's `front` says so. Then nothing is sent — nor when SpringBoard cannot
+    // be read. An app that is not in front is left to the runner's own refusal.
+    // An input named for the Home Screen. com.apple.springboard always reads "running in the foreground", also
+    // while an app — or Spotlight, a process of its own — is what the iPhone shows: after ios_home another app can
+    // come forward (a call, the person opening one), the runner does not look for that under this name, and the
+    // tap would land in that app. So SpringBoard is looked at first: the Home Screen's pages, Today View and the
+    // App Library show icons (on a device: 5 to 40 of them), an app or Spotlight in front shows none. With no icon
+    // showing, the input goes to the runner as `springboard_only`: one tap on a button of a system alert is sent,
+    // anything else is refused there. Icons can still be on their way in right after ios_home, so with neither an
+    // icon nor an alert showing SpringBoard is looked at again, up to four times over 1.6 s.
+    let homeCovered = false;
+    if (INPUT_OPS.has(op) && op !== "home" && args && args.bundle_id === SPRINGBOARD && args.springboard_only !== true) {
+      const bare = (x) => x.ok && x.result?.home !== true && !(x.result?.icons > 0);
+      const alerted = (x) => x.ok && x.result?.alerts?.length > 0;
+      // The app this session last launched, acted on or read in front still reads as in front: then the Home Screen
+      // is not what the iPhone shows, whatever SpringBoard still draws — an icon can stay for a moment after an app
+      // came forward (seen on a device right after ios_launch), and Control Center over the app shows icons as well.
+      // The input is held to the same rule without looking for icons. A call that named the Home Screen in between
+      // (a snapshot of it, this very input) does not change which app that is. A state that cannot be read is a
+      // failed look, as the look at SpringBoard below: a failure XCTest recorded ends the session, no answer or a
+      // broken one makes the next call ask for a sign of life first, and the input is not sent.
+      const failedLook = (x, what) => {
+        if (x.error === "xctest_issue") { if (runner === cur) stopRunner(); }
+        else if (["ios_timeout", "runner_unreachable", "runner_protocol"].includes(x.error)) suspect = true;
+        return { ok: false, error: x.error || "app_not_foreground", message: `${x.message || "the runner did not answer"} (while looking, before the input, at ${what} — the input was not sent)`, delivery: "not_delivered" };
+      };
+      let appFront = false;
+      if (brought) {
+        const st = await cur.client.call("app_state", { bundle_id: brought }, { timeoutMs: 10000 });
+        if (runner !== cur) return { ok: false, error: "runner_unreachable", message: "the runner stopped", delivery: "not_delivered" };
+        if (!st.ok) return failedLook(st, `whether ${brought}, the app this session brought forward, is still in front`);
+        appFront = st.result?.state === FOREGROUND;
+      }
+      if (appFront) { args = { ...args, springboard_only: true }; homeCovered = true; }
+      else {
+        let f = await cur.client.call("front", {}, { timeoutMs: 10000 });
+        if (runner !== cur) return { ok: false, error: "runner_unreachable", message: "the runner stopped", delivery: "not_delivered" };
+        for (let i = 0; i < 4 && bare(f) && !alerted(f); i++) {
+          await sleep(400);
+          f = await cur.client.call("front", {}, { timeoutMs: 10000 });
+          if (runner !== cur) return { ok: false, error: "runner_unreachable", message: "the runner stopped", delivery: "not_delivered" };
+        }
+        if (!f.ok) return failedLook(f, "whether the Home Screen is what the iPhone is showing");
+        if (bare(f)) { args = { ...args, springboard_only: true }; homeCovered = true; }
+      }
+    }
+    if (INPUT_OPS.has(op) && op !== "home" && args && args.bundle_id && args.bundle_id !== SPRINGBOARD) {
+      const showsIcons = (x) => x.ok && (x.result?.home === true || x.result?.icons > 0);
+      let f = await cur.client.call("front", {}, { timeoutMs: 10000 });
+      if (runner !== cur) return { ok: false, error: "runner_unreachable", message: "the runner stopped", delivery: "not_delivered" };
+      // an app that has just come to the front: the Home Screen's icons can still be on their way out (seen on a
+      // device right after ios_launch: one icon was still there at once, none 1.5 s later) — looked at again, up to
+      // four times over 1.6 s, before anything is refused
+      for (let i = 0; i < 4 && showsIcons(f); i++) {
+        await sleep(400);
+        f = await cur.client.call("front", {}, { timeoutMs: 10000 });
+        if (runner !== cur) return { ok: false, error: "runner_unreachable", message: "the runner stopped", delivery: "not_delivered" };
+      }
+      // A read made for this check that fails is a failed call like any other (see below): a failure XCTest recorded
+      // ends the session, no answer or a broken one makes the next call ask for a sign of life first. The input is
+      // not sent, and the answer carries the failure's own name — no overlay was seen.
+      const unread = (x) => {
+        if (x.error === "xctest_issue") { if (runner === cur) stopRunner(); }
+        else if (["ios_timeout", "runner_unreachable", "runner_protocol"].includes(x.error)) suspect = true;
+        return { ok: false, error: x.error || "system_overlay", message: `${x.message || "the runner did not answer"} (while looking, before the input, at what the iPhone itself is showing over the app — the input was not sent)`, delivery: "not_delivered" };
+      };
+      if (!f.ok) return unread(f);
+      if (showsIcons(f)) {
+        const st = await cur.client.call("app_state", { bundle_id: args.bundle_id }, { timeoutMs: 10000 });
+        if (runner !== cur) return { ok: false, error: "runner_unreachable", message: "the runner stopped", delivery: "not_delivered" };
+        if (!st.ok) return unread(st);
+        if (st.result?.state === 4) return { ok: false, error: "system_overlay", message: "the iPhone is showing something of its own over the app (Control Center pulled down, or the Home Screen while an app is still coming forward) — nothing was sent; look again with ios_snapshot in a moment, and if it is still there, ios_home closes it but leaves the app for the Home Screen (ios_launch brings the app back)", delivery: "not_delivered" };
+      }
+    }
+    // The reads above can take seconds after the queue looked at the stop file and the gate at the lock (SpringBoard
+    // looked at up to four times over 1.6 s, each read with its own 10 s limit): right before an input goes out,
+    // the lock is read again when its last "unlocked" answer is older than a second, and the stop file is looked at
+    // again last — by the client, right before it writes the command, after the connection it may first have to
+    // open (up to 5 s; a runner just started has none). Nothing is waited for between that look and the write.
+    // ios_type's text after its tap is refused the same way; ios_type then says the field was tapped.
+    if (INPUT_OPS.has(op)) {
+      const l = await lockRefusal(false);
+      if (runner !== cur) return { ok: false, error: "runner_unreachable", message: "the runner stopped", delivery: "not_delivered" };
+      if (l) return { ok: false, error: l.error, message: l.message, delivery: "not_delivered" };
+    }
+    const beforeSend = INPUT_OPS.has(op) ? () => {
+      const stop = stopCheck();
+      if (!stop) return null;
+      const m = /^(\w+): ([\s\S]*)$/.exec(stop) || [null, "user_stopped", stop];
+      return { ok: false, error: m[1], message: m[2].replace(/\s*[—;,]?\s*nothing was sent \((?:fail closed; )?delivery=not_delivered, retry=safe\)/, ""), delivery: "not_delivered" };
+    } : undefined;
+    let r = await cur.client.call(op, args, { timeoutMs, beforeSend });
+    if (homeCovered && !r.ok && r.error === "app_not_foreground") r = { ...r, message: "the Home Screen is not what the iPhone is showing: an app or Spotlight is in front, and under com.apple.springboard only one tap on a button of a system alert is sent there — name the app that is in front (ios_snapshot with its bundle_id), or go to the Home Screen with ios_home", plain: true };
     // An input that got no answer may still be waiting inside the test session: the session ends now, so the
-    // gesture cannot go out later (pre-review P1; the protocol always said so). Any failure XCTest recorded ends it
+    // gesture cannot go out later (the protocol always said so). Any failure XCTest recorded ends it
     // as well, whichever command was answered with it — an input, a read, or the next command after a late one:
-    // what state the test session is in is then not known, and a ping answers from the socket alone (pre-review
-    // P3 and P4). A read that got no answer only makes the next call ask for a sign of life first.
+    // what state the test session is in is then not known, and a ping answers from the socket alone.
+    // A read that got no answer only makes the next call ask for a sign of life first.
     const ends = !r.ok && (r.error === "xctest_issue" || (r.error === "ios_timeout" && INPUT_OPS.has(op)));
     if (ends) { if (runner === cur) stopRunner(); }
     else if (!r.ok && ["ios_timeout", "runner_unreachable", "runner_protocol"].includes(r.error)) suspect = true;
@@ -275,29 +384,30 @@ export function createIosSession({
     if (!up.ok || !runner) return { error: `${up.ok ? "runner_unreachable" : up.error}: ${up.ok ? "the runner stopped" : up.message} ${NOT_SENT}` };
     const l = await lockRefusal(true);
     if (l) return { error: `${l.error}: ${l.message} ${NOT_SENT}` };
-    // the runner can exit while the lock is read (review S4A-s6-gemini-1)
+    // the runner can exit while the lock is read
     if (!runner) return { error: `runner_unreachable: the runner stopped ${NOT_SENT}` };
     return null;
   }
   // a runner started during this call: it put its own app in front, so the points and the focus the call was made for
-  // are gone (review S4A-s6-grok-3). Input given as points or as the focus (no element_index) is refused whenever the
+  // are gone. Input given as points or as the focus (no element_index) is refused whenever the
   // gate or a read started a runner during the call, whatever app it names — the runner's own "not in front" check
   // depends on how fast the app comes back, so it is not relied on. An element_index of an older epoch is stale.
   const restarted = () => ({ error: `runner_restarted: the runner started during this call, which puts its own app in front — the screen the points or the focus were meant for is gone; look again (ios_snapshot) ${NOT_SENT}` });
   const HINTS = {
     app_not_foreground: " — the app is not in front; call ios_launch first",
     app_not_running: " — the app is not running; call ios_launch first",
-    system_alert: " — a system prompt is up on the iPhone; the person answers it there (noracu does not send input while one is up)",
+    // device run 2026-11-15: the refusal did not say which prompt was up, so the agent could not tell the person what to answer
+    system_alert: " — a system prompt is up on the iPhone; the person answers it there (noracu does not send input while one is up); look at it with ios_screenshot to tell them what it asks",
     no_keyboard: " — no keyboard is up; tap a text field first (ios_type with element_index does that)",
     ios_timeout: " — look before acting again (ios_snapshot)",
     xctest_issue: " — XCTest reported a failure while the command ran; look before acting again (ios_snapshot)",
   };
   // While app rules are in force, no input that names com.apple.springboard is sent — not even one tap on a
-  // button of a system prompt (next-steps R4, 2026-11-12). SpringBoard reads "in front" under every app, so a
+  // button of a system prompt (2026-11-12). SpringBoard reads "in front" under every app, so a
   // point named for it lands on whatever app is in front (one the rules may not allow), a tap on a Home Screen
   // icon opens an app no rule was asked about (ios_launch is the way that asks), and text goes wherever the
   // keyboard focus is. ios_home is not input named for SpringBoard and still goes out.
-  // The refusal comes before the gate (pre-review P5): the gate can start a runner, and a starting runner puts
+  // The refusal comes before the gate: the gate can start a runner, and a starting runner puts
   // its own app in front of what the iPhone was showing — a refusal that says nothing was sent must change
   // nothing either. The app rule is asked first and answers in its own words.
   const sbNever = (bundle) => {
@@ -306,8 +416,8 @@ export function createIosSession({
     return { error: denied || `input_denied: input that names com.apple.springboard (the Home Screen) is not sent while app rules are in force (NORACU_APPROVAL_FILE or NORACU_DENY_APPS) — not even one tap on a system prompt's button; open apps with ios_launch, go home with ios_home ${NOT_SENT}` };
   };
   // system_alert comes with two messages: an alert is up, or SpringBoard could not be read so one could not be ruled
-  // out — only the first is told "a system prompt is up" (review S4B-s8-new-1, S4D)
-  const hint = (r) => (r.error === "system_alert" && /could not be (read|ruled out)/.test(r.message || "")
+  // out — only the first is told "a system prompt is up"
+  const hint = (r) => (r.plain ? "" : r.error === "system_alert" && /could not be (read|ruled out)/.test(r.message || "")
     ? " — noracu could not tell whether a system prompt is up on the iPhone; look at it (ios_screenshot) before acting again"
     : HINTS[r.error] || "");
   const inputError = (r) => ({ error: `${r.error}: ${r.message || "the runner refused"}${hint(r)} ${r.delivery === "not_delivered" ? NOT_SENT : UNKNOWN}` });
@@ -328,7 +438,7 @@ export function createIosSession({
     ({ error: `element_no_longer_valid: element_index ${idx} — ${why}; take a new ios_snapshot ${NOT_SENT}` });
   // Read the app again and find the very element: same type, label, identifier and frame (2 pt), app in front.
   async function recheck(idx, it) {
-    const r = await rcall("snapshot", { bundle_id: it.bundle, max_nodes: 1000 }, 30000);
+    const r = await rcall("snapshot", { bundle_id: it.bundle, max_nodes: 1000 }, 30000, { inCall: true });
     if (!r.ok) return { error: inputError({ ...r, delivery: "not_delivered" }).error };
     const res = r.result;
     if (it.bundle !== SPRINGBOARD && res.state !== FOREGROUND) return stale(idx, `${it.bundle} is no longer in front`);
@@ -343,7 +453,7 @@ export function createIosSession({
   }
   // the app's text inputs, for the read-back after typing: [{ key, value, cut }]; null when the app cannot be read
   async function textFields(bundle) {
-    const r = await rcall("snapshot", { bundle_id: bundle, max_nodes: 1000 }, 30000);
+    const r = await rcall("snapshot", { bundle_id: bundle, max_nodes: 1000 }, 30000, { inCall: true });
     if (!r.ok) { if (r.error === "xctest_issue") heldIssue = r; return null; }
     if (r.result.truncated === true) return null;   // fields past the limit were not read: nothing can be paired
     return (r.result.nodes || []).filter((n) => TEXTY.has(n.type) && typeof n.value === "string")
@@ -354,11 +464,11 @@ export function createIosSession({
     const end = now() + ms;
     let st = null;
     for (;;) {
-      const r = await rcall("app_state", { bundle_id: bundle }, 10000);
+      const r = await rcall("app_state", { bundle_id: bundle }, 10000, { inCall: true });
       if (!r.ok) { if (r.error === "xctest_issue") heldIssue = r; return { ok: false, st, failed: true }; }
       st = r.result.state;
       // "left the front" is a state seen as not running, suspended or in the background — never unknown (0) or no
-      // state at all (review S4A-s6-grok-1)
+      // state at all
       if (want ? st === FOREGROUND : [1, 2, 3].includes(st)) return { ok: true, st };
       if (now() >= end) return { ok: false, st };
       await sleep(300);
@@ -393,21 +503,30 @@ export function createIosSession({
       // the runner first: starting it puts its own app in front, which would cover an app launched before it
       const g = await gate(bundle, "launch");
       if (g) return g;
-      const d = runner.device, opts = { terminateExisting: a.terminate_existing === true };
+      // the gate can take seconds after the queue looked at the stop file (starting the runner, reading the lock): the
+      // stop file is looked at again last, right before devicectl / simctl starts (after devicectl's temporary
+      // folder is made) — the launch, which with terminate_existing also stops the running app
+      const beforeRun = () => { const stop = stopCheck(); return stop ? { ok: false, error: "user_stopped", stopped: stop } : null; };
+      const d = runner.device, opts = { terminateExisting: a.terminate_existing === true, beforeRun };
       const r = d.simulated ? await api.simLaunch(d.udid, bundle, opts) : await api.launchApp(d.udid, bundle, opts);
+      if (r.stopped) return { error: r.stopped };
       if (!r.ok) {
         const late = /timeout/.test(r.error);
+        // a launch that timed out may still have gone through, and one with terminate_existing may have stopped the
+        // running app: either changes what is in front, so the indexes read before it are dead, as after a launch that worked
+        if (late || opts.terminateExisting) epoch++;
         // with terminate_existing the running app may already have been stopped when the launch failed
         return { error: `${late ? r.error : "launch_failed"}: ${r.message} ${opts.terminateExisting ? "— the running app may already have been stopped (delivery=unknown, retry=unsafe)" : late ? "(delivery=unknown, retry=safe)" : NOT_SENT}` };
       }
       epoch++; current = bundle;
+      if (bundle !== SPRINGBOARD) brought = bundle;
       // the launch went out: asking again with terminate_existing would stop the app that was just started
       const again = opts.terminateExisting ? "unsafe" : "safe";
       const w = await waitState(bundle, true, 10000);
       if (heldIssue) { const h = takeHeld(); return { error: `xctest_issue: ${h.message || "XCTest recorded a failure"}${HINTS.xctest_issue} — ${bundle} was started; whether it is in front was not read (delivery=delivered_unverified, retry=${again})` }; }
       if (w.ok) return { text: `launched ${bundle} — it is in front (delivery=delivered_verified, retry=${again})` };
       // a read of the app's state failed (with no failure of XCTest's behind it), so the 10 s were not waited
-      // out: the result says what was read, not "not in front after 10 s" (pre-review P8)
+      // out: the result says what was read, not "not in front after 10 s"
       if (w.failed) return { error: `launch_not_confirmed: ${bundle} was started; ${w.st === null ? "whether it is in front could not be read" : `it was not in front when its state was last read (state ${stateName(w.st)}), and the read after that failed`} — look with ios_screenshot (delivery=delivered_unverified, retry=${again})` };
       return { error: `launch_not_confirmed: ${bundle} was started but is not in front after 10 s (state ${stateName(w.st)}) — a system prompt may be covering it; look with ios_screenshot (delivery=delivered_unverified, retry=${again})` };
     },
@@ -437,6 +556,7 @@ export function createIosSession({
       });
       while (items.size > ITEMS_KEPT) items.delete(items.keys().next().value);
       current = p.bundle;
+      if (p.bundle !== SPRINGBOARD && res.state === FOREGROUND) brought = p.bundle;
       const out = { bundle_id: p.bundle, snapshot_id, state: stateName(res.state), screen: res.screen, count: elements.length, truncated: Boolean(res.truncated) || cut, elements };
       if (p.bundle !== SPRINGBOARD && res.state !== FOREGROUND) out.note = "this app is not in front: its elements cannot be acted on until ios_launch brings it forward";
       return { text: JSON.stringify(out) };
@@ -476,6 +596,7 @@ export function createIosSession({
         : await rcall("tap", { bundle_id: bundle, x, y, ...(a.count > 1 ? { count: a.count } : {}) }, 20000);
       if (!r.ok) return inputError(r);
       current = bundle;
+      if (bundle !== SPRINGBOARD) brought = bundle;
       return { text: `${press ? `pressed ${a.duration_ms} ms on` : a.count > 1 ? `tapped ×${a.count}` : "tapped"} ${what} at (${x}, ${y}) in ${bundle} — sent; the screen is not checked ${UNVERIFIED}` };
     },
 
@@ -486,6 +607,10 @@ export function createIosSession({
         if (!it) return stale(a.element_index);
         const n = sbNever(it.bundle);   // before the gate, and before the tap that would focus: nothing is sent, no runner is started
         if (n) return n;
+        // only a text input is tapped to take the text: the index of a button or a row would be tapped as what
+        // it is — a real press on it — and the text would then go to whatever holds the keyboard. Before the
+        // gate: nothing is asked for an input that is not going to be sent.
+        if (!TEXTY.has(it.type) && it.type !== "secureTextField") return { error: `not_a_text_field: element_index ${a.element_index} is a ${it.type}${it.label ? ` (${JSON.stringify(String(it.label).slice(0, 40))})` : ""}, not a text field — nothing was tapped or typed; tap what brings the keyboard up with ios_tap, then call ios_type without element_index (delivery=not_delivered, retry=safe)` };
         const g = await gate(it.bundle);
         if (g) return g;
         if (it.epoch !== epoch) return stale(a.element_index);   // the gate started a runner: what was read is gone
@@ -528,6 +653,7 @@ export function createIosSession({
       }
       const n = [...a.text].length;
       if (!r.ok) return tapped && r.delivery === "not_delivered" ? { error: `${r.error}: ${r.message || "the runner refused"}${hint(r)} — the field was tapped, no text was typed (delivery=delivered_unverified, retry=unsafe)` } : inputError(r);
+      if (bundle !== SPRINGBOARD) brought = bundle;
       if (secure) return { text: `typed ${n} characters into a secure field in ${bundle} — it never shows its value, so nothing was read back ${UNVERIFIED}` };
       if (a.text.includes("\n")) return { text: `typed ${n} characters in ${bundle} — the text contains a return, which can submit or clear the field, so nothing was read back ${UNVERIFIED}` };
       if (n < 4) return { text: `typed ${n} character${n === 1 ? "" : "s"} in ${bundle} — too short to tell from what was already there, so nothing was read back ${UNVERIFIED}` };
@@ -537,7 +663,7 @@ export function createIosSession({
       const notConfirmed = { error: `type_not_confirmed: ${n} characters were typed in ${bundle} but ${key ? "the field that was tapped was not" : "no text field was"} seen to gain exactly that text (autocorrection or a field that hides its value can cause this) — read the field (ios_snapshot) before typing again ${UNKNOWN}` };
       // The fields could not be read afterwards (the read failed, or the app has more elements than are read): the
       // text was not seen to be missing, which type_not_confirmed would say — unverified, and the result names the
-      // side that could not be read (reviews P5, P6)
+      // side that could not be read
       if (after === null) return { text: `typed ${n} characters in ${bundle} — the text fields ${before !== null ? "could not be read afterwards" : "could not be read before the text went in or afterwards"}, so nothing was read back ${UNVERIFIED}` };
       // What the two reads say is decided in one place (fieldShows); each of its answers has one sentence here
       const shown = fieldShows(before, after, a.text, key);
@@ -565,6 +691,7 @@ export function createIosSession({
       const r = await rcall("keys", { bundle_id: p.bundle, key: a.key, count: n }, 20000 + 100 * n);
       if (!r.ok) return inputError(r);
       current = p.bundle;
+      if (p.bundle !== SPRINGBOARD) brought = p.bundle;
       return { text: `pressed ${a.key}${n > 1 ? ` ×${n}` : ""} in ${p.bundle} — sent; the screen is not checked ${UNVERIFIED}` };
     },
 
@@ -582,6 +709,7 @@ export function createIosSession({
       const r = await rcall("drag", args, 25000 + (a.hold_ms ?? 0) + (a.end_hold_ms ?? 0));
       if (!r.ok) return inputError(r);
       current = p.bundle;
+      if (p.bundle !== SPRINGBOARD) brought = p.bundle;
       return { text: `swiped (${a.from[0]}, ${a.from[1]}) → (${a.to[0]}, ${a.to[1]}) in ${p.bundle} — sent; the screen is not checked ${UNVERIFIED}` };
     },
 
@@ -589,15 +717,18 @@ export function createIosSession({
       const g = await gate(SPRINGBOARD, "home");
       if (g) return g;
       const prev = current;
-      // whether prev was in front before the press: only then can "left the front" be seen (review S4A-s6-D-1)
+      // whether prev was in front before the press: only then can "left the front" be seen
       let wasFront = null;
       if (prev && prev !== SPRINGBOARD) {
-        const pre = await rcall("app_state", { bundle_id: prev }, 10000);
+        const pre = await rcall("app_state", { bundle_id: prev }, 10000, { inCall: true });
         if (!pre.ok && pre.error === "xctest_issue") return inputError({ ...pre, delivery: "not_delivered" });
-        // tri-state (review S4B-s6-1): in front, seen elsewhere (1/2/3), or not known (0, no state, a failed read)
+        // tri-state: in front, seen elsewhere (1/2/3), or not known (0, no state, a failed read)
         const st = pre.ok ? pre.result?.state : undefined;
         wasFront = st === FOREGROUND ? true : [1, 2, 3].includes(st) ? false : null;
       }
+      // the read above can take up to 10 s after the queue looked at the stop file: look again before the press
+      const stop = stopCheck();
+      if (stop) return { error: stop };
       const r = await rcall("home", {}, 15000);
       if (!r.ok) return inputError(r);
       epoch++;
@@ -614,7 +745,7 @@ export function createIosSession({
         if (heldIssue) { const h = takeHeld(); return { error: `xctest_issue: ${h.message || "XCTest recorded a failure"}${HINTS.xctest_issue} — home was pressed; whether ${prev} left the front was not read (delivery=delivered_unverified, retry=safe)` }; }
         if (w.ok) { current = SPRINGBOARD; return { text: `home pressed — ${prev} left the front (delivery=delivered_verified, retry=safe)` }; }
         // seen to stay in front: say so, and keep it as the app later calls default to
-        // … or it was in front each time it was read and a later read failed, which ended the wait early (pre-review P8)
+        // … or it was in front each time it was read and a later read failed, which ended the wait early
         if (w.st === FOREGROUND) return { error: w.failed
           ? `home_not_confirmed: home was pressed and ${prev} was still in front when its state was last read; the read after that failed — look with ios_screenshot (delivery=delivered_unverified, retry=safe)`
           : `home_not_confirmed: home was pressed but ${prev} is still in front after 3 s — look with ios_screenshot (delivery=delivered_unverified, retry=safe)` };

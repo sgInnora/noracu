@@ -34,6 +34,8 @@ jobs:
         run: node test/bg-inject-unit.mjs
       - name: "release gate tests (throwaway git repository)"
         run: node test/release-gate-unit.mjs
+      - name: "command line: --version, --help, doctor (the server is not started)"
+        run: node test/cli-unit.mjs
       - name: "iOS XCUITest backend client contract tests (fake runner, no iPhone, no Xcode)"
         run: node test/ios-xcuitest-unit.mjs
       - name: "iOS XCUITest backend: tool logic against a model phone, and the ios-setup command (no iPhone, no Xcode)"
@@ -46,7 +48,7 @@ jobs:
         run: NORACU_CI=1 node test/e2e.mjs
         env:
           NORACU_IMCTL_DIR: /nonexistent # phone layer degrades gracefully on CI
-      - name: "docs freshness: tools.md must match running server (panel R4)"
+      - name: "docs freshness: tools.md must match running server"
         run: |
           node scripts/gen-tools.mjs
           git diff --exit-code docs/tools.md || (echo "::error::docs/tools.md is stale — run: node scripts/gen-tools.mjs" && exit 1)

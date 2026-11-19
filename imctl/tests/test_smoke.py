@@ -36,7 +36,7 @@ _cli_under_test._rect_file = _os.path.join(_default_rect_dir, "noracu", "phone-s
 def test_denormalize():
     b = WindowBounds(x=100, y=200, width=300, height=600)
     assert b.denormalize(0, 0) == (100, 200)
-    assert b.denormalize(1, 1) == (400, 800)
+    assert b.denormalize(1, 1) == (399, 799)  # the window's last point, not one past its edge
     assert b.denormalize(0.5, 0.5) == (250, 500)
     try:
         b.denormalize(1.5, 0.5)
@@ -574,13 +574,26 @@ def test_open_app_confirm():
     assert res == "opened"
     assert taps == [(0.35, 0.30)]
 
+    #    …and when the third read no longer shows the name, nothing is tapped: the second position is
+    #    old by then (the results were still moving), and another app opened there would be reported
+    #    as the one asked for
+    res, taps, homes, *_ = run(
+        screens=[CARD, [HEADER, moved], [HEADER], []], lumas=[ZEROS, OPENED])
+    assert res == "gone" and taps == [] and homes == [1], (res, taps, homes)
+
     #    F35: a "moved" row OUTSIDE the card (a suggestion row of the same
     #    name) is no candidate at all — the first, in-card hit stands
     stray = hit("X", 0.40, nx=0.30)
     res, taps, *_ = run(
-        screens=[CARD, [HEADER, stray], []], lumas=[ZEROS, OPENED])
+        screens=[CARD, [HEADER, stray], CARD, []], lumas=[ZEROS, OPENED])
     assert res == "opened"
     assert taps == [(0.18, 0.27)]
+    #    …but only once the card shows the name again: when one more read still does not, nothing
+    #    is tapped — the first position is old by then (the row may have moved away, and a tap on
+    #    whatever is there now could open another app)
+    res, taps, homes, *_ = run(
+        screens=[CARD, [HEADER, stray], [HEADER, stray]], lumas=[])
+    assert res == "gone" and taps == [] and homes == [1], (res, taps, homes)
 
     # ⑥ a capture failure after the hit is found → "not_confirmed", no
     #    additional taps (the icon tap never happens)
@@ -646,6 +659,28 @@ def test_open_app_confirm():
                    clear_text=lambda: None, type_text=lambda text: True,
                    clock=lambda: t[0], deadline_s=30.0)
     assert res == "deadline" and homes == [1]
+    #    …and before the one more read that is made when the card stops showing the name
+    t[0] = 0.0
+    FOUND_P = [HEADER, hit("Photos", 0.27), ECHO_P]
+    GONE_P = [HEADER, hit("Photo Booth", 0.27), ECHO_P]
+    phase, after = [0], []
+
+    def moving_read(**kwargs):
+        if phase[0] == 0:
+            return list(FOUND_P)
+        after.append(1)
+        if len(after) == 1:
+            t[0] += 40.0  # the re-read that no longer shows the name takes the call past its budget
+        return list(GONE_P)
+
+    homes = []
+    res = open_app("Photos", spotlight_open=True, read_screen=moving_read,
+                   luma=lambda: ZEROS, sleep=lambda s: phase.__setitem__(0, 1) if s == 0.5 else None,
+                   tap=lambda x, y: (_ for _ in ()).throw(AssertionError("no tap")),
+                   home=lambda: homes.append(1) or True,
+                   clear_text=lambda: None, type_text=lambda text: True,
+                   clock=lambda: t[0], deadline_s=30.0)
+    assert res == "deadline" and homes == [1] and len(after) == 1, (res, homes, len(after))
     #    the budget is checked before EVERY read, not only between
     #    passes — a short name's second read takes it past 30 s, so no third read
     t[0] = 0.0
@@ -689,10 +724,10 @@ def test_open_app_confirm():
         # the Spotlight gate fails → its own line, exit 1 (unchanged)
         cli.gestures = SimpleNamespace(open_spotlight_checked=lambda: False)
         args = p.parse_args(["open", "X"])
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             assert cli._cmd_open(args) == 1
-        assert "spotlight unavailable" in out.getvalue()
+        assert err.getvalue().startswith("spotlight_unavailable: ") and out.getvalue() == "", (out.getvalue(), err.getvalue())
 
         # result → (exact line, exit code); not_confirmed goes to stderr
         for result, code, line, to_stderr in (
@@ -725,6 +760,9 @@ def test_open_app_confirm():
              "open_not_confirmed: Spotlight's Top Hit card showed 'X' at more than one spot, so "
              "nothing was tapped; back on the Home Screen — open it from its Home Screen icon "
              "instead (phone_screenshot, then phone_tap)", True),
+            ("gone", 4,
+             "open_not_confirmed: Spotlight's Top Hit card showed 'X', then no longer did when it "
+             "was read again, so nothing was tapped; back on the Home Screen — try again", True),
             # 0.2.7: the paste was called off (another app in front / the clipboard changed)
             ("focus_lost", 6,
              "focus_lost: another app came to the front before ⌘V, so iPhone Mirroring was not "
@@ -748,7 +786,7 @@ def test_open_app_confirm():
 
         # the trip back to the Home Screen failed: the message must not claim it
         for result, code in (("deadline", 4), ("not_confirmed", 4), ("not_typed", 4),
-                             ("short_unreadable", 4), ("ambiguous", 4), ("not_found", 1),
+                             ("short_unreadable", 4), ("ambiguous", 4), ("gone", 4), ("not_found", 1),
                              ("no_top_hit", 1)):
             cli.gestures = SimpleNamespace(
                 open_spotlight_checked=lambda: True,
@@ -804,6 +842,9 @@ def test_type_text_confirm():
             self.data = s.encode()
 
         def setData_forType_(self, d, _t):
+            if getattr(self, "refuse", False):
+                self._log.append(("pb", "setData refused"))
+                return False
             self._log.append(("pb", "setData", d))
             self.data = d
 
@@ -811,7 +852,7 @@ def test_type_text_confirm():
 
     def run(text="hello world", *, replace=False, polls=(), ocr=False,
             bump_on_poll=False, before_check=None, raise_on_poll=None,
-            hud=None):
+            hud=None, refuse_restore=False, report=None):
         """Drive type_text with fakes; returns (ok, pb, events, v_elapsed,
         ocr_calls). ``hud`` scripts hud_check() (None: not injected; an
         Exception instance raises); its calls land in state["hud_calls"].
@@ -829,6 +870,7 @@ def test_type_text_confirm():
         """
         events = []
         pb = FakePasteboard(events)
+        pb.refuse = refuse_restore
         now = [1000.0]
         v_at = [None]
         ocr_calls = []
@@ -879,7 +921,7 @@ def test_type_text_confirm():
                        before_check=before_check or scripted_before_check,
                        ocr_check=ocr_check,
                        hud_check=None if hud is None else hud_check,
-                       sleep=sleep, clock=clock)
+                       sleep=sleep, clock=clock, report=report)
         v_elapsed = None if v_at[0] is None else now[0] - v_at[0]
         return ok, pb, events, v_elapsed, len(ocr_calls)
 
@@ -910,6 +952,25 @@ def test_type_text_confirm():
         assert pb.data == b"orig" and pb.count == 9
         assert sleep_after_v(events) >= 0.3
         assert ocr_calls == 1
+
+        # the same, but the pasteboard refuses to take the original back: the paste still counts, and the
+        # report says that the clipboard was not put back; a restore that worked says nothing
+        told = {}
+        ok, pb, events, _, _ = run(polls=[True], ocr=True, refuse_restore=True, report=told)
+        assert ok is True and told.get("restore_failed") == "may_be_empty", told
+        assert pb_ops(events) == ["clear", "setString", "clear", "setData refused"]
+        told = {}
+        ok, pb, events, _, _ = run(polls=[True], ocr=True, report=told)
+        assert ok is True and "restore_failed" not in told, told
+
+        # an error before ⌘V while the pasteboard refuses the restore: the error itself carries it
+        def boom():
+            raise RuntimeError("before the paste")
+        try:
+            run(before_check=boom, refuse_restore=True)
+            raise AssertionError("the error must go on")
+        except RuntimeError as exc:
+            assert getattr(exc, "restore_failed", False) == "may_be_empty", exc
 
         # ①b frame diff confirms but OCR never sees the text (short or
         # cropped text) → still True (the paste landed), but NO restore:
@@ -1033,7 +1094,7 @@ def test_type_text_confirm():
         assert screen_shows_text("x", lambda: hits("xxx")) is False  # probe < 2 chars
         assert screen_shows_text("hello", lambda: []) is False
 
-        assert len(frontmost_calls) == 15  # one per run() above, never the real one
+        assert len(frontmost_calls) == 18  # one per run() above, never the real one
     finally:
         input_module.ensure_frontmost = real_frontmost
 
@@ -1294,6 +1355,18 @@ def test_capture_integrity():
 
         # the retry re-resolves the window id: unavailable, then there
         looks = [None, {"id": 77, "onscreen": True}]
+        value, cmds = drive([True], infos=lambda: looks.pop(0))
+        assert value == path
+        assert cmds == [["screencapture", "-x", "-o", "-l", "77", path]]
+
+        # a window that is there but not on screen (minimized, hidden, on another Space) still answers a
+        # capture by id — with the picture it had when it went away. Nothing is captured; the error says why.
+        value, cmds = drive([], infos=lambda: {"id": 4242, "onscreen": False})
+        assert isinstance(value, CaptureError) and "not on screen" in str(value), value
+        assert cmds == []
+
+        # back on screen between the two looks (un-minimizing): the retry captures it
+        looks = [{"id": 77, "onscreen": False}, {"id": 77, "onscreen": True}]
         value, cmds = drive([True], infos=lambda: looks.pop(0))
         assert value == path
         assert cmds == [["screencapture", "-x", "-o", "-l", "77", path]]
@@ -1751,9 +1824,10 @@ def test_overlay_hover_controls():
     assert parse_overlay_ex(hover_live) == ({"live": True, "overlay": None, "buttons": 0}, True)
     assert parse_overlay(hover_live) == {"live": True, "overlay": None, "buttons": 0}
     assert is_paused(parse_overlay(hover_live)) is False
-    # toolbar group still empty mid-animation: not an overlay while hovering either
+    # an empty group while hovering is not the toolbar (it holds no buttons): it may be an overlay that has not
+    # drawn its content yet — not live, so no input goes out (review 2026-11-17)
     hover_empty = "button\t\tAXCloseButton\t\ngroup\t\tAXHostingView\t\n"
-    assert parse_overlay_ex(hover_empty)[0]["live"] is True
+    assert parse_overlay_ex(hover_empty) == ({"live": False, "overlay": None, "buttons": 0}, True)
     # hovering over a real paused overlay: window controls ignored, the overlay still found
     hover_paused = ("button\t\tAXCloseButton\t\nbutton\t\tAXMinimizeButton\t\n"
                     "button\t\tAXZoomButton\t\nimage\t\t\t\n"
@@ -1761,6 +1835,11 @@ def test_overlay_hover_controls():
     assert parse_overlay_ex(hover_paused) == (
         {"live": False, "overlay": "Connection Paused", "buttons": 1}, True)
     # no window controls: rules unchanged — any child, even a button-only group, means not live
+    # the hover toolbar is one group: a second group of buttons, or a second empty one, is not it
+    hover_two = "button\t\tAXCloseButton\t\ngroup\t\tAXHostingView\tbutton,button,\ngroup\t\tAXHostingView\tbutton,\n"
+    assert parse_overlay_ex(hover_two) == ({"live": False, "overlay": None, "buttons": 0}, True)
+    hover_two_empty = "button\t\tAXCloseButton\t\ngroup\t\tAXHostingView\t\ngroup\t\tAXHostingView\t\n"
+    assert parse_overlay_ex(hover_two_empty)[0]["live"] is False
     no_hover_group = "group\t\tAXHostingView\tbutton,button,\n"
     assert parse_overlay_ex(no_hover_group) == (
         {"live": False, "overlay": None, "buttons": 0}, False)
@@ -1781,9 +1860,8 @@ def test_scripts_pick_the_phone_window():
 
     for name in ("_GET_BOUNDS_SCRIPT", "_OVERLAY_SCRIPT", "_CLICK_RESUME_SCRIPT"):
         s = getattr(window, name)
-        assert window._PICK_WINDOW in s, name
-        assert "window 1" not in s, name  # the fallback is index 1 through mi
-        assert "set mi to 1" in s and s.index("set mi to 1") < s.index("AXStandardWindow"), name
+        assert window._PICK_WINDOW in s and window._PICK_HANDLER in s, name
+        assert "window 1" not in s, name  # the fallback is index 1 through pickWindow
         # device run 2026-11-08: never a stored reference (`contents of` a window resolves BY NAME
         # and failed during a connection blip); every use goes through the index
         assert "contents of cand" not in s and " mw" not in s, name
@@ -1792,6 +1870,172 @@ def test_scripts_pick_the_phone_window():
             out = os.path.join(tempfile.mkdtemp(), "s.scpt")
             r = subprocess.run(["osacompile", "-o", out, "-e", s], capture_output=True, text=True)
             assert r.returncode == 0, (name, r.stderr)
+
+
+def test_pick_window_prefers_the_phone_shaped_one():
+    """Review 2026-11-17: a near-square standard window of iPhone Mirroring (settings, welcome) listed ahead of
+    the phone is not read as the mirror; with no standard window shaped like a phone the first standard window
+    is, and with none at all window 1 (as before)."""
+    import shutil
+
+    from imctl import window
+
+    h = window._PICK_HANDLER
+    # the same thresholds as is_phone_shaped
+    assert f"shortSide >= {window.PHONE_MIN_SHORT_SIDE} and longSide >= {window.PHONE_MIN_ASPECT} * shortSide" in h
+    if not shutil.which("osascript"):
+        return
+
+    def pick(cands):
+        lit = "{" + ", ".join('{"%s", %d, %d}' % c for c in cands) + "}"
+        r = subprocess.run(["osascript", "-e", h + "\nreturn pickWindow(" + lit + ")"], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        return int(r.stdout.strip())
+
+    assert pick([("AXStandardWindow", 800, 520), ("AXStandardWindow", 329, 727)]) == 2
+    assert pick([("AXStandardWindow", 640, 600), ("AXStandardWindow", 727, 329)]) == 2  # a phone app in landscape
+    assert pick([("AXDialog", 397, 28), ("AXStandardWindow", 329, 727)]) == 2
+    assert pick([("AXDialog", 397, 28), ("AXStandardWindow", 800, 520)]) == 2  # no phone shape: first standard
+    assert pick([("AXStandardWindow", 800, 520), ("AXStandardWindow", 100, 300)]) == 1  # too narrow for a phone
+    assert pick([("AXDialog", 397, 28)]) == 1
+    assert pick([]) == 1
+
+
+def test_a_single_character_is_not_seen_in_the_banner_strip():
+    """A one-character paste is confirmed by the same new position in two reads; a hit in the banner strip at
+    the top of the screen (a notification can carry the character) is no sighting, as it is not for a longer
+    text."""
+    from imctl import verify
+    from imctl.vision import OCRHit
+
+    def H(nx, ny, t):
+        return OCRHit(text=t, nx=nx, ny=ny, confidence=0.9)
+
+    before = [H(0.2, 0.5, "Notes")]
+    banner = [H(0.4, 0.06, "x"), H(0.2, 0.5, "Notes")]
+    assert verify.new_text_positions("x", before, banner) == []
+    seen = verify.RepeatedSighting("x", before)
+    assert not seen.add(banner) and not seen.add(banner)   # twice in the strip: still no evidence
+    field = [H(0.5, 0.42, "x"), H(0.2, 0.5, "Notes")]
+    assert verify.new_text_positions("x", before, field) == [(0.5, 0.42)]
+    seen = verify.RepeatedSighting("x", before)
+    assert not seen.add(field) and seen.add(field)
+
+
+def test_a_moved_swipe_is_measured_in_the_window_it_is_sent_to():
+    """A swipe moved clear of the margin and left shorter than about 10 pt is refused as a press. The length is
+    measured in the mirror window's own size, not in the 280x620 pt window it was first measured on."""
+    from imctl import cli
+
+    asked = (0.5, 0.03, 0.5, 0.06)
+    sent = (0.5, 0.045, 0.5, 0.06)      # the start moved down: 0.015 of the window's height left
+    assert not cli._collapsed(asked, sent, (560.0, 1240.0))   # 18.6 pt in a window twice as large: a swipe
+    assert cli._collapsed(asked, sent, (280.0, 620.0))        # 9.3 pt: a press
+    assert cli._collapsed(asked, sent, None) == cli._collapsed(asked, sent, cli._REF_WINDOW_PT)  # size unknown
+
+
+def test_a_mirror_that_quit_while_brought_forward_is_reported_not_running():
+    """Live and not in front, brought forward — and gone at the second look: the answer says iPhone Mirroring is
+    not running, as it does when it was not running to begin with, not that its state is unknown. Nothing is
+    sent either way."""
+    import contextlib
+    import io
+
+    from imctl import cli
+
+    saved = {n: getattr(cli, n) for n in ("_is_front", "_bring_front", "get_overlay")}
+    overlays = [{"live": True, "overlay": None, "buttons": 0},
+                {"live": None, "overlay": None, "buttons": 0, "reason": "not_running"}]
+    cli._is_front = lambda: False
+    cli._bring_front = lambda: None
+    cli.get_overlay = lambda: overlays.pop(0)
+    try:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._require_live() == 3
+        assert err.getvalue().strip() == cli._MIRROR_NOT_RUNNING_LINE, err.getvalue()
+    finally:
+        for n, v in saved.items():
+            setattr(cli, n, v)
+
+
+def test_phone_open_capture_failure_says_steps_may_have_gone_out():
+    """phone_open whose capture fails after it started (the Spotlight gate, the result read) says that the steps
+    before it may have gone out and Spotlight may still be open — not only that no image came back."""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+
+    from imctl import cli
+    from imctl.vision import CaptureError
+
+    def boom():
+        raise CaptureError("blank frame")
+
+    real = (cli._require_live, cli.gestures)
+    cli._require_live = lambda: None
+    cli.gestures = SimpleNamespace(open_spotlight_checked=boom)
+    try:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert cli._open_and_report(SimpleNamespace(app="Maps")) == 7
+        line = err.getvalue()
+        assert line.startswith("capture_failed: ") and "may have gone out" in line and "phone_screenshot" in line, line
+    finally:
+        cli._require_live, cli.gestures = real
+
+
+def test_find_prefers_the_label_that_reads_exactly_the_text():
+    """phone_find "X" is the app X, not the "Xcode" listed above it: a hit that reads exactly the text comes
+    first; one that only contains it stands in when there is none — also after the sweep for a short text."""
+    from imctl import vision
+    from imctl.vision import OCRHit
+
+    def H(t, y):
+        return OCRHit(text=t, nx=0.5, ny=y, confidence=0.9)
+
+    real = (vision.ocr, vision.ocr_sweep, vision.capture_window, vision.discard_frame)
+    vision.capture_window = lambda: "/nonexistent/frame.png"
+    vision.discard_frame = lambda p: None
+    try:
+        vision.ocr = lambda path, **kw: [H("Xcode", 0.3), H("X", 0.6)]
+        vision.ocr_sweep = lambda path, **kw: []
+        assert vision.find("X").ny == 0.6
+        vision.ocr = lambda path, **kw: [H("Xcode", 0.3)]
+        vision.ocr_sweep = lambda path, **kw: [H("X", 0.7)]
+        assert vision.find("X").ny == 0.7
+        vision.ocr_sweep = lambda path, **kw: []
+        assert vision.find("X").text == "Xcode"  # no exact hit anywhere: the one that contains it, as before
+        vision.ocr = lambda path, **kw: [H("Open Settings", 0.2), H("Settings", 0.4)]
+        assert vision.find("Settings").ny == 0.4
+        assert vision.find("Settings", exact=True).ny == 0.4
+    finally:
+        vision.ocr, vision.ocr_sweep, vision.capture_window, vision.discard_frame = real
+
+
+def test_capture_hash_reads_the_window_in_memory():
+    """imctl verify fingerprints the mirror window from its own pixels in memory: no temp file paths (it used
+    two from tempfile.mktemp) and no screencapture of the screen region the window covers."""
+    import hashlib
+    import tempfile
+
+    from imctl import verify
+    from imctl.window import WindowBounds
+
+    def boom(*a, **k):
+        raise AssertionError("no temp file and no subprocess")
+
+    real = (verify.get_bounds, verify.window_luma, tempfile.mktemp, subprocess.run)
+    seen = []
+    verify.get_bounds = lambda: WindowBounds(x=0, y=0, width=326, height=720)
+    verify.window_luma = lambda size=(36, 78): seen.append(size) or b"frame"
+    tempfile.mktemp = boom
+    subprocess.run = boom
+    try:
+        st = verify.capture_hash()
+    finally:
+        verify.get_bounds, verify.window_luma, tempfile.mktemp, subprocess.run = real
+    assert st.md5 == hashlib.md5(b"frame").hexdigest() and (st.width, st.height) == (326, 720) and seen, (st, seen)
 
 
 def test_get_bounds_retries_one_transient_failure():
@@ -1911,10 +2155,16 @@ def test_type_text_settles_before_cmd_v():
         try:
             run(copy_during_settle=True, log=log)
             assert False, "a clipboard change during the wait must stop the paste"
-        except ClipboardChanged:
-            pass
+        except ClipboardChanged as exc:
+            assert "⌘A" not in str(exc), str(exc)
         assert ("chord", _VK_V) not in log, log
         assert not [e for e in log if e[:2] == ("pb", "setData")], log  # no restore over it
+        # with replace, Cmd+A went out before the refusal: the message says so
+        try:
+            run(replace=True, copy_during_settle=True)
+            assert False, "a clipboard change during the wait must stop the paste"
+        except ClipboardChanged as exc:
+            assert "nothing was typed (⌘A had already selected the field's text)" in str(exc), str(exc)
     finally:
         input_module.ensure_frontmost = real
 
@@ -2011,6 +2261,30 @@ def test_paste_chord_never_reactivates_the_mirror():
     finally:
         (input_module.ensure_frontmost, input_module._focus_check, input_module._layout_check,
          input_module.CGEventPost) = saved
+
+    # the focus lost between Cmd down and the key: Cmd is let go, no key goes out, FocusLost
+    posted, answers = [], [True, False]
+    saved = (input_module.ensure_frontmost, input_module._focus_check, input_module._layout_check,
+             input_module.CGEventPost, input_module.CGEventCreateKeyboardEvent, input_module.CGEventSetFlags,
+             input_module._source)
+    input_module.ensure_frontmost = lambda: None
+    input_module._focus_check = lambda: answers.pop(0)
+    input_module._layout_check = lambda k: {9: "v", 0: "a"}.get(k)
+    input_module.CGEventCreateKeyboardEvent = lambda src, code, down: (code, down)
+    input_module.CGEventSetFlags = lambda e, f: None
+    input_module.CGEventPost = lambda tap, e: posted.append(e)
+    input_module._source = lambda: None
+    try:
+        try:
+            input_module._cmd_chord(_VK_V, activate=False)
+            assert False, "focus lost after Cmd down must raise FocusLost"
+        except FocusLost:
+            pass
+        assert posted == [(input_module._VK_COMMAND, True), (input_module._VK_COMMAND, False)], posted
+    finally:
+        (input_module.ensure_frontmost, input_module._focus_check, input_module._layout_check,
+         input_module.CGEventPost, input_module.CGEventCreateKeyboardEvent, input_module.CGEventSetFlags,
+         input_module._source) = saved
 
     # type_text's default chords: Cmd+A activates, Cmd+V does not; focus lost → clipboard restored
     class PB:
@@ -2132,6 +2406,18 @@ def test_paste_hud_split_across_hits():
     assert not shows_paste_hud([hit("Pasting", 0.2), hit("Notes", 0.3), hit("from home", 0.6)])
     assert not shows_paste_hud([hit("Search", 0.1), hit("Notes", 0.3)])
 
+    # The reading order comes from row buckets: two words of one line on either side of a bucket
+    # edge come out swapped, or with another hit between them — it is still the box.
+    def at(t, x, y):
+        return OCRHit(text=t, nx=x, ny=y, confidence=0.9)
+
+    assert shows_paste_hud([at("from M5pro…", 0.55, 0.494), at("Pasting", 0.40, 0.496)])
+    assert shows_paste_hud([at("from M5pro…", 0.55, 0.494), at("Cancel", 0.20, 0.50), at("Pasting", 0.40, 0.496)])
+    assert not shows_paste_hud([at("from home", 0.55, 0.30), at("Pasting", 0.40, 0.60)])
+    # two hits at the two ends of one line are not the box (the word "Pasting" that was typed, and a
+    # "from …" somewhere else on that line)
+    assert not shows_paste_hud([at("from the list", 0.95, 0.494), at("Pasting", 0.05, 0.496)])
+
 
 def test_open_app_top_field_layout():
     """2026-11-08 device run (iOS 27, "Search or Ask"): Spotlight drew its search field at the TOP,
@@ -2198,6 +2484,10 @@ def test_open_app_top_field_layout():
     assert _spotlight_up([H(0.3, 0.12, "Clock -Open"), H(0.19, 0.28, "Clock")])
     assert not _spotlight_up([H(0.3, 0.12, "Clock -Open"), H(0.19, 0.33, "Clock")])
     assert _spotlight_up(after_paste, "Calculator") and not _spotlight_up(after_paste, "Clock")
+    # a letter of the query misread in the field: Spotlight is still up (taking it for gone reported an app as
+    # opened while Spotlight still showed)
+    misread = [H(0.32, 0.12, "Calcu1ator -Open")] + after_paste[1:]
+    assert _spotlight_up(misread, "Calculator") and not _spotlight_up(misread, "Clock")
     assert find_app_hit(lambda **kw: after_paste, "Calculator", sleep=lambda s: None).ny == 0.28
 
     # a tap that left Spotlight up (the field still completes the name) did not open the app
@@ -2576,7 +2866,7 @@ def test_short_names_sweep_pass():
 def test_type_single_char_restore():
     """F27 (+ review): typing one character counts as seen only when the SAME
     new position shows up in two separate sweep reads against a baseline read
-    on a still screen. Review R38 (Andy's call, 2026-11-07): even then the
+    on a still screen. Even then the
     clipboard is never put back — it keeps the typed text in every case."""
     import imctl.input as input_module
     from imctl import verify, vision
@@ -2884,7 +3174,7 @@ def test_open_app_short_rows_and_deferred_restore():
     assert ev.add([X(0.6)]) is False and ev.add([X(0.62)]) is True   # within eps
     assert verify.RepeatedSighting("X", []).add([X(0.6), X(0.6)]) is False  # one read
 
-    # review R38 (Andy's call): type_text hands none over any more — not for a
+    # type_text hands none over any more — not for a
     # single character, not for a longer text; the clipboard keeps the typed text
     saved = {}
 
@@ -2958,10 +3248,10 @@ def test_open_app_short_rows_and_deferred_restore():
         assert len(gate) == 2
         gate.clear()
         cli.gestures = SimpleNamespace(open_spotlight_checked=lambda: gate.append(1) or False)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
             assert cli._cmd_open(argparse.Namespace(app="X")) == 1
-        assert len(gate) == 2 and "spotlight unavailable" in out.getvalue()
+        assert len(gate) == 2 and err.getvalue().startswith("spotlight_unavailable: ")
     finally:
         cli._require_live, cli.gestures = real_live, real_gestures
 
@@ -3363,9 +3653,9 @@ def test_watch_late_paste_and_type_messages():
     # F44: the words of the phone's "Pasting from …" box never count as the text ("pro"
     #    is in "M5pro"); once the box is gone and the text shows twice, it counts
     box = "Pasting from “M5pro”…"
-    seq = [hits(box), hits(box), hits(box), hits("pro"), hits("pro")]
+    seq = [hits(box), hits(box), hits(box), hits("M5pro"), hits("M5pro")]
     now[0] = 0.0
-    late = cli._watch_late_paste("pro", baseline=0, read_screen=lambda: seq.pop(0),
+    late = cli._watch_late_paste("M5pro", baseline=0, read_screen=lambda: seq.pop(0),
                                  sleep=sleep, clock=clock)
     assert round(late, 6) == 3.4 and seq == []
 
@@ -3618,6 +3908,8 @@ def test_phone_shape_rules():
     assert window.is_phone_shaped(B(x=0, y=0, width=400, height=679)) is False
     assert window.is_phone_shaped(B(x=0, y=0, width=750, height=1334)) is True  # iPhone SE 16:9
     assert window.is_phone_shaped(B(x=0, y=0, width=800, height=520)) is False  # a wide dialog
+    assert window.is_phone_shaped(B(x=0, y=0, width=397, height=28)) is False   # the keyboard's candidate bar
+    assert window.is_phone_shaped(B(x=0, y=0, width=271, height=601)) is True   # the smallest mirror seen
     assert window.is_phone_shaped(B(x=0, y=0, width=0, height=660)) is None
     assert window.is_phone_shaped(B(x=0, y=0, width=640, height=0)) is None
     off = {"live": False, "overlay": "x", "buttons": 1}
@@ -3711,7 +4003,7 @@ def test_type_text_restore_needs_a_rise():
     #    1 before → 2 after: a rise over the chip → restored
     ok, pb, _, _ = run([hits(chip), hits(chip), hits(chip, chip), hits(chip, chip)])
     assert ok is True and pb.data == b"orig"
-    # 0.2.5 (Andy's call): the count rises only because a notification banner at the top carries
+    # 0.2.5: the count rises only because a notification banner at the top carries
     #    the text → no sighting where a field can be → not confirmed, and the clipboard is NOT restored
     ok, pb, report, _ = run([hits("Search"), hits("Search"), hits(chip, top=0.08), hits(chip, top=0.08)])
     assert ok is False and pb.data == chip.encode() and {k: v for k, v in report.items() if k not in ("seen", "spots_before", "unverifiable")} == {"count_before": 0}
@@ -3759,6 +4051,9 @@ def test_type_text_restore_needs_a_rise():
     assert ok is True and pb.data == chip.encode()
     assert verify.probe_count("pro", hits(box)) == 0
     assert verify.probe_count("pro", hits("pro", box)) == 1
+    #    the box read as two hits: its words still never count as the text
+    assert verify.probe_count("pro", hits("Pasting", "from “M5pro”…")) == 0
+    assert verify.probe_count("pro", hits("pro", "Pasting", "from “M5pro”…")) == 1
     # the probe helpers
     assert verify.text_probe("X") is None and verify.text_probe("ab") == "ab"
     assert verify.probe_count("hello", hits("say hello", "hello")) == 2
@@ -4488,7 +4783,7 @@ def test_page_swipes_start_above_the_dock_f45():
 
 
 def test_short_text_never_confirmed_by_a_sighting_r37():
-    """R37 / Andy's call: "in" showing up inside a new "Sign in" line is no sighting of the typed text;
+    """The word "in" showing up inside a new "Sign in" line is no sighting of the typed text;
     a text of four or more characters at a new spot below the banner strip still is."""
     from imctl import verify
     from imctl.vision import OCRHit
@@ -4816,7 +5111,7 @@ def test_swipe_moves_points_inside_the_phone_screen():
     rc, sent, out, err = _run_swipe(["swipe", "0.5", "0.01", "0.5004", "0.01"], rect)
     assert rc == 2 and sent == [] and out == "" and err.startswith("out_of_screen: the swipe from (0.5,0.01) to (0.5,0.01) starts or ends on"), (rc, sent, err)
     # a pull-down from the margin that ends just inside the screen: moved, it is about 2 pt long — iOS would
-    # take it as a tap at the top of the app, so it is refused (review S4A-s10-gemini-1)
+    # take it as a tap at the top of the app, so it is refused
     rc, sent, out, err = _run_swipe(["swipe", "0.5", "0.01", "0.5", "0.075"], rect)
     assert rc == 2 and sent == [] and out == "" and "a press, not a swipe" in err and "nothing was sent" in err, (rc, sent, err)
     # moved, but still a real swipe (about 18 pt): it goes out, and the line names the moved point
@@ -5193,6 +5488,296 @@ def test_open_app_min_confidence():
         assert err.getvalue().startswith("invalid_args: NORACU_OCR_MIN_CONFIDENCE is set to '90'") and "nothing was sent" in err.getvalue(), err.getvalue()
     finally:
         cli._require_live, cli.gestures = real_live, real_gestures
+
+
+def test_screenrect_save_survives_null_times():
+    """More remembered sizes than are kept, one of them with a time that is null: the oldest are dropped
+    and the file is written — it used to raise TypeError, which ended the input command."""
+    import json
+    import os
+    import shutil
+    import tempfile
+    from imctl import screenrect
+
+    d = tempfile.mkdtemp(prefix="imctl-rect-null-")
+    try:
+        p = os.path.join(d, "rect.json")
+        sizes = {f"{i}x{i}": {"measured_at": float(i), "untrusted_at": 0} for i in range(screenrect.MAX_SIZES + 1)}
+        sizes["0x0"]["measured_at"] = None
+        sizes["1x1"]["untrusted_at"] = None
+        screenrect._save(p, sizes)
+        with open(p, encoding="utf-8") as f:
+            kept = json.load(f)["sizes"]
+        assert len(kept) == screenrect.MAX_SIZES and "0x0" not in kept and "1x1" in kept, sorted(kept)
+    finally:
+        shutil.rmtree(d, True)
+
+
+def test_key_event_carries_no_modifier():
+    """A key imctl presses by itself carries no modifier, whatever is held on the Mac's keyboard: the
+    flags are set to none before the event is posted."""
+    from imctl import input as input_module
+
+    calls = []
+    saved = {n: getattr(input_module, n) for n in ("CGEventCreateKeyboardEvent", "CGEventSetFlags", "CGEventPost")}
+    input_module.CGEventCreateKeyboardEvent = lambda src, code, down: ("kb", code, down)
+    input_module.CGEventSetFlags = lambda event, flags: calls.append(("flags", event, flags))
+    input_module.CGEventPost = lambda tap, event: calls.append(("post", event))
+    try:
+        input_module._key_event(51, True, "src")
+    finally:
+        for n, v in saved.items():
+            setattr(input_module, n, v)
+    assert calls == [("flags", ("kb", 51, True), 0), ("post", ("kb", 51, True))], calls
+
+
+def test_scroll_trackpad_checks_focus_after_the_pause():
+    """scroll_trackpad moves the pointer over the mirror, pauses, then posts the wheel events: when
+    another app comes to the front during that pause, no wheel event goes out."""
+    from types import SimpleNamespace
+
+    import imctl.input as input_module
+    from imctl.input import FocusLost, scroll_trackpad
+    from imctl.window import WindowBounds
+
+    events = []
+    focus = [True]
+    names = ("_focus_check", "ensure_frontmost", "get_bounds", "_source", "_mouse_event", "_scroll_event", "time")
+    saved = {n: getattr(input_module, n) for n in names}
+    input_module._focus_check = lambda: focus[0]
+    input_module.ensure_frontmost = lambda: None
+    input_module.get_bounds = lambda: WindowBounds(0, 0, 100, 100)
+    input_module._source = lambda: "src"
+    input_module._mouse_event = lambda kind, x, y, source: events.append(("mouse", kind))
+    input_module._scroll_event = (lambda source, delta, x=None, y=None, phase=None:
+                                  events.append(("scroll", delta, phase)))
+
+    def pause(seconds):
+        if seconds >= 0.1:  # the pause after the pointer move: the person switches apps in it
+            focus[0] = False
+
+    input_module.time = SimpleNamespace(sleep=pause)
+    try:
+        try:
+            scroll_trackpad(-500)
+            raise AssertionError("expected FocusLost")
+        except FocusLost:
+            pass
+    finally:
+        for n, v in saved.items():
+            setattr(input_module, n, v)
+    assert [e[0] for e in events] == ["mouse"], events
+
+
+def test_late_paste_watch_leaves_out_a_text_under_four_characters():
+    """A text of two or three characters is never confirmed by a sighting, so the watch after an
+    unconfirmed paste does not take a rise in its count for the paste: "in" showing up in "Sign in"
+    is not the text arriving late."""
+    import argparse
+    import contextlib
+    import io
+
+    from imctl import cli
+    from imctl.vision import OCRHit
+
+    def hits(*texts):
+        return [OCRHit(text=t, nx=0.5, ny=0.3 + i * 0.05, confidence=0.9) for i, t in enumerate(texts)]
+
+    now = [0.0]
+
+    def sleep(s):
+        now[0] += s
+
+    reads = []
+
+    def read_screen():
+        reads.append(now[0])
+        return hits("Sign in", "Join")
+
+    assert cli._watch_late_paste("in", baseline=0, read_screen=read_screen, sleep=sleep,
+                                 clock=lambda: now[0]) is None
+    assert reads == [], reads   # not watched at all: no read, no 15 s wait
+    # four characters are still watched
+    now[0] = 0.0
+    assert cli._watch_late_paste("join", baseline=0, read_screen=read_screen, sleep=sleep,
+                                 clock=lambda: now[0]) is not None
+
+    # and the line phone_type prints for it does not speak of a 15 s check that was not made
+    real = (cli._require_live, cli._require_expect, cli.input.type_text)
+    cli._require_live = lambda: None
+    cli._require_expect = lambda args: None
+    cli.input.type_text = lambda text, replace=False, report=None: False
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = cli._cmd_type(argparse.Namespace(text="in", replace=False, expect=None))
+    finally:
+        cli._require_live, cli._require_expect, cli.input.type_text = real
+    msg = err.getvalue()
+    assert code == 4 and msg.startswith("type_not_confirmed:"), (code, msg)
+    assert "15s check" not in msg and "fewer than four characters" in msg, msg
+
+
+def test_long_press_ends_when_another_app_comes_to_the_front():
+    """A long hold looks at the frontmost app again as it goes: when another app comes to the front,
+    the button is let go there and the press is not reported as a whole one. A hold of up to
+    LONG_PRESS_CHECK_S is one sleep, as before."""
+    from types import SimpleNamespace
+
+    import imctl.input as input_module
+    from imctl.input import FocusLost, long_press
+    from imctl.window import WindowBounds
+
+    events, sleeps = [], []
+    focus = [True]
+    names = ("_focus_check", "ensure_frontmost", "get_bounds", "_source", "_mouse_event", "time")
+    saved = {n: getattr(input_module, n) for n in names}
+    input_module._focus_check = lambda: focus[0]
+    input_module.ensure_frontmost = lambda: None
+    input_module.get_bounds = lambda: WindowBounds(0, 0, 100, 100)
+    input_module._source = lambda: "src"
+    input_module._mouse_event = lambda kind, x, y, source: events.append(kind)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:  # two seconds into the hold the person switches apps
+            focus[0] = False
+
+    input_module.time = SimpleNamespace(sleep=sleep)
+    try:
+        try:
+            long_press(0.5, 0.5, 5.0)
+            raise AssertionError("expected FocusLost")
+        except FocusLost:
+            pass
+        assert events == [input_module.kCGEventLeftMouseDown, input_module.kCGEventLeftMouseUp], events
+        assert sleeps == [1.0, 1.0], sleeps   # let go after 2 s, not held for the 5 s asked for
+
+        # the whole hold when nobody takes the front: the time asked for, in pieces
+        del events[:], sleeps[:]
+        focus[0] = True
+        input_module.time = SimpleNamespace(sleep=sleeps.append)
+        long_press(0.5, 0.5, 2.5)
+        assert sleeps == [1.0, 1.0, 0.5] and len(events) == 2, (sleeps, events)
+        # a short hold is one sleep
+        del events[:], sleeps[:]
+        long_press(0.5, 0.5)
+        assert sleeps == [0.8] and len(events) == 2, (sleeps, events)
+    finally:
+        for n, v in saved.items():
+            setattr(input_module, n, v)
+
+
+def test_restore_pasteboard_reports_a_refused_write():
+    """A write the pasteboard refuses is not reported as restored."""
+    from imctl import input as input_module
+
+    class PB:
+        def __init__(self, ok):
+            self.ok = ok
+
+        def clearContents(self):
+            pass
+
+        def setData_forType_(self, d, t):
+            return self.ok
+
+        def writeObjects_(self, objs):
+            return self.ok
+
+    class Item:
+        def setData_forType_(self, d, t):
+            return True
+
+    items = ("items", [[("public.utf8-plain-text", b"mine")]])
+    saved_new_item = input_module._new_item
+    input_module._new_item = Item
+    try:
+        assert input_module.restore_pasteboard(PB(True), ("text", b"mine")) is True
+        assert input_module.restore_pasteboard(PB(False), ("text", b"mine")) is False
+        assert input_module.restore_pasteboard(PB(True), items) is True
+        assert input_module.restore_pasteboard(PB(False), items) is False
+        # a pasteboard whose methods answer nothing is taken at its word, as before
+        assert input_module.restore_pasteboard(PB(None), ("text", b"mine")) is True
+    finally:
+        input_module._new_item = saved_new_item
+
+
+def test_tophit_header_only_near_the_top():
+    """The words "Top Hit" further down the screen are not Spotlight's card header."""
+    from imctl import gestures
+    from imctl.vision import OCRHit
+
+    low = [OCRHit(text="Top Hit", nx=0.2, ny=0.62, confidence=1.0), OCRHit(text="Maps", nx=0.3, ny=0.70, confidence=1.0)]
+    assert gestures._tophit_header(low) is None
+    assert gestures._spotlight_up(low) is False
+    assert gestures.choose_app_hit(low, "Maps") is None
+    high = [OCRHit(text="Top Hit", nx=0.2, ny=0.15, confidence=1.0), OCRHit(text="Maps", nx=0.3, ny=0.22, confidence=1.0)]
+    assert gestures._tophit_header(high) is high[0]
+    assert gestures.choose_app_hit(high, "Maps") is high[1]
+
+
+def test_clipboard_not_put_back_is_said_on_every_path():
+    """A clipboard that could not be put back is reported whatever ends the call — a window error or a capture
+    failure before ⌘V, as well as a lost focus — and the report says whether it may be empty (cleared, then the
+    write refused) or still holds the typed text (what it held could not be saved: another device's, too large)."""
+    import contextlib, io
+    from imctl import input as input_module, gestures
+    from imctl.window import WindowError
+    from imctl.vision import CaptureError
+    assert input_module.restore_failure(("remote", None)) == "kept_text"
+    assert input_module.restore_failure(("too_large", None)) == "kept_text"
+    assert input_module.restore_failure(("items", [[("public.utf8-plain-text", b"x")]])) == "may_be_empty"
+    assert input_module.restore_failure(b"raw") == "may_be_empty"
+    cli = _cli_under_test
+    real = (cli._require_live, cli._require_expect, input_module.type_text, gestures.open_spotlight_checked, gestures.open_app)
+    cli._require_live = lambda: None
+    cli._require_expect = lambda args: None
+
+    def failing(exc_type, reason):
+        def f(*a, **kw):
+            e = exc_type("the mirroring window is not on screen")
+            e.restore_failed = reason
+            raise e
+        return f
+    try:
+        for reason, words in (("may_be_empty", "may be empty now"), ("kept_text", "still holds the typed text")):
+            # phone_type: a window error before ⌘V
+            input_module.type_text = failing(WindowError, reason)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = cli._run(cli.build_parser().parse_args(["type", "hello world"]))
+            assert rc == 3 and words in err.getvalue(), err.getvalue()
+            # phone_open: a capture failure while the name was being pasted
+            gestures.open_spotlight_checked = lambda: True
+            gestures.open_app = lambda *a, report=None, **kw: (report.__setitem__("restore_failed", reason), (_ for _ in ()).throw(CaptureError("gone")))[1]
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = cli._open_and_report(cli.build_parser().parse_args(["open", "Maps"]))
+            assert rc == 7 and err.getvalue().startswith("capture_failed:") and words in err.getvalue(), err.getvalue()
+        # nothing failed: nothing is said about the clipboard
+        input_module.type_text = failing(WindowError, None)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cli._run(cli.build_parser().parse_args(["type", "hello world"]))
+        assert "clipboard" not in err.getvalue(), err.getvalue()
+    finally:
+        cli._require_live, cli._require_expect, input_module.type_text, gestures.open_spotlight_checked, gestures.open_app = real
+
+    # open_app hands a failed restore of a capture failure before ⌘V on to its caller
+    told = {}
+    def typing(_name):
+        e = CaptureError("blank frame")
+        e.restore_failed = "may_be_empty"
+        raise e
+    try:
+        gestures.open_app("Maps", spotlight_open=True, report=told, read_screen=lambda **kw: [], luma=lambda: b"",
+                          sleep=lambda s: None, tap=lambda x, y: None, home=lambda: True, clear_text=lambda: None,
+                          type_text=typing)
+        assert False, "the capture error must go on"
+    except CaptureError:
+        pass
+    assert told.get("restore_failed") == "may_be_empty", told
 
 
 if __name__ == "__main__":

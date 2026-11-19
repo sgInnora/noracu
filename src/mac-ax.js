@@ -26,6 +26,7 @@ ObjC.import('ApplicationServices');
 ObjC.import('AppKit');
 ObjC.import('CoreGraphics');
 ObjC.import('Foundation');
+ObjC.import('signal');
 
 // ── CF type ids and small bridges ──────────────────────────────────────────────────────────────
 const TID = {
@@ -93,8 +94,10 @@ function children(el) {
   for (let i = 0; i < n; i++) out.push(arr.objectAtIndex(i));
   return out;
 }
-function elemsOf(el, name) {
+// errOut (optional) gets the AX error of the read: an empty list is "none" only when err is 0
+function elemsOf(el, name, errOut) {
   const a = attrErr(el, name);
+  if (errOut) errOut.err = a.err;
   if (a.err !== 0) return [];
   const o = cast(a.raw);
   if (!o) return [];
@@ -228,21 +231,41 @@ function frontApp() {
   try { bundle = x.bundleIdentifier.js || ''; } catch (e) { /* none */ }
   return { ns: x, name: x.localizedName.js, bundle, pid: Number(x.processIdentifier) };
 }
-function findApp(spec) {
-  if (!spec) return frontApp();
+// The running apps a spec stands for. "pid:<number>" is that process. A .app path: every process started from
+// it. A name or a bundle id: exact matches before case-insensitive ones, and among those only the most app-like
+// kind (a Dock app before a menu-bar app before a helper).
+function appCandidates(spec) {
   const apps = runningApps();
   const want = String(spec);
+  const byPid = /^pid:(\d{1,7})$/.exec(want);
+  if (byPid) return apps.filter(a => a.pid === Number(byPid[1]));
+  let hit;
   if (/^\/.+\.app\/?$/.test(want)) {
+    // every process started from that bundle — its helpers included, which the policy rule below leaves out
     const p = want.replace(/\/$/, '');
-    const hit = apps.filter(a => { try { return a.ns.bundleURL && !a.ns.bundleURL.isNil() && a.ns.bundleURL.path.js === p; } catch (e) { return false; } });
-    return hit.length ? hit.sort((a, b) => b.pid - a.pid)[0] : null;
+    hit = apps.filter(a => { try { return a.ns.bundleURL && !a.ns.bundleURL.isNil() && a.ns.bundleURL.path.js === p; } catch (e) { return false; } });
+  } else {
+    const lower = want.toLowerCase();
+    hit = apps.filter(a => a.name === want || a.bundle === want);
+    if (!hit.length) hit = apps.filter(a => a.name.toLowerCase() === lower || a.bundle.toLowerCase() === lower);
   }
-  const lower = want.toLowerCase();
-  let hit = apps.filter(a => a.name === want || a.bundle === want);
-  if (!hit.length) hit = apps.filter(a => a.name.toLowerCase() === lower || a.bundle.toLowerCase() === lower);
-  if (!hit.length) return null;
-  hit.sort((a, b) => (a.policy - b.policy) || (b.active - a.active));
-  return hit[0];
+  if (!hit.length) return hit;
+  const best = Math.min.apply(null, hit.map(a => a.policy));
+  return hit.filter(a => a.policy === best);
+}
+// Several running apps under one name — two copies of an app, two apps with the same display name. None of them
+// is picked for the caller: the answer lists them, and "pid:<number>" names one.
+function ambiguousApp(spec, hit) {
+  const front = frontApp();
+  const apps = hit.map(a => ({ pid: a.pid, name: a.name, bundle_id: a.bundle, frontmost: Boolean(front && front.pid === a.pid) }));
+  return notDelivered({ code: 'AMBIGUOUS_APP', message: `"${String(spec).slice(0, 80)}" names ${apps.length} running apps (${apps.map(x => `pid ${x.pid}${x.frontmost ? ', frontmost' : ''}`).join('; ')}) — nothing was done; name the one you mean as "pid:<number>" (mac_apps lists them)`, details: { apps } });
+}
+// One app, none (null), or — thrown, and answered by dispatch — the refusal for a name several apps share.
+function findApp(spec) {
+  if (!spec) return frontApp();
+  const hit = appCandidates(spec);
+  if (hit.length > 1) throw { noracu: ambiguousApp(spec, hit) };
+  return hit[0] || null;
 }
 const POLICY = ['foreground', 'background', 'helper'];
 
@@ -282,11 +305,12 @@ function enableWebAccessibility(appEl) {
 function webAxStatus(setter, rootEl, rootPath, isWindow) {
   if (setter !== 'unsupported' || !isWindow) return setter;
   const w = walk(rootEl, rootPath, { depth: 60, maxNodes: 100000, budgetMs: 1500, maxVisit: 5000, find: { role: 'AXWebArea', limit: 1 }, pruneMenuBar: true, rootIsContainer: true });
-  return w.nodes.length ? 'exposed' : 'unsupported';
+  // "unsupported" says the window holds no web content: only a search that looked through all of it can say so
+  return w.nodes.length ? 'exposed' : w.complete ? 'unsupported' : 'unknown';
 }
 
 // ── containers (where a path starts) ─────────────────────────────────────────────────────────────
-function windowsOf(appEl) { return elemsOf(appEl, 'AXWindows'); }
+function windowsOf(appEl, errOut) { return elemsOf(appEl, 'AXWindows', errOut); }
 // The CGWindowID behind an AX window (HIServices' _AXUIElementGetWindow, bound at run time). It is the
 // window's identity for its whole life, so an element is only ever re-found inside the very window it was
 // seen in. null when the function is unavailable or the element is not a real window.
@@ -311,9 +335,12 @@ function windowIdOf(el) {
   }
   return null;
 }
+// A window whose attributes could not be read is marked unreadable: its empty title, missing frame and "not
+// minimized" are not what it is, so it is never picked as the window a snapshot is about by default
 function windowInfo(w, n) {
   const v = readNode(w);
-  return { kind: 'window', n, wid: axWindowId(w), title: typeof v.AXTitle === 'string' ? v.AXTitle : '', subrole: v.AXSubrole || '', frame: frameOf(v), focused: v.AXFocused === true, main: attr(w, 'AXMain') === true, minimized: attr(w, 'AXMinimized') === true };
+  const bad = v.__err !== undefined ? { unreadable: true } : {};
+  return { ...bad, kind: 'window', n, wid: axWindowId(w), title: typeof v.AXTitle === 'string' ? v.AXTitle : '', subrole: v.AXSubrole || '', frame: frameOf(v), focused: v.AXFocused === true, main: attr(w, 'AXMain') === true, minimized: attr(w, 'AXMinimized') === true };
 }
 function rectNear(a, b, tol) { return a && b && Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol && Math.abs(a[3] - b[3]) <= tol; }
 // Finder's desktop: the one window without a CGWindowID seen on the test Mac (wid probe 2026-11-06; its
@@ -329,12 +356,44 @@ function isFinderDesktop(app, c) {
   return rectNear([x0, y0, x1 - x0, y1 - y0], c.frame, 2) || ds.some(f => rectNear(f, c.frame, 2));
 }
 
+// The windows of one process that the window server lists but does not show now: on another Space, minimized,
+// or of a hidden app. Accessibility lists none of an app's windows on another Space, so this count is the only
+// sign that such an app has windows at all. -1 when the process or the list could not be read.
+function offscreenWindowCount(appEl) {
+  try {
+    const pr = Ref();
+    if (Number($.AXUIElementGetPid(appEl, pr)) !== 0) return -1;
+    const pid = Number(pr[0]);
+    const info = cast($.CGWindowListCopyWindowInfo($.kCGWindowListOptionAll, 0));
+    if (!pid || !info) return -1;
+    let n = 0;
+    for (let i = 0, c = Number(info.count); i < c; i++) {
+      const d = info.objectAtIndex(i);
+      const num = k => { const o = d.objectForKey(ks(k)); return o && !o.isNil() ? o.js : undefined; };
+      if (Number(num('kCGWindowOwnerPID')) !== pid || Number(num('kCGWindowLayer') || 0) !== 0 || num('kCGWindowIsOnscreen')) continue;
+      n++;
+    }
+    return n;
+  } catch (e) { return -1; }
+}
+// No window of the app can be read. The answer says which case it is, because the next step differs: an app
+// with windows on another Space is brought forward only by moving the person's desktop there.
+function noWindowError(appEl) {
+  const n = offscreenWindowCount(appEl);
+  if (n > 0) return { code: 'WINDOW_NOT_FOUND', message: `the app has no window that accessibility can read from the desktop in view: the window server lists ${n} of its windows off screen (on another Space, minimized to the Dock, or the app is hidden) — mac_windows with include_offscreen:true lists them; mac_app activate brings the app forward, and macOS may then switch the person's desktop to it`, details: { offscreen_windows: n } };
+  if (n === 0) return { code: 'WINDOW_NOT_FOUND', message: 'the app has no window open (the window server lists none of its windows, on screen or off)', details: { offscreen_windows: 0 } };
+  return { code: 'WINDOW_NOT_FOUND', message: 'the app has no window that accessibility can read (not open, minimized to the Dock, or on another Space)' };
+}
+
 // Pick the window a snapshot is about: an explicit index/title, else the focused or main window,
 // else the only window. Several candidates and no way to choose → AMBIGUOUS_WINDOW with the list.
 function pickWindow(appEl, req) {
-  const ws = windowsOf(appEl);
+  const read = {};
+  const ws = windowsOf(appEl, read);
   const infos = ws.map((w, i) => windowInfo(w, i));
-  if (!ws.length) return { error: { code: 'WINDOW_NOT_FOUND', message: 'the app has no window that accessibility can read (not open, minimized to the Dock, or on another Space)' } };
+  // the window list did not answer (a busy or hung app): that is not "no window, minimized or on another Space"
+  if (!ws.length && read.err === -25204) return { error: { code: 'APP_UNRESPONSIVE', message: 'the app did not answer when its windows were asked for (busy or hung) — try again in a moment' } };
+  if (!ws.length) return { error: noWindowError(appEl) };
   if (req.window_id !== undefined && req.window_id !== null) {
     const hit = infos.filter(x => x.wid === Number(req.window_id));
     if (hit.length === 1) return { el: ws[hit[0].n], info: hit[0] };
@@ -348,19 +407,26 @@ function pickWindow(appEl, req) {
     }
     const hits = infos.filter(x => x.title === want);
     const loose = hits.length ? hits : infos.filter(x => x.title.toLowerCase().indexOf(String(want).toLowerCase()) >= 0);
-    if (loose.length === 1) return { el: ws[loose[0].n], info: loose[0] };
+    // no title is the one asked for, and one contains it (any case): that one, and the answer says so
+    if (loose.length === 1) return { el: ws[loose[0].n], info: loose[0], partial: !hits.length };
     return { error: { code: loose.length ? 'AMBIGUOUS_WINDOW' : 'WINDOW_NOT_FOUND', message: `${loose.length || 'no'} window(s) match "${want}"`, details: { windows: infos.map(summaryOfWindow) } } };
   }
   const f = infos.filter(x => x.focused);
   if (f.length === 1) return { el: ws[f[0].n], info: f[0] };
   const m = infos.filter(x => x.main);
   if (m.length === 1) return { el: ws[m[0].n], info: m[0] };
-  const vis = infos.filter(x => !x.minimized);
+  const vis = infos.filter(x => !x.minimized && !x.unreadable);
   if (vis.length === 1) return { el: ws[vis[0].n], info: vis[0] };
   if (ws.length === 1) return { el: ws[0], info: infos[0] };
   return { error: { code: 'AMBIGUOUS_WINDOW', message: `the app has ${ws.length} windows and none is focused — pass window (an index or title)`, details: { windows: infos.map(summaryOfWindow) } } };
 }
-function summaryOfWindow(x) { return { n: x.n, window_id: x.wid, title: x.title.slice(0, 80), frame: x.frame, minimized: x.minimized }; }
+// the app's windows that are dialogs of their own (subrole AXDialog / AXSystemDialog), as { el, info }
+function dialogWindows(appEl) {
+  const ws = windowsOf(appEl), out = [];
+  for (let i = 0; i < ws.length; i++) { const sr = attr(ws[i], 'AXSubrole'); if (sr === 'AXDialog' || sr === 'AXSystemDialog') out.push({ el: ws[i], info: windowInfo(ws[i], i) }); }
+  return out;
+}
+function summaryOfWindow(x) { return { n: x.n, window_id: x.wid, title: x.title.slice(0, 80), frame: x.frame, minimized: x.minimized, ...(x.unreadable ? { unreadable: true } : {}) }; }
 
 function surfaceRoot(appEl, win, surface) {
   if (surface === 'menubar') { const mb = attr(appEl, 'AXMenuBar'); return mb && mb.el ? { el: mb.el, container: { kind: 'menubar' } } : { error: { code: 'SURFACE_ABSENT', message: 'the app exposes no menu bar' } }; }
@@ -441,34 +507,41 @@ function makeNode(v, ldepth, path, actions, interactive) {
   return node;
 }
 
+const NO_WINDOW_ID = -1;
 // Returns flat nodes in document order. Each node carries what the server needs to show it and to
 // find it again (path from the container root). Logical depth skips transparent wrappers.
 function walk(rootEl, rootPath, opt) {
   const nodes = [];
   const deadline = now() + opt.budgetMs;
   let visited = 0;
-  let complete = true;
+  let complete = true, rootErr = 0;
+  let outline = false;   // a skeleton snapshot left children out at its depth limit (it still reports complete)
   const skeleton = Boolean(opt.skeleton);
   const maxDepth = skeleton ? Math.min(opt.depth, 3) : opt.depth;
   // anc: evidence about the path from the container down to this node (see pathEvidence, which re-derives
   // it while resolving) — the child count at every level (shape), the labels of the ancestors (chain),
-  // and the text collectors of the nearest ITEM_LEVELS ancestors (item keys, see itemKeyOf)
+  // the text collectors of the nearest ITEM_LEVELS ancestors (accs: one of them becomes the node's item,
+  // see itemKeyOf), and every collector still taking texts (open: an ancestor collects at any depth)
   function visit(el, path, ldepth, inMenuBar, anc) {
     if (nodes.length >= opt.maxNodes || now() > deadline || visited >= opt.maxVisit) { complete = false; return 'stop'; }
     visited++;
-    collect(anc.accs, null, true);
+    collect(anc.open, null, true);
     const v = readNode(el);
-    if (v.__err) { if (v.__err !== -25202) complete = false; return; } // vanished: skip; unanswered: incomplete
+    // a descendant that vanished is skipped; one that did not answer, or a root that is gone, leaves the walk incomplete
+    if (v.__err) { if (el === rootEl) rootErr = v.__err; if (v.__err !== -25202 || el === rootEl) complete = false; return; }
     const role = v.AXRole || '?';
     const isRoot = el === rootEl;
     // a text field's value counts for an ancestor's item only through a cell or row (table content)
     const t = itemText(v, true);
-    if (t) collect(anc.accs, t, false, TEXT_ROLES.has(role) ? anc.cells : null);
+    if (t) collect(anc.open, t, false, TEXT_ROLES.has(role));
     if (opt.pruneMenuBar && (role === 'AXMenuBar') && !inMenuBar) return;
     // every visited element counts towards "is this fingerprint unique" — also the ones a filtered
     // (find) or interactive-only snapshot does not show
     const fid = fpKey(role, v.AXSubrole || '', v.AXIdentifier || '', stableName(v));
     seen[fid] = (seen[fid] || 0) + 1;
+    // where it sits, to count the look-alikes of an item among all visited elements (see the end of walk)
+    const rec = { fid, accs: anc.accs, own: null };
+    recs.push(rec);
     const actions = actionNames(el);
     const wrapper = isWrapper(v, actions);
     const interactive = isInteractive(v, actions);
@@ -477,10 +550,13 @@ function walk(rootEl, rootPath, opt) {
     const show = !(opt.compact && wrapper) && (!opt.interactive || interactive || (skeleton && atLimit && kids.length));
     // app-level snapshots (no window container): an element under a window records that window's
     // CGWindowID, so a window closed and reopened with the same content is not taken for the old one
-    const wwid = opt.trackWindow ? (role === 'AXWindow' ? axWindowId(el) : anc.wwid) : null;
+    // a window without an id (NO_WINDOW_ID) cannot be told from one closed and reopened with the same content:
+    // what is seen inside it is marked, and the resolver refuses it as it refuses a window-level snapshot of
+    // such a window (Finder's desktop is the exception there and here)
+    const wwid = opt.trackWindow ? (role === 'AXWindow' ? (axWindowId(el) || (opt.noIdOk && opt.noIdOk(el) ? null : NO_WINDOW_ID)) : anc.wwid) : null;
     if (opt.find ? matches(v, opt.find) : show) {
       const node = makeNode(v, ldepth, path, actions, interactive);
-      if (wwid) node.fp.wwid = wwid;
+      if (wwid === NO_WINDOW_ID) node.fp.wnoid = true; else if (wwid) node.fp.wwid = wwid;
       if (anc.chain.length) node.fp.chain = chainKey(anc.chain);
       node._shape = anc.shape.slice();
       node._accs = anc.accs;
@@ -489,15 +565,16 @@ function walk(rootEl, rootPath, opt) {
       nodes.push(node);
       if (opt.find && nodes.length >= opt.find.limit) { complete = false; return 'stop'; }
     }
-    if (atLimit && !opt.find) { if (kids.length && !skeleton) complete = false; if (kids.length) for (const a of anc.accs) if (!a.full) a.cut = true; return; }
+    if (atLimit && !opt.find) { if (kids.length && !skeleton) complete = false; if (kids.length && skeleton) outline = true; if (kids.length) for (const x of anc.open) if (!x.a.full) x.a.cut = true; return; }
     const nextDepth = wrapper ? ldepth : ldepth + 1;
     const name = isRoot && opt.rootIsContainer ? '' : chainName(v);
     // the container itself is never an item (its texts are the whole window's: toolbars, status lines),
     // nor are page-, toolbar- or pane-level groups
     const own = { texts: [], seen: 0, full: false, cut: false, closed: false, noItem: (isRoot && Boolean(opt.rootIsContainer)) || ITEM_SKIP_ROLES.has(role) };
     if (nodes.length && nodes[nodes.length - 1]._el === el) nodes[nodes.length - 1]._own = own;
+    rec.own = own;
     const cell = CELL_ROLES.has(role);
-    const childAnc = { shape: anc.shape.concat(kids.length), chain: name ? anc.chain.concat(name) : anc.chain, accs: [own].concat(anc.accs).slice(0, ITEM_LEVELS), cells: [cell].concat(anc.cells.map(c => c || cell)).slice(0, ITEM_LEVELS), wwid };
+    const childAnc = { shape: anc.shape.concat(kids.length), chain: name ? anc.chain.concat(name) : anc.chain, accs: [own].concat(anc.accs).slice(0, ITEM_LEVELS), open: [{ a: own, cell }].concat(anc.open.filter(x => !x.a.full).map(x => ({ a: x.a, cell: x.cell || cell }))), wwid };
     if (atLimit) own.cut = true;
     for (let i = 0; i < kids.length; i++) {
       if (visit(kids[i], path.concat(i), nextDepth, inMenuBar || role === 'AXMenuBar', childAnc) === 'stop') return 'stop';
@@ -506,7 +583,8 @@ function walk(rootEl, rootPath, opt) {
   }
   const pre = opt.evidence || { shape: [], chain: [] };
   const seen = {};
-  visit(rootEl, rootPath.slice(), 0, false, { shape: pre.shape.slice(), chain: pre.chain.slice(), accs: [], cells: [], wwid: opt.trackWindow ? windowIdOf(rootEl) : null });
+  const recs = [];
+  visit(rootEl, rootPath.slice(), 0, false, { shape: pre.shape.slice(), chain: pre.chain.slice(), accs: [], open: [], wwid: opt.trackWindow ? windowIdOf(rootEl) : null });
   // Elements that share their fingerprint with another one in the container (several "Delete" buttons,
   // one per list item) are told apart by their surroundings: the path shape, and the item key. Uniqueness
   // is known only when the whole container was walked: a snapshot that stopped early, or one drilled into
@@ -514,10 +592,12 @@ function walk(rootEl, rootPath, opt) {
   // Every labelled element also records its item key — the first texts under itself or its nearest
   // ancestor (within ITEM_LEVELS, never the container) that has any — because a look-alike can appear
   // after the snapshot (a second message arriving above the only one there was). Every element records
-  // its path shape. An item key that two look-alikes share (both rows climbed to the same section
-  // heading) tells nothing apart and is dropped.
-  const whole = complete && opt.rootIsContainer !== false;
-  const picked = new Map();
+  // its path shape. An item key that two look-alikes share (two rows that both climbed to the same section
+  // heading, or two unlabelled buttons of one row) does not tell them apart: it is marked shared, and a
+  // search never picks one of them by it. It is kept all the same, because it still says where they are —
+  // found by its path, such an element must still sit in that item (a recycled row is another item).
+  // a skeleton that left children out has not seen the whole container either
+  const whole = complete && !outline && opt.rootIsContainer !== false;
   for (const n of nodes) {
     const fid = fpKey(n.fp.role, n.fp.subrole, n.fp.id, n.fp.name);
     const dup = !whole || seen[fid] > 1;
@@ -529,20 +609,35 @@ function walk(rootEl, rootPath, opt) {
       const accs = [n._own].concat(n._accs);
       for (let k = 0; k < accs.length; k++) {
         const a = accs[k];
+        // the row or group around it (not its own subtree) was not read in full: its texts — what tells this
+        // element from the same control of another row — are unknown, and the element is refused for actions
+        if (k > 0 && a && a.cut && !a.noItem) { n.fp.rowcut = true; break; }
         if (a && a.closed && !a.cut && !a.noItem && a.texts.length) {
           n.fp.item = `${k}:${a.texts.join('\u0001')}`;
           n._acc = a;
-          if (dup) { if (!picked.has(fid)) picked.set(fid, new Map()); const m = picked.get(fid); m.set(a, (m.get(a) || 0) + 1); }
           break;
         }
       }
     }
   }
+  // look-alikes that share an item are counted over every visited element — also the ones a filtered snapshot
+  // (mac_find, interactive) left out: a left-out look-alike in the same row makes the row's texts tell nothing
+  // apart. A left-out one whose nearer group was not read in full is counted at the first item that was.
+  const want = new Set();
+  for (const n of nodes) if (n.fp.dup && n._acc) want.add(fpKey(n.fp.role, n.fp.subrole, n.fp.id, n.fp.name));
+  const byItem = new Map();
+  for (const r of recs) {
+    if (!want.has(r.fid)) continue;
+    const a = [r.own].concat(r.accs).find((x) => x && x.closed && !x.cut && !x.noItem && x.texts.length);
+    if (!a) continue;
+    if (!byItem.has(r.fid)) byItem.set(r.fid, new Map());
+    const m = byItem.get(r.fid); m.set(a, (m.get(a) || 0) + 1);
+  }
   for (const n of nodes) {
-    if (n.fp.dup && n._acc) { const m = picked.get(fpKey(n.fp.role, n.fp.subrole, n.fp.id, n.fp.name)); if (m && m.get(n._acc) > 1) delete n.fp.item; }
+    if (n.fp.dup && n._acc) { const m = byItem.get(fpKey(n.fp.role, n.fp.subrole, n.fp.id, n.fp.name)); if (m && m.get(n._acc) > 1) n.fp.shared = true; }
     delete n._shape; delete n._accs; delete n._el; delete n._own; delete n._acc;
   }
-  return { nodes, complete, visited };
+  return { nodes, complete, visited, rootErr };
 }
 
 function textMatch(have, want, exact) {
@@ -615,13 +710,16 @@ function itemText(v, cellOk) {
 }
 function fpKey(role, subrole, id, name) { return [role, subrole, id, name].join('\u0001'); }
 // walk-side collection: every visited descendant counts against ITEM_VISIT (whether or not it answers),
-// texts are kept in document order until ITEM_TEXTS — itemKeyOf counts the same way
-function collect(accs, text, counting, mask) {
-  for (let j = 0; j < accs.length; j++) {
-    const a = accs[j];
+// texts are kept in document order until ITEM_TEXTS — itemKeyOf counts the same way. `open` holds every
+// ancestor whose collector is not full yet, however far up, as { a, cell } (cell: a cell or row lies
+// between that ancestor and the node — itemKeyOf's cellOk): an item's texts are often many levels below
+// it (web content), and itemKeyOf reads them at any depth. `field`: the text is a text field's value.
+function collect(open, text, counting, field) {
+  for (let j = 0; j < open.length; j++) {
+    const a = open[j].a;
     if (a.full) continue;
     if (counting) { if (++a.seen > ITEM_VISIT) a.full = true; continue; }
-    if (text && (!mask || mask[j])) { a.texts.push(text); if (a.texts.length >= ITEM_TEXTS) a.full = true; }
+    if (text && (!field || open[j].cell)) { a.texts.push(text); if (a.texts.length >= ITEM_TEXTS) a.full = true; }
   }
 }
 function chainName(v) { return VOLATILE_NAME_ROLES.has(v.AXRole) ? '' : stableName(v).replace(/\d+/g, '#'); }
@@ -711,16 +809,46 @@ function climbEvidence(e, root) {
   }
   return null;
 }
+// A number in a unique element's item may change in place only when its form says it is a reading and not a name:
+// a clock time or a duration (12:30, 1:02:03), a percentage (45%), a time span with its unit (5 min, 3h, 2 days
+// ago, 3 分钟前), an explicit count (3 unread, Unread 3, 12 items, 2 new messages) or — as a text of its own — a
+// count against a fixed total above 31 that is not a year (12/280: the total has to stay). Any other number is
+// part of the item's name: "Invoice 12" replaced in place by "Invoice 13" is another item, and so are "Room 5",
+// "$1,200", "Report (2)" and a date.
+// a one-letter unit ends the token: "104s-2" and "2hx" are no spans
+const READING_UNIT = '(?:(?:[Ss]ecs?|[Ss]econds?|[Mm]ins?|[Mm]inutes?|[Hh]rs?|[Hh]ours?|[Dd]ays?|[Ww]ks?|[Ww]eeks?|[Mm]onths?|[Yy]rs?|[Yy]ears?)(?![A-Za-z])|[smh](?![\\w-]))';
+// a reading's number has nothing glued to its front: no letter or digit ("A12%", "x5 min"), no currency sign
+// ("$12m"), no 第 ("第3天" is Day 3). The character before it is kept by the match and left as it is.
+const READING_FRONT = '(?:^|[^\\w$€£¥₹₩第.,])';
+const COUNT_WORD = '(?:[Uu]nread|[Nn]ew|[Ii]tems?|[Mm]essages?|[Nn]otifications?|[Cc]omments?|[Rr]epl(?:y|ies)|[Rr]esults?|[Ss]elected|[Rr]emaining|[Ll]eft|[Mm]ore|[Uu]pdates?|未读|未讀)';
+const COUNT_NAMED = '(?:[Uu]nread|[Ii]tems|[Mm]essages|[Nn]otifications|[Cc]omments|[Rr]eplies|[Rr]esults|[Uu]pdates|未读|未讀)';
+const TEXT_END = '(?=\\s*(?:$|\\u0001|[)\\]）】,.;:!?·|]))';
+const READING = new RegExp([
+  '(?:^|[^\\d:])\\d{1,2}:\\d{2}(?::\\d{2})?(?![\\d:])',   // a whole clock: not the middle of "912:30", not the start of "12:300"
+  READING_FRONT + '\\d+(?:[.,]\\d+)?\\s?%',
+  READING_FRONT + '\\d+(?:[.,]\\d+)?\\s?' + READING_UNIT,
+  READING_FRONT + '\\d+\\s?(?:秒|分钟|分鐘|小时|小時|天)(?:[前后後内內]|(?![\\u4e00-\\u9fff]))',   // 3 分钟前, 5 分钟 — not 3天行程, 24小时制
+  READING_FRONT + '\\d+\\+?\\s?(?:条|條|封|则|則|个|個)?\\s?' + COUNT_WORD + '(?:\\s' + COUNT_WORD + ')?' + TEXT_END,
+  COUNT_NAMED + ':?\\s?\\d+\\+?' + TEXT_END,
+].join('|'), 'g');
+function steadyItem(key) {
+  const i = key.indexOf(':');
+  return key.slice(0, i + 1) + key.slice(i + 1).split('\u0001').map((t) => {
+    const m = /^(\d+)\s?\/\s?(\d+)$/.exec(t);
+    if (m) { const total = Number(m[2]); return total > 31 && !(total >= 1900 && total < 2100) ? `#/${m[2]}` : t; }
+    return t.replace(READING, (s) => s.replace(/\d+/g, '#'));
+  }).join('\u0001');
+}
 // item key check: level 0 is the element itself, then its ancestors nearest first (the container last)
-// A look-alike's item must match exactly ("Invoice 12" is not "Invoice 13"); a unique element's item
-// ignores digits like the ancestor chain does (a counter or a relative time in the same group changes)
+// A look-alike's item must match exactly; a unique element's item may differ in the numbers steadyItem lets
+// change (a counter or a relative time in the same group changes while the element stays the same)
 function itemSame(el, ancs, fp, skipMenuBar, exact) {
   if (!fp.item) return true;
   const k = itemLevel(fp);
   const a = k === 0 ? el : ancs[k - 1];
   if (!a) return false;
   const live = itemKeyOf(a, k, skipMenuBar);
-  return fp.dup || exact ? live === fp.item : live.replace(/\d+/g, '#') === fp.item.replace(/\d+/g, '#');
+  return fp.dup || exact ? live === fp.item : steadyItem(live) === steadyItem(fp.item);
 }
 function itemLevel(fp) { return fp.item ? Number(fp.item.slice(0, fp.item.indexOf(':'))) : -1; }
 // open menus (a pop-up, a context menu, a menu bar menu while it is open)
@@ -763,10 +891,21 @@ function containerEl(appEl, c, app) {
   return { error: 'container_unknown' };
 }
 const SEARCH_MAX_DEPTH = 150, SEARCH_MAX_VISIT = 20000;
+function unverifiableWindow() {
+  return { code: 'POLICY_DENIED', message: 'the element\'s window had no window ID when it was read, so a window closed and reopened with the same title and frame could not be told apart from it — element_index actions in this window are refused (use the app\'s menu with mac_menu_command, or mac_click x,y, which checks the window on top)', details: { kind: 'window_unverifiable' } };
+}
 // An element seen in an app-level snapshot recorded the CGWindowID of the window it was in (fp.wwid):
 // found again, it must still be in that very window — a window closed and reopened with the same content
 // has a new id and is a stale reference (Reddit r/mcp review 2026-11-06).
-function resolveTarget(t, budgetMs) {
+// An element of a row that the snapshot did not read in full (fp.rowcut) is found for a read (mac_get, a wait, a
+// drill with root) but refused for an action: without the row's texts nothing tells it from the same control of
+// another row that took the row's place with the same shape.
+function rowUnread() {
+  return { code: 'STALE_REF', message: 'the row or group this element is in was not read in full (the snapshot stopped above its texts: skeleton, depth or max_nodes), so it cannot be told from the same control of another row — drill into the row with root, or take a snapshot without skeleton or with a higher depth, and act on an index from that', details: { kind: 'row_unread' } };
+}
+function resolveTarget(t, budgetMs, read) {
+  if (t && t.fp && t.fp.wnoid) return { error: unverifiableWindow() };
+  if (t && t.fp && t.fp.rowcut && !read) return { error: rowUnread() };
   const r = resolveTargetCore(t, budgetMs);
   if (r.error || !t || !t.fp || !t.fp.wwid) return r;
   const live = windowIdOf(r.el);
@@ -782,7 +921,7 @@ function resolveTargetCore(t, budgetMs) {
   const kind = t.container && t.container.kind || 'app';
   const c = containerEl(appEl, t.container, app);
   if (c.error === 'window_unverifiable') {
-    return { error: { code: 'POLICY_DENIED', message: 'the element\'s window had no window ID when it was read, so a window closed and reopened with the same title and frame could not be told apart from it — element_index actions in this window are refused (use the app\'s menu with mac_menu_command, or mac_click x,y, which checks the window on top)', details: { kind: 'window_unverifiable' } } };
+    return { error: unverifiableWindow() };
   }
   if (c.error) {
     const amb = /ambiguous/.test(c.error);
@@ -805,7 +944,7 @@ function resolveTargetCore(t, budgetMs) {
     // the shape of the path must hold unless the element's own item (itself or its parent) vouches for
     // it word for word — an unlabelled element always needs it; a different shape sends a labelled one
     // to the search (a row prepended above "Invoice 12" that reads "Invoice 13" is not a match)
-    const ownItem = !anon && itemLevel(t.fp) >= 0 && itemLevel(t.fp) <= 1;
+    const ownItem = !anon && !t.fp.shared && itemLevel(t.fp) >= 0 && itemLevel(t.fp) <= 1;
     const shaped = shapeOk(pe.shape);
     if (!v.__err && fpOk(v, t.fp) && frameNear(v, t.fp, c.shift, anon ? POS_TOL : PATH_NAMED_TOL) && chainOk(pe.chain)
       && (shaped ? (!t.fp.item || itemSame(pe.el, ancs, t.fp, skipMenuBar)) : ownItem && itemSame(pe.el, ancs, t.fp, skipMenuBar, true))) {
@@ -833,10 +972,12 @@ function resolveTargetCore(t, budgetMs) {
   const evOk = (h, withItem) => { const ev = climbEvidence(h.el, c.el); return Boolean(ev) && chainOk(ev.chain) && (!withItem || itemSame(h.el, ev.ancs, t.fp, skipMenuBar)); };
   if (t.fp.dup) {
     // one of several look-alikes (a Delete per list item): only its item's texts tell which one it was
-    if (!t.fp.item) return { error: { code: 'STALE_REF', message: 'the element moved and it has look-alikes that nothing tells apart — take a new snapshot', details: { kind: 'saved_ref_moved' } } };
+    if (!t.fp.item || t.fp.shared) return { error: { code: 'STALE_REF', message: 'the element moved and it has look-alikes that nothing tells apart — take a new snapshot', details: { kind: 'saved_ref_moved' } } };
     const agree = hits.filter(h => evOk(h, true));
     const pick = agree.length > 1 ? agree.filter(h => frameNear(h.v, t.fp, c.shift, POS_TOL)) : agree;
-    if (pick.length === 1 && (complete || agree.length === 1)) return found(pick[0], 'search+item');
+    // a search that could not read everything may have missed the real one: the only match it did read counts
+    // only where the element was (as for a unique element below)
+    if (pick.length === 1 && (complete || (agree.length === 1 && frameNear(pick[0].v, t.fp, c.shift, POS_TOL)))) return found(pick[0], 'search+item');
     if (agree.length > 1) return { error: { code: 'AMBIGUOUS_TARGET', message: `${agree.length} look-alikes now match this element and its item — take a new snapshot`, details: { kind: 'saved_ref_ambiguous' } } };
     return { error: { code: 'STALE_REF', message: 'the element and its item are gone or changed since the snapshot', details: { kind: complete ? 'saved_ref_absent' : 'search_incomplete' } } };
   }
@@ -872,9 +1013,9 @@ function opSnapshot(req) {
     pruneMenuBar: true,
   };
   // contEl: the element the container record stands for (where paths start); the root is walked
-  let root, container, basePath = [], winInfo = null, surface = req.surface || 'window', contEl = null;
+  let root, container, basePath = [], winInfo = null, winPartial = false, surface = req.surface || 'window', contEl = null;
   if (req.root) {
-    const r = resolveTarget(req.root, 3000);
+    const r = resolveTarget(req.root, 3000, true);
     if (r.error) return fail(r.error);
     // children are numbered from where the root is now, not from where it was (it may have been found
     // by search after siblings moved)
@@ -887,12 +1028,21 @@ function opSnapshot(req) {
     else {
       const w = pickWindow(appEl, req);
       if (w.error) return fail(w.error);
-      root = w.el; container = w.info; winInfo = w.info;
+      root = w.el; container = w.info; winInfo = w.info; winPartial = Boolean(w.partial);
     }
     contEl = root;
   } else {
     let win = null;
-    if (surface === 'sheet' || surface === 'alert' || surface === 'popover' || surface === 'dialog') { const w = pickWindow(appEl, req); if (w.error) return fail(w.error); win = w; winInfo = w.info; }
+    if (surface === 'sheet' || surface === 'alert' || surface === 'popover' || surface === 'dialog') {
+      const w = pickWindow(appEl, req);
+      if (w.error) {
+        // several windows and none focused: a dialog or alert that is a window of its own is the answer when it is
+        // the only one (the windows were not looked at before AMBIGUOUS_WINDOW); a window asked for stays asked for
+        const own = (surface === 'alert' || surface === 'dialog') && w.error.code === 'AMBIGUOUS_WINDOW' && req.window == null && req.window_id == null ? dialogWindows(appEl) : [];
+        if (own.length !== 1) return fail(w.error);
+        win = own[0]; winInfo = own[0].info;
+      } else { win = w; winInfo = w.info; winPartial = Boolean(w.partial); }
+    }
     const s = surfaceRoot(appEl, win, surface);
     if (!s) return fail({ code: 'INVALID_ARGS', message: `unknown surface "${surface}"` });
     if (s.error) return fail(s.error);
@@ -923,17 +1073,25 @@ function opSnapshot(req) {
   }
   const t0 = now();
   const rv = readNode(root);
-  if (rv.__err === -25204) return fail({ code: 'APP_UNRESPONSIVE', message: `"${app.name}" did not answer accessibility in time (it may be busy or hung)` });
+  // A root that cannot be read is an error, never an empty tree — whichever of the two reads of it fails (this
+  // one, or the walk's a moment later). Gone between being picked and being read is a window that just closed.
+  const rootError = (err) => err === -25204 ? fail({ code: 'APP_UNRESPONSIVE', message: `"${app.name}" did not answer accessibility in time (it may be busy or hung)` })
+    : err === -25202 ? fail({ code: 'STALE_REF', message: 'what was being snapshotted went away as the snapshot started — take a new snapshot', details: { kind: 'gone' } })
+    : err === -25211 ? fail(permError())
+    : fail({ code: 'INTERNAL', message: `the root of the snapshot could not be read (accessibility error ${err})` });
+  if (rv.__err) return rootError(rv.__err);
   opt.trackWindow = !container || container.kind === 'app';
+  opt.noIdOk = (winEl) => isFinderDesktop(app, windowInfo(winEl, 0));
   const w = walk(root, basePath, opt);
+  if (w.rootErr) return rootError(w.rootErr);
   const out = {
     ok: true, app: app.name, bundle_id: app.bundle, pid: app.pid, surface, complete: w.complete,
     container: containerOut(container), nodes: w.nodes, visited: w.visited, ms: now() - t0,
   };
   if (req.root) out.root_path = basePath;
-  if (winInfo) out.window = { title: winInfo.title, frame: winInfo.frame, n: winInfo.n, window_id: winInfo.wid };
+  if (winInfo) out.window = { title: winInfo.title, frame: winInfo.frame, n: winInfo.n, window_id: winInfo.wid, ...(winPartial ? { title_match: 'partial' } : {}) };
   if (webAx) out.web_accessibility = webAxStatus(webAx, root, basePath, surface === 'window');
-  if (container && container.kind === 'window' && !container.wid && !isFinderDesktop(app, container)) out.window_identity = 'unverifiable';
+  if ((container && container.kind === 'window' && !container.wid && !isFinderDesktop(app, container)) || w.nodes.some(n => n.fp.wnoid)) out.window_identity = 'unverifiable';
   return out;
 }
 function containerOut(c) {
@@ -970,15 +1128,15 @@ function opFind(req) {
   else { const w = pickWindow(appEl, req); if (w.error) return fail(w.error); root = w.el; container = w.info; }
   const f = { role: req.role, title: req.title, value: req.value, id: req.id, text: req.text, exact: Boolean(req.exact), limit: clamp(req.limit, 1, 50, 10) };
   if (!(f.role || f.title || f.value || f.id || f.text)) return fail({ code: 'INVALID_ARGS', message: 'give at least one of role, title, value, id, text' });
-  const w = walk(root, basePath, { depth: 60, maxNodes: 100000, budgetMs: clamp(req.budget_ms, 500, 20000, 8000), maxVisit: 30000, find: f, pruneMenuBar: surface !== 'menubar', rootIsContainer: true, trackWindow: surface === 'app' });
+  const w = walk(root, basePath, { depth: 60, maxNodes: 100000, budgetMs: clamp(req.budget_ms, 500, 20000, 8000), maxVisit: 30000, find: f, pruneMenuBar: surface !== 'menubar', rootIsContainer: true, trackWindow: surface === 'app', noIdOk: (winEl) => isFinderDesktop(app, windowInfo(winEl, 0)) });
   const out = { ok: true, app: app.name, bundle_id: app.bundle, pid: app.pid, surface, container: containerOut(container), nodes: w.nodes, complete: w.complete, visited: w.visited };
   if (webAx) out.web_accessibility = webAxStatus(webAx, root, basePath, surface === 'window');
-  if (container && container.kind === 'window' && !container.wid && !isFinderDesktop(app, container)) out.window_identity = 'unverifiable';
+  if ((container && container.kind === 'window' && !container.wid && !isFinderDesktop(app, container)) || w.nodes.some(n => n.fp.wnoid)) out.window_identity = 'unverifiable';
   return out;
 }
 
 function opGet(req) {
-  const r = resolveTarget(req.target, 3000);
+  const r = resolveTarget(req.target, 3000, true);
   if (r.error) return fail(r.error);
   const v = r.v;
   const out = { ok: true, how: r.how, role: v.AXRole, title: nameOf(v) };
@@ -1023,11 +1181,21 @@ function displays() {
 }
 
 function opWindows(req) {
+  // app: a name, a bundle id, a .app path or "pid:<number>" names one process, as for every other tool — several
+  // apps under one name are refused (ambiguous_app). A word that names no app exactly still filters the window
+  // owners' names by substring, as before ("Chrome" lists Google Chrome's windows).
+  let wantPid = null;
+  if (req.app) {
+    const hit = appCandidates(req.app);
+    if (hit.length > 1) throw { noracu: ambiguousApp(req.app, hit) };
+    if (hit.length === 1) wantPid = hit[0].pid;
+  }
   const opts = req.include_offscreen ? $.kCGWindowListOptionAll : ($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements);
   const info = cast($.CGWindowListCopyWindowInfo(opts, 0));
   const front = frontApp();
   const out = [];
-  let named = 0;
+  let named = 0, me = -1;
+  try { me = Number($.NSProcessInfo.processInfo.processIdentifier); } catch (e) { /* not known */ }
   const n = info ? Number(info.count) : 0;
   const wantApp = req.app ? String(req.app).toLowerCase() : '';
   for (let i = 0; i < n; i++) {
@@ -1036,12 +1204,14 @@ function opWindows(req) {
     const layer = Number(get('kCGWindowLayer') ? get('kCGWindowLayer').js : 0);
     if (layer !== 0 && !req.all_layers) continue;
     const owner = get('kCGWindowOwnerName') ? get('kCGWindowOwnerName').js : '';
-    if (wantApp && owner.toLowerCase().indexOf(wantApp) < 0) continue;
+    if (wantPid !== null ? Number(get('kCGWindowOwnerPID') ? get('kCGWindowOwnerPID').js : 0) !== wantPid : (wantApp && owner.toLowerCase().indexOf(wantApp) < 0)) continue;
     const b = get('kCGWindowBounds');
     const bounds = b ? [Math.round(Number(b.objectForKey(ks('X')).js)), Math.round(Number(b.objectForKey(ks('Y')).js)), Math.round(Number(b.objectForKey(ks('Width')).js)), Math.round(Number(b.objectForKey(ks('Height')).js))] : null;
     const title = get('kCGWindowName') ? get('kCGWindowName').js : null;
-    if (title !== null) named++;
     const pid = Number(get('kCGWindowOwnerPID') ? get('kCGWindowOwnerPID').js : 0);
+    // a title the window server gave: another process's, and not empty — this process's own windows are named
+    // without Screen Recording permission, and an empty title is no title
+    if (title && pid !== me) named++;
     out.push({ id: Number(get('kCGWindowNumber').js), app: owner, pid, title, bounds, onscreen: Boolean(get('kCGWindowIsOnscreen') && get('kCGWindowIsOnscreen').js), layer, frontmost_app: Boolean(front && front.pid === pid) });
   }
   // Without Screen Recording permission window titles are withheld; fill them from accessibility.
@@ -1051,11 +1221,19 @@ function opWindows(req) {
     for (const pid of Object.keys(byPid)) {
       const appEl = $.AXUIElementCreateApplication(Number(pid));
       $.AXUIElementSetMessagingTimeout(appEl, 1.0);
-      const ws = windowsOf(appEl);
-      for (let i = 0; i < ws.length; i++) {
-        const wi = windowInfo(ws[i], i);
-        const hit = byPid[pid].find(x => rectNear(x.bounds, wi.frame, 2));
-        if (hit) { hit.title = wi.title; hit.ax_index = i; }
+      const infos = windowsOf(appEl).map((w, i) => windowInfo(w, i));
+      // the row with the window's id
+      infos.forEach((wi, i) => {
+        const hit = wi.wid ? byPid[pid].find(x => x.ax_index === undefined && x.id === wi.wid) : null;
+        if (hit) { if (!wi.unreadable) hit.title = wi.title; hit.ax_index = i; }
+      });
+      // a window whose id cannot be read: by its frame, and only when that names one such window and one row no
+      // window has taken — a frame that two of either share does not say which is which (one may be minimized or
+      // on another Space and have no row at all), and a guess would put one window's title on another
+      const noId = infos.map((wi, i) => ({ wi, i })).filter(o => !o.wi.wid);
+      for (const o of noId) {
+        const rows = byPid[pid].filter(x => x.ax_index === undefined && rectNear(x.bounds, o.wi.frame, 2));
+        if (rows.length === 1 && noId.filter(p => rectNear(p.wi.frame, o.wi.frame, 2)).length === 1) { rows[0].title = o.wi.title; rows[0].ax_index = o.i; }
       }
     }
   }
@@ -1111,16 +1289,50 @@ function axCallError(code, what) {
   return { code: 'ACTION_FAILED', message: `${what}: accessibility error ${code}`, delivery: 'unknown', retry: 'unsafe' };
 }
 
+// -25204 is also what a call to an app that has just exited returns: then the element is gone, not slow.
+// Unknown (no pid) counts as still running. A view hosted by a helper process (an open or save panel) has
+// the helper's pid, which is not among the apps: the process itself is asked for (kill with signal 0).
+function appOfElementExited(el) {
+  try {
+    const pr = Ref();
+    if (Number($.AXUIElementGetPid(el, pr)) !== 0) return false;
+    const pid = Number(pr[0]);
+    return Number.isInteger(pid) && pid > 0 && !runningApps().some(a => a.pid === pid) && Number($.kill(pid, 0)) !== 0;
+  } catch (e) { return false; }
+}
 // Transient checks are polled until the budget runs out: the element must still exist and be enabled.
+// waited: the element was not actionable at the first look, so time went by before it was
 function waitActionable(el, timeoutMs) {
   const end = now() + timeoutMs;
-  for (;;) {
+  for (let waited = false; ; waited = true) {
     const v = readNode(el);
-    if (v.__err) return { error: notDelivered({ code: 'STALE_REF', message: 'the element disappeared', details: { kind: 'gone' } }) };
-    if (v.AXEnabled !== false) return { v };
+    // only -25202 means the element is gone; an app that did not answer, or a lost permission, is said as such
+    if (v.__err === -25202 || (v.__err === -25204 && appOfElementExited(el))) return { error: notDelivered({ code: 'STALE_REF', message: 'the element disappeared', details: { kind: 'gone' } }) };
+    if (v.__err === -25204) return { error: notDelivered({ code: 'APP_UNRESPONSIVE', message: 'the app did not answer in time while the element was being checked — nothing was sent' }) };
+    if (v.__err === -25211) return { error: notDelivered(permError()) };
+    if (v.__err) return { error: notDelivered({ code: 'ACTION_FAILED', message: `the element could not be read (accessibility error ${v.__err}) — nothing was sent` }) };
+    if (v.AXEnabled !== false) return { v, waited };
     if (now() >= end) return { error: notDelivered({ code: 'NOT_ACTIONABLE', message: 'the element is disabled', details: { kind: 'disabled' } }) };
     sleep(100);
   }
+}
+
+// An element that was waited for (it was disabled, for up to 30 s) is looked up once more before anything is done
+// to it: a list re-uses one accessibility element for another row, and what became enabled may not be the row
+// that was asked for. Returns the refusal, or null when it is still the same element.
+function changedWhileWaited(target, r, w) {
+  if (!w.waited) return null;
+  let again;
+  try { again = resolveTarget(target, 1000); } catch (e) { again = { error: true }; }
+  if (!again.error && same(again.el, r.el)) return null;
+  // A control with an identifier of its own — no other element of the snapshot had it, and it is not part of a
+  // list item — that only changed its label while it was waited for ("Loading…" → "Submit") is still that control.
+  const fp = target && target.fp;
+  if (fp && fp.id && !fp.dup && !fp.item) {
+    const v = readNode(r.el);
+    if (!v.__err && (v.AXIdentifier || '') === fp.id && (v.AXRole || '') === fp.role && (v.AXSubrole || '') === (fp.subrole || '')) return null;
+  }
+  return notDelivered({ code: 'STALE_REF', message: 'the element changed while it was waited for (it was disabled) — take a new snapshot', details: { kind: 'changed_while_waited' } });
 }
 
 function menuOpen(appEl) {
@@ -1136,7 +1348,7 @@ function observeState(el, appEl) {
   if (el) {
     const v = readNode(el);
     // only an invalid element (-25202) is gone; any other read error (-25204: the app did not answer in time)
-    // says nothing about the element, so it is unknown, never evidence of a change (audit S5A-s10-G-3 / -D-2)
+    // says nothing about the element, so it is unknown, never evidence of a change
     if (v.__err && v.__err !== -25202) o.gone = null;
     if (!v.__err) {
       o.gone = false;
@@ -1154,6 +1366,20 @@ function observeState(el, appEl) {
   }
   const ws = windowsOf(appEl);
   o.windows = ws.map(w => `${attr(w, 'AXSubrole') || ''}:${attr(w, 'AXTitle') || ''}`);
+  // for an action on an element: which kinds of windows there are, and the title of the element's own window
+  // (see diffState — another window's title is not evidence)
+  if (el) {
+    o.windowKinds = ws.map(w => String(attr(w, 'AXSubrole') || '')).sort();
+    // the element's window: its AXWindow, else the first window on the way up; null when neither is found
+    let ow = attr(el, 'AXWindow');
+    for (let up = el, d = 0; !(ow && ow.el) && d < 60; d++) {
+      const p = attr(up, 'AXParent');
+      if (!p || !p.el) break;
+      if (attr(p.el, 'AXRole') === 'AXWindow') { ow = p; break; }
+      up = p.el;
+    }
+    o.ownWindow = ow && ow.el ? String(attr(ow.el, 'AXTitle') || '') : null;
+  }
   o.sheets = 0;
   for (const w of ws) for (const k of children(w)) if (attr(k, 'AXRole') === 'AXSheet') o.sheets++;
   o.menu = menuOpen(appEl);
@@ -1172,7 +1398,18 @@ function diffState(a, b, keys) {
   const allowed = Array.isArray(keys) ? new Set(keys) : null;
   // a key not read on either side (the element gone or unreadable there) proves nothing; neither does an unknown gone
   const known = (s, k) => (k === 'gone' ? s.gone !== null : !(s.gone !== false && s[k] === undefined));
-  const verified = changed.some(k => !WEAK_STATE_KEYS.has(k) && (!allowed || allowed.has(k)) && known(a, k) && known(b, k));
+  // For an action on an element, the list of window titles changing is evidence only when a window opened,
+  // closed or changed kind, or when the title that changed is the element's own window's: another window's
+  // title moves on its own (an unread count, a timer, a terminal's title) while the action did nothing.
+  // When the element cannot be asked for its window afterwards, its window is looked for in the list by the
+  // title it had: one window fewer with that title is evidence, another title changing is not. An element
+  // with no window to be found before the action is judged as it always was.
+  const ownKnown = typeof a.ownWindow === 'string' && typeof b.ownWindow === 'string';
+  const ownLost = typeof a.ownWindow === 'string' && b.ownWindow === null;
+  const titled = (s, t) => (s.windows || []).filter(w => String(w).slice(String(w).indexOf(':') + 1) === t).length;
+  const windowsCount = JSON.stringify(a.windowKinds) !== JSON.stringify(b.windowKinds)
+    || (ownKnown ? a.ownWindow !== b.ownWindow : ownLost ? titled(b, a.ownWindow) < titled(a, a.ownWindow) : true);
+  const verified = changed.some(k => !WEAK_STATE_KEYS.has(k) && (k !== 'windows' || windowsCount) && (!allowed || allowed.has(k)) && known(a, k) && known(b, k));
   const surfaces = [];
   if ((b.sheets || 0) > (a.sheets || 0)) surfaces.push('sheet');
   if (b.menu && !a.menu) surfaces.push('menu');
@@ -1196,6 +1433,7 @@ function opAct(req) {
   if (r.error) return fail(notDelivered(r.error));
   const w = waitActionable(r.el, clamp(req.timeout_ms, 0, 30000, 3000));
   if (w.error) return fail(w.error);
+  { const cw = changedWhileWaited(req.target, r, w); if (cw) return fail(cw); }
   const v = w.v;
   const actions = actionNames(r.el);
   let action = req.action;
@@ -1249,7 +1487,13 @@ function opFrontmost(req) {
   // at: [x, y] also reports whose window is on top at that point (raw-coordinate clicks check it first)
   if (Array.isArray(req.at) && req.at.length === 2 && req.at.every(v => typeof v === 'number' && isFinite(v))) out.top = cgTopAt(req.at[0], req.at[1]);
   if (req.pid !== undefined || req.app) {
-    const t = req.pid !== undefined ? runningApps().find(a => a.pid === Number(req.pid)) || null : findApp(req.app);
+    let t = null;
+    if (req.pid !== undefined) t = runningApps().find(a => a.pid === Number(req.pid)) || null;
+    else {
+      // a name several running apps share: no target — and the refusal goes along, for the caller to answer with
+      const hit = appCandidates(req.app);
+      if (hit.length > 1) out.ambiguous = ambiguousApp(req.app, hit); else t = hit[0] || null;
+    }
     out.target = t ? { pid: t.pid, name: t.name, bundle: t.bundle } : null;
     out.match = Boolean(f && t && f.pid === t.pid);
   }
@@ -1280,8 +1524,27 @@ function dockStrips() {
   return dockStripsOf(screens);
 }
 function inRect(x, y, r) { return x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3]; }
+// Where the Dock's tiles are drawn now, from accessibility (the frames of the Dock app's own elements, its list
+// of tiles), with a little margin for the platter. With "Automatically hide and show the Dock" on, macOS keeps
+// no strip for the Dock, so a Dock that had popped up over the bottom of the screen was not seen and a click
+// there would have landed on a Dock icon. Device run 2026-11-19, macOS 27.2, a 1440-pt display: the list's top
+// is at 1369 while the Dock shows and at 1440 (past the edge) while it is hidden, and the hidden Dock's
+// full-display window is not on screen at all.
+// Unreadable: none (the strip alone decides, as before).
+function dockDrawn() {
+  try {
+    const a = runningApps().find(x => x.bundle === 'com.apple.dock');
+    if (!a) return [];
+    const out = [];
+    for (const k of children(appElement(a))) {
+      const f = frameOf(readNode(k));
+      if (f) out.push([f[0] - 6, f[1] - 6, f[2] + 12, f[3] + 12]);
+    }
+    return out;
+  } catch (e) { return []; }
+}
 // While a banner or alert shows, Notification Center keeps one full-display window above everything (layer
-// 23) that lets clicks through except where a notification is drawn (E2 run 2026-11-07, macOS 27.2: a
+// 23) that lets clicks through except where a notification is drawn (device run 2026-11-07, macOS 27.2: a
 // memory-warning banner at the top right made a point in the middle of the screen read as covered). The
 // frames of the banners and alerts on screen, from accessibility; null — the whole overlay counts as
 // covering — when Notification Center's list is open, an element cannot be read, or none is found.
@@ -1310,7 +1573,7 @@ function ncDrawnRects() {
 // The topmost on-screen window at a point, front to back, as the window server stacks them. Skipped:
 // invisible windows (alpha 0), desktop-level ones (negative layer), and the Dock's full-display overlay,
 // which lets clicks through — except over the strip macOS keeps for the Dock, where the Dock is drawn:
-// there the overlay counts as covering (E2 run 2026-11-07: on macOS 27 the Dock has no window of its own
+// there the overlay counts as covering (device run 2026-11-07: on macOS 27 the Dock has no window of its own
 // for its platter, so a point under the Dock read as the window behind it). The strip is the whole width
 // (or height) the Dock reserves, the gaps beside its platter included. Other Dock-owned windows cover
 // what is under them. Notification Center's full-display overlay (shown with a banner or alert) is
@@ -1319,7 +1582,7 @@ function ncDrawnRects() {
 function cgTopAt(x, y) {
   const list = cast($.CGWindowListCopyWindowInfo((1 << 0) | (1 << 4), 0)); // on screen only, no desktop elements
   if (!list) return null;
-  let screens = null, strips = null, nc;
+  let screens = null, strips = null, drawn = null, nc;
   for (let i = 0; i < Number(list.count); i++) {
     const d = list.objectAtIndex(i);
     const g = k => { const o = d.objectForKey(ks(k)); return o && !o.isNil() ? o.js : null; };
@@ -1335,7 +1598,11 @@ function cgTopAt(x, y) {
       if (screens.some(f => rectNear(f, [bx, by, bw, bh], 2))) {
         if (owner === 'Dock') {
           if (!strips) strips = dockStrips();
-          if (!strips.some(r => inRect(x, y, r))) continue;
+          // outside the strip: covered where the Dock is drawn now (a Dock that hides itself has no strip)
+          if (!strips.some(r => inRect(x, y, r))) {
+            if (!drawn) drawn = dockDrawn();
+            if (!drawn.some(r => inRect(x, y, r))) continue;
+          }
         } else {
           if (nc === undefined) nc = ncDrawnRects();
           if (nc && !nc.some(r => inRect(x, y, r))) continue;
@@ -1355,15 +1622,24 @@ function opPhysicalPrep(req) {
   if (r.error) return fail(notDelivered(r.error));
   const w = waitActionable(r.el, clamp(req.timeout_ms, 0, 30000, 3000));
   if (w.error) return fail(w.error);
+  { const cw = changedWhileWaited(req.target, r, w); if (cw) return fail(cw); }
   const fr = frameOf(w.v);
   if (!fr || fr[2] <= 0 || fr[3] <= 0) return fail(notDelivered({ code: 'NOT_ACTIONABLE', message: 'the element has no size on screen', details: { kind: 'no_frame' } }));
   const x = Math.round(fr[0] + fr[2] / 2), y = Math.round(fr[1] + fr[3] / 2);
   if (!onSomeDisplay(x, y)) return fail(notDelivered({ code: 'NOT_ACTIONABLE', message: `the element's center (${x},${y}) is off every display — scroll it into view (mac_scroll with element_index) or move the window`, details: { kind: 'offscreen' } }));
   if (attr(r.el, 'AXWindow') && attr(attr(r.el, 'AXWindow').el, 'AXMinimized') === true) return fail(notDelivered({ code: 'NOT_ACTIONABLE', message: 'the element\'s window is minimized', details: { kind: 'minimized' } }));
-  // the element's window id: its AXWindow or the window up its AXParent chain (R20); else, for a window
+  // the element's window id: its AXWindow or the window up its AXParent chain; else, for a window
   // snapshot, the snapshot's window
   let ewid = windowIdOf(r.el);
   if (!ewid && req.target && req.target.container && req.target.container.kind === 'window') ewid = (r.containerEl && axWindowId(r.containerEl)) || req.target.container.wid || null;
+  // Finder's desktop, whatever the snapshot was of: the window the snapshot was taken of, or — for an element of
+  // an app-wide snapshot, whose container is the app — the element's own window (no window id; the desktop's
+  // title, subrole and frame)
+  const ownWin = ewid ? null : attr(r.el, 'AXWindow');
+  const desktop = Boolean((req.target && req.target.container && isFinderDesktop(r.app, req.target.container))
+    || (ownWin && ownWin.el && isFinderDesktop(r.app, windowInfo(ownWin.el, 0))));
+  // no window id of its own: the window on top at the point is read before the hit test and again after it
+  const topBefore = ewid ? null : cgTopAt(x, y);
   const h = hitTest(r.el, x, y);
   if (h.verdict === 'intercepted') return fail(notDelivered({ code: 'OCCLUDED', message: `something else is on top of the element at ${x},${y} — bring its window to the front or close what covers it`, details: { occluder: h.occluder } }));
   if (h.verdict === 'unknown') {
@@ -1374,20 +1650,34 @@ function opPhysicalPrep(req) {
     if (top.pid !== r.app.pid) return fail(notDelivered({ code: 'OCCLUDED', message: `a window of "${top.owner}" is on top at ${x},${y} — bring the element's window to the front or close what covers it`, details: { occluder: { app: top.owner, layer: top.layer } } }));
     // the app's own window, but not the one the element is in (a floating panel, another document)
     // the element's own window id; else its AXWindow's; else (a window snapshot) the snapshot's window —
-    // an unknown window id must not skip the check (R19)
+    // an unknown window id must not skip the check
     // without the element's window id the topmost window cannot be confirmed to be that window: refuse
-    // (R20 follow-up) — except Finder's desktop, which sits below every window and has no id
-    const desktop = req.target && req.target.container && isFinderDesktop(r.app, req.target.container);
-    if (!ewid && !desktop) return fail(notDelivered({ code: 'OCCLUDED', message: `the hit test at ${x},${y} was inconclusive and the element's window has no window ID, so the window on top cannot be confirmed to be its own — use the element's semantic action (mechanism auto) or bring its window to the front and take a new snapshot`, details: { occluder: { app: top.owner, layer: top.layer, window_unverifiable: true } } }));
+    // — except Finder's desktop, which sits below every window and has no id
+    if (!ewid && !desktop) return fail(notDelivered({ code: 'OCCLUDED', message: `the hit test at ${x},${y} was inconclusive and the element's window has no window ID, so the window on top cannot be confirmed to be its own — nothing was sent. Mechanism "semantic" presses the element without the pointer when it has an accessibility action (under "auto" a click comes here only when it has none); otherwise bring its window to the front and take a new snapshot`, details: { occluder: { app: top.owner, layer: top.layer, window_unverifiable: true } } }));
     if (ewid && top.wid && top.wid !== ewid) return fail(notDelivered({ code: 'OCCLUDED', message: `another window of "${top.owner}" is on top at ${x},${y} — bring the element's window to the front or close what covers it`, details: { occluder: { app: top.owner, layer: top.layer, other_window: true } } }));
     h.reason = (h.reason ? h.reason + '; ' : '') + 'the topmost window there is the app\'s own';
   }
-  return { ok: true, point: [x, y], hit: h.verdict, reason: h.reason, pid: r.app.pid, wid: ewid || null, before: observeState(r.el, r.appEl), role: w.v.AXRole, title: nameOf(w.v).slice(0, 60), how: r.how };
+  // An element with no window id of its own (a menu item, a menu bar item, Finder's desktop): which window the
+  // window server has on top at the point now is handed back (null: none), so that the server can tell right
+  // before the click whether it is still that one. It is read on both sides of the hit test — a menu that closes
+  // in between would otherwise leave what came up under it as the window to expect — and it has to be the app's
+  // own (an open menu is), or the window server's for a menu bar item (the menu bar is its window): another app's
+  // window at the point is not what was hit-tested.
+  const topNow = ewid ? null : cgTopAt(x, y);
+  if (!ewid) {
+    if ((topBefore ? topBefore.wid : null) !== (topNow ? topNow.wid : null)) return fail(notDelivered({ code: 'OCCLUDED', message: `what is on top at ${x},${y} changed while the element was being checked (a menu that closed, a window that came up) — take a new snapshot`, details: { kind: 'top_changed' } }));
+    // Finder's desktop is below every window, so a click meant for one of its icons lands on whatever window is at
+    // the point — one of Finder's own included, which reads as "the app's own window" everywhere above
+    if (desktop && topNow) return fail(notDelivered({ code: 'OCCLUDED', message: `a window of "${topNow.owner}" is on top of the desktop at ${x},${y} — move or close it, or use the icon's semantic action (mechanism auto)`, details: { kind: 'desktop_covered', occluder: { app: topNow.owner, layer: topNow.layer } } }));
+    const barItem = w.v.AXRole === 'AXMenuBarItem' || Boolean(req.target && req.target.container && req.target.container.kind === 'menubar');
+    if (topNow && topNow.pid !== r.app.pid && !(barItem && topNow.owner === 'Window Server')) return fail(notDelivered({ code: 'OCCLUDED', message: `a window of "${topNow.owner}" is on top at ${x},${y} — bring the element's app to the front or close what covers it`, details: { occluder: { app: topNow.owner, layer: topNow.layer } } }));
+  }
+  return { ok: true, point: [x, y], hit: h.verdict, reason: h.reason, pid: r.app.pid, wid: ewid || null, ...(ewid ? {} : { top_wid: topNow ? topNow.wid : null }), before: observeState(r.el, r.appEl), role: w.v.AXRole, title: nameOf(w.v).slice(0, 60), how: r.how };
 }
 const ABSENT_CODES = new Set(['STALE_REF', 'WINDOW_NOT_FOUND', 'APP_NOT_FOUND']);
 function resolveOrError(target, budgetMs) {
   let r;
-  try { r = resolveTarget(target, budgetMs); }
+  try { r = resolveTarget(target, budgetMs, true); }
   catch (e) { return { error: { code: 'INTERNAL', message: String(e && e.message || e).slice(0, 200) } }; }
   try {
     if (!r.error) {
@@ -1491,13 +1781,13 @@ function opInsertText(req) {
   if (req.replace && !secure && sameText(before, text)) {
     return { ok: true, mechanism: 'semantic', via: 'AXValue', how, role: v.AXRole, app: appName, delivery: 'not_delivered', retry: 'safe', reason: 'already', note: `${label} already shows exactly this text — nothing sent` };
   }
-  // R36: appending through AXValue rewrites the whole value; when the value cannot be read, that would
+  // Appending through AXValue rewrites the whole value; when the value cannot be read, that would
   // replace what is there with the text — refuse instead
   if (!req.replace && !canSel && typeof before !== 'string' && !secure) {
     return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `${label} takes text only by rewriting its whole value, and its value cannot be read — appending would replace what is there; nothing was sent`, details: { kind: 'value_unreadable' } }));
   }
-  // a secure field never shows its value: rewriting it to append is safe only when it is known to be empty (audit
-  // S5A-s11-X-2: what was typed there was replaced by the new text)
+  // a secure field never shows its value: rewriting it to append is safe only when it is known to be empty (
+  // what was typed there was replaced by the new text)
   if (!req.replace && !canSel && secure && beforeLen !== 0) {
     return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: `${label} is a secure field that takes text only by rewriting its whole value, and it is not known to be empty — appending would replace what is there; nothing was sent`, details: { kind: 'value_unreadable', textlike: true } }));
   }
@@ -1544,7 +1834,7 @@ function opInsertText(req) {
 // after an accessibility write the app accepted, how long to look for the value to show it: the answer
 // only decides verified vs unverified (an unchanged value is still reported delivered_unverified)
 const WRITE_POLL_MS = 400;
-// CP (Y6): a text verdict needs the change itself. Texts compare with line endings unified (\r\n and \r
+// A text verdict needs the change itself. Texts compare with line endings unified (\r\n and \r
 // become \n); set_value also ignores leading and trailing white space. "The value now contains the text
 // somewhere" is never enough — the text may have been there before the write.
 // a finite decimal written out (Number("") is 0 and Number(" ") is 0: those are not numbers here)
@@ -1586,6 +1876,8 @@ function chooseOption(r, want, timeoutMs) {
   const acts = actionNames(r.el);
   const opener = acts.indexOf('AXPress') >= 0 ? 'AXPress' : acts.indexOf('AXShowMenu') >= 0 ? 'AXShowMenu' : null;
   if (!opener) return fail(notDelivered({ code: 'ACTION_NOT_SUPPORTED', message: 'the control does not open a menu', details: { actions: acts } }));
+  const shownOf = (v) => [v.AXValue, v.AXTitle, nameOf(v)].map(x => String(x === undefined || x === null ? '' : x));
+  const before = shownOf(readNode(r.el));
   const e = perform(r.el, opener);
   if (e !== 0 && e !== -25204) return fail(axCallError(e, opener));
   let menu = null;
@@ -1601,16 +1893,26 @@ function chooseOption(r, want, timeoutMs) {
   if (hit.length !== 1 || !hit[0].enabled) {
     perform(menu, 'AXCancel');
     const why = hit.length > 1 ? `${hit.length} options match "${want}"` : hit.length ? `option "${hit[0].title}" is disabled` : `no option matches "${want}"`;
-    return fail({ code: hit.length > 1 ? 'AMBIGUOUS_TARGET' : 'ACTION_FAILED', message: `${why} (the menu was opened and closed again)`, details: { options: items.slice(0, 40).map(i => i.title) }, delivery: 'not_delivered', retry: 'safe' });
+    const code = hit.length > 1 ? 'AMBIGUOUS_TARGET' : 'ACTION_FAILED', details = { options: items.slice(0, 40).map(i => i.title) };
+    // The menu was opened for this. It is "closed again" only when it is: one that would not close is still up,
+    // and a retry would press the control under an open menu — that is not "nothing was sent, retry is safe".
+    let up = true;
+    // (this very menu: another menu that is up by then is not it)
+    for (let i = 0; i < 4 && up; i++) { sleep(150); const m = findOpenMenu(r.el, r.appEl); up = Boolean(m && same(m, menu)); }
+    if (up) return fail({ code, message: `${why} — the menu was opened and could not be closed again: it may still be open (mac_key escape closes it)`, details, delivery: 'unknown', retry: 'unsafe' });
+    return fail({ code, message: `${why} (the menu was opened and closed again)`, details, delivery: 'not_delivered', retry: 'safe' });
   }
   const pe = perform(hit[0].el, 'AXPress');
   if (pe !== 0 && pe !== -25204) { perform(menu, 'AXCancel'); return fail(axCallError(pe, 'AXPress on the option')); }
   sleep(300);
   const after = readNode(r.el);
-  const shown = [after.AXValue, after.AXTitle, nameOf(after)].map(x => String(x === undefined || x === null ? '' : x));
-  const okv = shown.some(s => s === hit[0].title);
-  // a changed value that does not show the chosen option is not proof it was chosen
-  return { ok: true, mechanism: 'semantic', via: 'menu option', option: hit[0].title, delivery: okv ? 'delivered_verified' : 'delivered_unverified', retry: 'unsafe', value: after.AXValue === undefined ? null : after.AXValue };
+  const shown = shownOf(after);
+  // a changed value that does not show the chosen option is not proof it was chosen; nor is one the control showed
+  // before, when the option's press did not answer (-25204): nothing says the press took
+  const unanswered = pe === -25204 && before.some(s => s === hit[0].title);
+  const okv = shown.some(s => s === hit[0].title) && !unanswered;
+  return { ok: true, mechanism: 'semantic', via: 'menu option', option: hit[0].title, delivery: okv ? 'delivered_verified' : 'delivered_unverified', retry: 'unsafe', value: after.AXValue === undefined ? null : after.AXValue,
+    ...(unanswered ? { note: 'the option was pressed and did not answer, and the control showed this option before already: it is not known that the press took' } : {}) };
 }
 
 // Role-aware value setting: text, toggles (idempotent), disclosure, selection, menu options, numbers.
@@ -1630,6 +1932,7 @@ function setValueCore(req, r) {
   const timeoutMs = clamp(req.timeout_ms, 0, 30000, 3000);
   const w = waitActionable(r.el, timeoutMs);
   if (w.error) return fail(w.error);
+  { const cw = changedWhileWaited(req.target, r, w); if (cw) return fail(cw); }
   const v = w.v;
   const role = roleKey(v);
   const val = String(req.value === undefined || req.value === null ? '' : req.value);
@@ -1646,7 +1949,7 @@ function setValueCore(req, r) {
     const e = perform(r.el, 'AXPress');
     if (e !== 0) return fail(axCallError(e, 'AXPress'));
     // a control can publish its new state late (or not be readable for a moment): wait for a definite state other
-    // than the one before; pressing again while the first press is still on its way would undo it (audit S5A-s11-X-4)
+    // than the one before; pressing again while the first press is still on its way would undo it
     let afterState = cur;
     for (let i = 0; i < 5 && (afterState === cur || afterState === null); i++) { sleep(200); afterState = toggleState(readNode(r.el)); }
     if (afterState === cur || afterState === null) {
@@ -1656,7 +1959,7 @@ function setValueCore(req, r) {
     if (afterState !== want) {
       const e2 = perform(r.el, 'AXPress');
       if (e2 !== 0) return fail({ code: 'NOT_CONFIRMED', message: `pressed once, then second AXPress failed (${axCallError(e2, 'AXPress').message})`, delivery: 'unknown', retry: 'unsafe' });
-      // the same wait for the second press (review S5C-G-1: a control slow the first time is slow the second time)
+      // the same wait for the second press (a control slow the first time is slow the second time)
       const mid = afterState;
       for (let i = 0; i < 5 && (afterState === mid || afterState === null); i++) { sleep(200); afterState = toggleState(readNode(r.el)); }
     }
@@ -1779,7 +2082,37 @@ function opScrollPrep(req) {
     const e = perform(r.el, 'AXScrollToVisible');
     if (e !== 0) return fail(axCallError(e, 'AXScrollToVisible'));
     sleep(250);
-    return Object.assign(verdict(before, observeState(r.el, r.appEl), { mechanism: 'semantic', action: 'AXScrollToVisible', role: v.AXRole }), { scrolled_into_view: true });
+    // the action returning 0 says the app took it, not that the element can be seen now. What can be seen
+    // of it is its frame cut by its window and by every scroll area above it; a part of that (8 pt each
+    // way, or all of a smaller element) has to be left, on a display
+    const fr = frameOf(readNode(r.el));
+    let clip = fr && fr[2] > 0 && fr[3] > 0 ? fr.slice() : null;
+    const cut = (pf) => {
+      const x = Math.max(clip[0], pf[0]), y = Math.max(clip[1], pf[1]);
+      clip = [x, y, Math.min(clip[0] + clip[2], pf[0] + pf[2]) - x, Math.min(clip[1] + clip[3], pf[1] + pf[3]) - y];
+    };
+    let up = attr(r.el, 'AXParent'), topped = false;
+    for (let d = 0; clip && up && up.el && d < 200; d++) {
+      const pv = readNode(up.el);
+      if (pv.__err) break;
+      const cuts = pv.AXRole === 'AXWindow' || pv.AXRole === 'AXScrollArea';
+      const pf = cuts ? frameOf(pv) : null;
+      if (cuts && !pf) { clip = null; break; } // a window or a scroll area whose frame cannot be read
+      if (pf) cut(pf);
+      if (pv.AXRole === 'AXWindow' || pv.AXRole === 'AXApplication') { topped = true; break; }
+      up = attr(up.el, 'AXParent');
+    }
+    // the way up could not be followed to the top (a parent that did not answer): a scroll area above the
+    // break may cut the element off, so nothing is known to be in view
+    if (clip && !topped) clip = null;
+    const inView = Boolean(clip) && clip[2] >= Math.min(fr[2], 8) && clip[3] >= Math.min(fr[3], 8) && onSomeDisplay(clip[0] + clip[2] / 2, clip[1] + clip[3] / 2);
+    const out = Object.assign(verdict(before, observeState(r.el, r.appEl), { mechanism: 'semantic', action: 'AXScrollToVisible', role: v.AXRole }), { scrolled_into_view: inView });
+    if (!inView) {
+      // it moved, perhaps, but not into view: that is not what was asked for
+      if (out.delivery === 'delivered_verified') out.delivery = 'delivered_unverified';
+      out.note = 'the app accepted AXScrollToVisible, but the element is still outside the visible part of its window or scroll area';
+    }
+    return out;
   }
   const p = opPhysicalPrep(req);
   if (p.ok) p.role = v.AXRole;
@@ -1807,9 +2140,10 @@ function opWait(req) {
   const baseline = cond === 'notification' ? new Set(listNotifications().map(n => n.id)) : null;
   const check = () => {
     if (cond === 'app_running' || cond === 'app_gone') {
-      const a = findApp(req.app);
-      last = { running: Boolean(a) };
-      return cond === 'app_running' ? Boolean(a) : !a;
+      // several running copies under the name: the app is running (app_gone waits until none is left)
+      const n = appCandidates(req.app).length;
+      last = n > 1 ? { running: true, copies: n } : { running: n > 0 };
+      return cond === 'app_running' ? n > 0 : n === 0;
     }
     if (cond === 'notification') {
       const fresh = listNotifications().filter(n => !baseline.has(n.id) && (!req.app || textMatch(n.app, req.app, false)) && (!req.text || textMatch([n.title, n.subtitle, n.body].join('\n'), req.text, false)));
@@ -1831,8 +2165,9 @@ function opWait(req) {
       if (p === 'gone') return false;
       if (p === 'enabled') return v.AXEnabled !== false;
       if (p === 'focused') return v.AXFocused === true;
-      if (p === 'value_equals') return String(v.AXValue) === String(req.value);
-      if (p === 'value_contains') return String(v.AXValue === undefined ? '' : v.AXValue).toLowerCase().indexOf(String(req.value).toLowerCase()) >= 0;
+      // an element with no value does not have the value "undefined"
+      if (p === 'value_equals') return v.AXValue !== undefined && v.AXValue !== null && String(v.AXValue) === String(req.value);
+      if (p === 'value_contains') return v.AXValue !== undefined && v.AXValue !== null && String(v.AXValue).toLowerCase().indexOf(String(req.value).toLowerCase()) >= 0;
       return false;
     }
     const app = findApp(req.app);
@@ -1843,6 +2178,13 @@ function opWait(req) {
     }
     sawApp = true;
     const appEl = appElement(app);
+    // an app that does not answer, or cannot be read at all, reads as no windows, no sheet and no open
+    // menu: absence is not concluded from that — the wait goes on until the app can be read or the time is up
+    // (the app itself, then its list of windows: no value / no such attribute is an app without windows,
+    // any other error is a list that could not be read)
+    const winErr = () => { const e = attrErr(appEl, 'AXWindows').err; return e === 0 || e === -25212 || e === -25205 ? 0 : e; };
+    const appErr = ABSENCE_APP_CONDS.has(cond) ? (readNode(appEl).__err || (cond === 'menu_closed' ? 0 : winErr())) : 0;
+    if (appErr) { last = appErr === -25204 ? { code: 'APP_UNRESPONSIVE' } : { code: 'AX_ERROR', ax_error: appErr }; return false; }
     if (cond === 'window' || cond === 'window_gone') {
       const titles = windowsOf(appEl).map(w => String(attr(w, 'AXTitle') || ''));
       last = { windows: titles.slice(0, 8) };
@@ -1924,22 +2266,38 @@ function opAppCtl(req) {
     sleep(800); // the request is delivered asynchronously; exiting at once can drop it
     return { ok: true, sent: true, name: a.name, pid: a.pid, method: req.force ? 'force' : 'graceful' };
   }
+  if (action === 'activate') {
+    // this process itself: "pid:<number>" names one of several copies, and `open -a` brings forward whichever of
+    // them macOS picks. The server reads the frontmost app afterwards to say whether it took.
+    let ok = false;
+    try { ok = Boolean(a.ns.activateWithOptions((1 << 0) | (1 << 1))); } catch (e) { ok = false; }
+    if (!ok) return fail(notDelivered({ code: 'ACTION_FAILED', message: `macOS refused to bring ${a.name} (pid ${a.pid}) forward` }));
+    sleep(300);
+    return { ok: true, sent: true, name: a.name, pid: a.pid };
+  }
   if (action === 'hide' || action === 'unhide') {
     // NSRunningApplication's own `hidden` is a cached KVO value that never refreshes here (no run loop);
     // the app's AXHidden attribute is live
     const appEl = appElement(a);
     if (action === 'hide') a.ns.hide; else a.ns.unhide;
     sleep(400);
-    const hidden = attr(appEl, 'AXHidden') === true;
-    return { ok: true, delivery: hidden === (action === 'hide') ? 'delivered_verified' : 'delivered_unverified', retry: 'safe', name: a.name, pid: a.pid, hidden };
+    // an AXHidden that could not be read verifies nothing: it was taken for "not hidden" — a verified unhide
+    const h = attr(appEl, 'AXHidden');
+    const hidden = h === true ? true : h === false ? false : null;
+    return { ok: true, delivery: hidden !== null && hidden === (action === 'hide') ? 'delivered_verified' : 'delivered_unverified', retry: 'safe', name: a.name, pid: a.pid, hidden };
   }
   return fail(notDelivered({ code: 'INVALID_ARGS', message: `unknown app action "${action}"` }));
 }
 function opAppWait(req) {
   const end = now() + clamp(req.timeout_ms, 0, 60000, 15000);
-  let a = null, win = null;
+  let a = null, win = null, several = null;
   while (now() < end) {
-    a = findApp(req.app);
+    // while an app is started again its old process can still be listed next to the new one: the one named by
+    // not_pid is left out before the rest is counted (alone, it is what the wait ends with, as before)
+    const all = appCandidates(req.app);
+    const fresh = all.filter(x => !req.not_pid || x.pid !== req.not_pid);
+    several = fresh.length > 1 ? fresh : null;
+    a = fresh.length === 1 ? fresh[0] : !fresh.length && all.length === 1 ? all[0] : null;
     if (a && (!req.not_pid || a.pid !== req.not_pid)) {
       if (!req.want_window) break;
       if ($.AXIsProcessTrusted()) {
@@ -1950,6 +2308,7 @@ function opAppWait(req) {
     sleep(250);
   }
   const front = frontApp();
+  if (!a && several) return fail(ambiguousApp(req.app, several));
   if (!a) return fail({ code: 'TIMEOUT', message: `"${req.app}" did not start in time`, delivery: 'unknown', retry: 'unsafe', details: { kind: 'launch_timeout' } });
   const out = { ok: true, name: a.name, pid: a.pid, bundle_id: a.bundle, frontmost: Boolean(front && front.pid === a.pid) };
   if (win) out.window = { title: win.title, frame: win.frame };
@@ -1974,6 +2333,10 @@ function axWindowFor(req) {
     if (!cg) return { error: notDelivered({ code: 'WINDOW_NOT_FOUND', message: `no window with id ${req.window_id}` }) };
     const app = runningApps().find(x => x.pid === cg.pid);
     if (!app) return { error: notDelivered({ code: 'WINDOW_NOT_FOUND', message: 'the window\'s app is gone' }) };
+    // an app given with the window_id must be the one that owns that window (the window_id used to win unannounced)
+    if (req.app && !appCandidates(req.app).some(x => x.pid === app.pid)) {
+      return { error: notDelivered({ code: 'INVALID_ARGS', message: `window ${Number(req.window_id)} belongs to "${app.name}" (pid ${app.pid}), not to "${String(req.app).slice(0, 80)}" — pass window_id alone, or with the app that owns it` }) };
+    }
     const appEl = appElement(app);
     const ws = windowsOf(appEl);
     const infos = ws.map((w, i) => windowInfo(w, i));
@@ -2026,7 +2389,7 @@ function opWindowOp(req) {
   let err = 0, raiseErr = 0;
   if (action === 'focus' || action === 'raise') {
     // several steps change the window before AXRaise answers, so an AXRaise error is not "nothing
-    // sent": the result is decided by the state asked for (R19)
+    // sent": the result is decided by the state asked for
     if (before.minimized) { setAttr(w.el, 'AXMinimized', NO()); sleep(150); }
     raiseErr = perform(w.el, 'AXRaise');
     setAttr(w.el, 'AXMain', YES());
@@ -2060,7 +2423,8 @@ function opWindowOp(req) {
   const fr = after.frame, near = (a, b) => Math.abs(a - b) <= 4;
   const want = {
     focus: () => Boolean(front && front.pid === w.app.pid && (after.focused || after.main)),
-    raise: () => after.main === true || changed,
+    // the window on top of its app's windows: main, and not minimized (unminimizing alone is not a raise)
+    raise: () => after.main === true && after.minimized === false,
     minimize: () => after.minimized === true,
     restore: () => after.minimized === false,
     move: () => Boolean(fr) && near(fr[0], Number(req.x)) && near(fr[1], Number(req.y)),
@@ -2196,6 +2560,8 @@ function keyboardLayoutId() {
 function opPaste(req) {
   const text = String(req.text === undefined || req.text === null ? '' : req.text);
   if (!text) return invalid('text required');
+  // without the Accessibility permission the system drops ⌘V: say so before the clipboard is touched
+  if (!$.AXIsProcessTrusted()) return fail(notDelivered(permError()));
   // ⌘V goes to the key that carries V in this layout (0.2.6: key code 9 is K on Dvorak, C on Workman — ⌘C would
   // copy over the text noracu put on the clipboard)
   const vKey = keyCodeForChar('v', KEY_FLAGS.cmd);
@@ -2262,7 +2628,7 @@ function opPaste(req) {
   }
   // ⌘V is the V key itself (vKey, found above) with the ⌘ flag, posted here. cliclick's `kd:cmd t:v ku:cmd`
   // types text, not that key: on macOS 27.2 TextEdit got a plain "v", or nothing, instead of a paste
-  // (E2 run 2026-11-07, T7).
+  // (device run 2026-11-07).
   const sent = postKey(vKey, [[MOD_KEYCODES.cmd, KEY_FLAGS.cmd]], 0);
   releaseStuckModifiers(['cmd']);
   if (!sent) {
@@ -2276,7 +2642,7 @@ function opPaste(req) {
   // the clipboard stays ours for at least PASTE_MIN_HOLD_MS even then
   const holdMs = clamp(req.hold_ms, PASTE_MIN_HOLD_MS, 5000, 1000);
   const t0 = now();
-  // CP (Y6): evidence is the focused element's value becoming exactly the text pasted over the selection
+  // Evidence is the focused element's value becoming exactly the text pasted over the selection
   // that was there; a change that does not match (or no readable insertion point) keeps waiting and
   // ends delivered_unverified with the reason
   let evidence = false, changed = false;
@@ -2287,7 +2653,7 @@ function opPaste(req) {
     const e = focusEvidence(appEl);
     if (ev0 && e && same(e.el, ev0.el) && e.key !== ev0.key) {
       changed = true;
-      // R36: the value itself must have changed — pasting over a selection that already held the same
+      // The value itself must have changed — pasting over a selection that already held the same
       // text leaves an identical value, and a moved caret alone is no proof that ⌘V was handled
       if (expectAfter !== null && sameText(e.raw, expectAfter) && !sameText(e.raw, ev0.raw)) { evidence = true; break; }
     }
@@ -2311,7 +2677,7 @@ function opClipboard(req) {
   const out = { ok: true, types: types.slice(0, 20), change_count: Number(pb.changeCount) };
   // a concealed mark on any item (types lists only the first item's) withholds the whole clipboard
   if (types.indexOf('org.nspasteboard.ConcealedType') >= 0 || pbItemTypes().indexOf('org.nspasteboard.ConcealedType') >= 0) { out.concealed = true; out.note = 'the clipboard holds an item marked concealed (e.g. a password manager copy); its content is not returned'; return out; }
-  // review 0.2.6 #4: Universal Clipboard content lives on the other device until it is read — say where
+  // Universal Clipboard content lives on the other device until it is read — say where
   // it came from (mac_paste refuses it; reading it is what this tool is for)
   if (types.indexOf(PB_REMOTE) >= 0) { out.remote = true; out.note = 'Universal Clipboard content copied on another device: reading it makes macOS fetch it from that device'; }
   const fmt = req.format || 'auto';
@@ -2383,8 +2749,13 @@ function listNotifications() {
   if (!a) return [];
   return collectNotifications(appElement(a)).map(n => ({ id: n.id, kind: n.kind, app: n.app, title: n.title, subtitle: n.subtitle, body: n.body, actions: n.actions }));
 }
-// Notification Center's history opens from the clock in the menu bar, when accessibility exposes it.
+// Notification Center's history opens from the clock in the menu bar, when accessibility exposes it. The clock
+// by its identifier; else an item named exactly "Clock" or "Notification Center". (Any item whose identifier or
+// name merely contained "clock" was taken, and it could be another extra — a timer, a world clock — that the
+// click then opened.)
+const CLOCK_EXTRA_ID = 'com.apple.menuextra.clock';
 function clockExtra() {
+  let named = null;
   for (const b of ['com.apple.controlcenter', 'com.apple.systemuiserver', 'com.apple.notificationcenterui']) {
     const a = runningApps().find(x => x.bundle === b);
     if (!a) continue;
@@ -2392,16 +2763,16 @@ function clockExtra() {
     if (!mb || !mb.el) continue;
     for (const it of children(mb.el)) {
       const v = readNode(it);
-      const tag = [v.AXIdentifier, v.AXTitle, v.AXDescription].map(x => String(x || '')).join(' ').toLowerCase();
-      if (/clock|notification center/.test(tag)) return it;
+      if (v.AXIdentifier === CLOCK_EXTRA_ID) return it;
+      if (!named && [v.AXTitle, v.AXDescription].some(x => /^(clock|notification cent(er|re))$/i.test(String(x || '').trim()))) named = it;
     }
   }
-  return null;
+  return named;
 }
 // True only on positive evidence that Notification Center's panel is already open: the menu-bar clock reads
 // selected / expanded, or a window holds a Notification Center element that is not a banner or alert.
 // Desktop widgets are windows of the same process (macOS 27.2: 180 × 180 AXUnknown windows, verified on a
-// real Mac), so "it has a window" is no evidence (t10 review).
+// real Mac), so "it has a window" is no evidence.
 function ncCenterOpen(appEl, clock) {
   if (clock && (attr(clock, 'AXSelected') === true || attr(clock, 'AXExpanded') === true)) return true;
   for (const w of windowsOf(appEl)) {
@@ -2471,7 +2842,7 @@ function opNotifications(req) {
   const e = perform(n.el, n.rawActions[idx]);
   if (e !== 0) {
     // only "invalid element" proves it was gone before the action ran; after any other error a missing
-    // notification may be this action's own effect, so delivery stays what the error says (t10 review)
+    // notification may be this action's own effect, so delivery stays what the error says
     const goneNow = e !== -25202 && !collectNotifications(appEl).some(x => x.id === n.id);
     close();
     if (e === -25202) return fail(notDelivered({ code: 'NOTIFICATION_NOT_FOUND', message: `no notification with id ${n.id} is on screen (it was dismissed before the action ran)` }));
@@ -2541,6 +2912,13 @@ function menuChord(cmdChar, mods, vk) {
   if (m & 1) ms.push('shift');
   return ms.concat(key).join('+');
 }
+// Whether the keyboard or mouse was used since `t` (a now() value): the HID system's "seconds since the last
+// input event" is shorter than the time that has passed. An accessibility action posts no input event, so an
+// event in that time is the person's. false when the system gives no answer.
+function inputSince(t) {
+  const idle = Number($.CGEventSourceSecondsSinceLastEventType($.kCGEventSourceStateHIDSystemState, 0xFFFFFFFF));
+  return Number.isFinite(idle) && idle >= 0 && idle * 1000 < now() - t;
+}
 function opMenu(req) {
   if (!$.AXIsProcessTrusted()) return fail(permError());
   const app = findApp(req.app);
@@ -2559,7 +2937,20 @@ function opMenu(req) {
   const itemPath = h.path.join(' > ');
   // the shortcut is read for the chosen item only (not for every item walked)
   const chord = menuChord(attr(h.el, 'AXMenuItemCmdChar'), attr(h.el, 'AXMenuItemCmdModifiers'), attr(h.el, 'AXMenuItemCmdVirtualKey'));
-  const isQuit = chord === 'cmd+q' || chord === 'alt+cmd+q' || h.id === 'terminate:' || h.id === 'NSAlternateQuitMenuItem';
+  // Quit is known by its shortcut or its AppKit action; a menu built without either (some toolkits) still
+  // names it: "Quit", "Quit <anything>", "Exit", or "Exit <anything>" in the application menu or the menu
+  // next to it (File) — not "Exit Full Screen" under View
+  const lastTitle = normMenu(h.path[h.path.length - 1]);
+  const quitByTitle = lastTitle === 'quit' || lastTitle === 'exit' || lastTitle.indexOf('quit ') === 0 || (lastTitle.indexOf('exit ') === 0 && h.bar <= 2);
+  const isQuit = chord === 'cmd+q' || chord === 'alt+cmd+q' || h.id === 'terminate:' || h.id === 'NSAlternateQuitMenuItem' || quitByTitle;
+  const guarded = PROTECTED_BUNDLES.has(app.bundle) || (req.protect_pids || []).indexOf(app.pid) >= 0;
+  // Quit lives in the application menu. An item directly in that menu of an app that must not be quit,
+  // with no identifier, cannot be told apart from Quit (a title in another language, a shortcut that was
+  // changed): it is not pressed. Items of other menus and of submenus are not judged this way — many of
+  // them have no identifier (60 of 262 in an Electron app, 30 of 315 in Finder, read on macOS 27.2).
+  if (guarded && !isQuit && !h.id && h.bar === 1 && h.path.length === 2) {
+    return fail(notDelivered({ code: 'POLICY_DENIED', message: `"${itemPath}" in ${app.name}: this item has no identifier, so it cannot be told apart from Quit, and ${app.name} must not be quit from here — nothing was sent`, details: { kind: 'menu_item_unidentified' } }));
+  }
   if (isQuit && PROTECTED_BUNDLES.has(app.bundle)) {
     return fail(notDelivered({ code: 'POLICY_DENIED', message: `"${itemPath}" in ${app.name}: ${app.name} (${app.bundle}) is part of the macOS session and is never quit` }));
   }
@@ -2581,6 +2972,7 @@ function opMenu(req) {
   const before = observeState(null, appEl);
   const focusEl = attr(appEl, 'AXFocusedUIElement');
   const fBefore = focusEl && focusEl.el ? observeState(focusEl.el, appEl) : null;
+  const pressedAt = now();
   const e = perform(h.el, 'AXPress');
   if (e !== 0 && e !== -25204) return fail(axCallError(e, 'AXPress'));
   sleep(clamp(req.settle_ms, 0, 3000, 300));
@@ -2589,7 +2981,10 @@ function opMenu(req) {
   if (fBefore && v.delivery === 'delivered_unverified') {
     const fAfter = observeState(focusEl.el, appEl);
     const d = diffState(fBefore, fAfter);
-    if (d.verified) { v.delivery = 'delivered_verified'; v.changed = d.changed; }
+    // …unless the keyboard or mouse was used since the item was pressed: the change may be the person's own
+    // (a selection they moved), so it is not counted as the command's
+    if (d.verified && inputSince(pressedAt)) v.note = 'the focused element changed, but the keyboard or mouse was used meanwhile, so the change is not counted as the command\'s effect';
+    else if (d.verified) { v.delivery = 'delivered_verified'; v.changed = d.changed; }
   }
   if (!h.enabled && v.delivery !== 'delivered_verified') v.note = 'the item reported disabled (menus refresh that state lazily) and nothing observable changed';
   if (e === -25204) { v.delivery = 'unknown'; v.note = 'the app did not answer in time (a modal menu or dialog may be open)'; }
@@ -2624,6 +3019,8 @@ function keyCodeForChar(ch, flags) {
 }
 const FLAG_NUMPAD = 0x200000;
 const HELD_MASK = KEY_FLAGS.cmd | KEY_FLAGS.shift | KEY_FLAGS.alt | KEY_FLAGS.ctrl;
+// the left / right device bits that travel with each modifier's flag (IOLLEvent.h, NX_DEVICE…KEYMASK)
+const DEVICE_BITS = { cmd: 0x08 | 0x10, shift: 0x02 | 0x04, alt: 0x20 | 0x40, ctrl: 0x01 | 0x2000 };
 const EV_FLAGS_CHANGED = 12;
 function postKey(code, modKeys, extra) {
   const src = $.CGEventSourceCreate($.kCGEventSourceStateHIDSystemState);
@@ -2659,17 +3056,22 @@ function postKey(code, modKeys, extra) {
 // Returns the names still held after that (normally none).
 function releaseStuckModifiers(names) {
   const mask = names.reduce((a, m) => a | KEY_FLAGS[m], 0) & HELD_MASK;
-  const now = () => Number($.CGEventSourceFlagsState($.kCGEventSourceStateHIDSystemState)) & mask;
-  if (!mask || !now()) return [];
+  const all = () => Number($.CGEventSourceFlagsState($.kCGEventSourceStateHIDSystemState));
+  let flags = all();
+  if (!mask || !(flags & mask)) return [];
   const src = $.CGEventSourceCreate($.kCGEventSourceStateHIDSystemState);
+  // a release goes only to a modifier whose own bit is still set, and the event carries every other flag
+  // as it is (a key the person is holding, Caps Lock): flags 0 would tell apps those were let go as well
   for (const m of names) {
-    if (!MOD_KEYCODES[m]) continue;
+    if (!MOD_KEYCODES[m] || !(flags & KEY_FLAGS[m])) continue;
     const e = $.CGEventCreateKeyboardEvent(src, MOD_KEYCODES[m], false);
     if (!e) continue;
-    $.CGEventSetType(e, EV_FLAGS_CHANGED); $.CGEventSetFlags(e, 0); $.CGEventPost($.kCGHIDEventTap, e);
+    // its device bits go with it; >>> 0 keeps the value unsigned
+    flags = (flags & ~(KEY_FLAGS[m] | DEVICE_BITS[m])) >>> 0;
+    $.CGEventSetType(e, EV_FLAGS_CHANGED); $.CGEventSetFlags(e, flags); $.CGEventPost($.kCGHIDEventTap, e);
   }
   sleep(30);
-  const left = now();
+  const left = all() & mask;
   return names.filter(m => MOD_KEYCODES[m] && (left & KEY_FLAGS[m]));
 }
 function opKey(req) {
@@ -2718,6 +3120,14 @@ const OPS = {
   menu: opMenu, wait: opWait, frontmost: opFrontmost, app_info: opAppInfo, app_ctl: opAppCtl, app_wait: opAppWait, window_op: opWindowOp, clipboard: opClipboard, paste: opPaste, notifications: opNotifications,
 };
 
+// One op, as run() answers it. An app name that several running apps share ends the op with that answer, wherever
+// in it the app was looked up (findApp).
+function dispatch(req) {
+  const fn = OPS[req && req.op];
+  if (!fn) return { ok: false, code: 'INVALID_ARGS', message: `unknown op "${req && req.op}"` };
+  try { return fn(req); } catch (e) { if (e && e.noracu) return fail(e.noracu); throw e; }
+}
+
 function readStdin() {
   const d = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
   return $.NSString.alloc.initWithDataEncoding(d, $.NSUTF8StringEncoding).js;
@@ -2731,5 +3141,5 @@ function run(argv) {
   // the system-wide element's messaging timeout is this process's default for every element whose own
   // timeout is unset (children, parents, hit-test results): a hung app costs at most this per call
   try { $.AXUIElementSetMessagingTimeout($.AXUIElementCreateSystemWide(), AX_MSG_TIMEOUT_S); } catch (e) { /* keep the default */ }
-  try { return JSON.stringify(fn(req)); } catch (e) { return JSON.stringify({ ok: false, code: 'INTERNAL', message: String(e).slice(0, 300) }); }
+  try { return JSON.stringify(dispatch(req)); } catch (e) { return JSON.stringify({ ok: false, code: 'INTERNAL', message: String(e).slice(0, 300) }); }
 }

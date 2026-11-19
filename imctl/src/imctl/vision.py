@@ -29,7 +29,7 @@ class OCRError(RuntimeError):
 
 
 class CaptureError(Exception):
-    """Raised when the mirroring window cannot be captured by window id (F25)."""
+    """Raised when the mirroring window cannot be captured by window id."""
 
 
 # Injectable so tests can drive capture_window() without ever running a
@@ -48,16 +48,23 @@ class OCRHit:
         return f"({self.nx:.2f},{self.ny:.2f}) {self.text!r} [{self.confidence:.2f}]"
 
 
-def _capture_by_id(path: str) -> bool:
+def _capture_by_id(path: str) -> bool | None:
     """One ``screencapture -l`` attempt; True when a non-empty PNG landed.
 
     The window id is resolved fresh on every call, so the retry in
     capture_window() can pick up a window that was mid-transition
     (Space switch, un-minimize) on the first look.
+
+    None when the window is there but not on screen: a minimized window
+    still answers a capture by id — with the picture it had when it went
+    away (on a device: a PNG as large as a live one, no error) — and that
+    is not what the phone shows now. Nothing is captured then.
     """
     info = get_window_info()
     if info is None:
         return False
+    if info.get("onscreen") is False:
+        return None
     try:
         # A normal capture takes 0.1-1.2 s; on a loaded Mac one hung for
         # ~10 s, and with the retry that alone ate most of the server's
@@ -71,7 +78,7 @@ def _capture_by_id(path: str) -> bool:
         # A missing or hung screencapture is a failed attempt, not a
         # crash: it takes the same retry-then-CaptureError path as a
         # nonzero return code, so callers report the capture as failed
-        # instead of dying with a raw traceback (F25).
+        # instead of dying with a raw traceback.
         return False
     return r.returncode == 0 and os.path.exists(path) and os.path.getsize(path) > 0
 
@@ -112,11 +119,12 @@ def capture_window(path: str | None = None) -> str:
     other windows cover it or it is not frontmost. There is deliberately NO fallback to a screen-region
     capture of the AX bounds: a region capture returns whatever windows happen to sit inside those
     bounds — during a real session it once returned another app's sidebar, and every consumer (OCR,
-    expect guards, paste confirmation) would have trusted those pixels as the phone (F25). When the
+    expect guards, paste confirmation) would have trusted those pixels as the phone. When the
     window id cannot be resolved, or screencapture fails (nonzero exit, missing or hung binary) or
     writes nothing, one retry follows after 0.2 s (the window may be mid-transition); a second
     failure raises CaptureError so callers report the capture as failed instead of acting on
-    another window's pixels.
+    another window's pixels. A window that is not on screen (hidden, minimized, on another Space)
+    is not captured either: the picture would be the one it had when it went away.
     """
     owned = path is None
     if owned:
@@ -124,14 +132,20 @@ def capture_window(path: str | None = None) -> str:
     if _capture_by_id(path):
         return path
     time.sleep(0.2)
-    if _capture_by_id(path):
+    again = _capture_by_id(path)
+    if again:
         return path
     if owned:
         discard_frame(path)
+    if again is None:
+        raise CaptureError(
+            "the iPhone Mirroring window is not on screen (hidden, minimized or on another Space): "
+            "a capture would show the picture it had when it went away"
+        )
     raise CaptureError("could not capture the iPhone Mirroring window by id")
 
 
-# F36 (2026-11-05, macOS 27.2): Vision weights the languages in the order given. With
+# 2026-11-05, macOS 27.2: Vision weights the languages in the order given. With
 # English first it returned no Chinese at all on a Spotlight frame (0 CJK hits; the
 # Top Hit label 拼多多 was missing, so phone_open could not find the app and every
 # Chinese `expect` failed). Chinese first read the same frame's Chinese AND its English
@@ -262,7 +276,7 @@ def dedupe_hits(hits: list[OCRHit], eps: float = 0.02) -> list[OCRHit]:
     return kept
 
 
-# F27 (2026-11-04): at Vision's default working scale the full-frame pass never
+# 2026-11-04: at Vision's default working scale the full-frame pass never
 # reports an isolated single glyph (the app "X": its icon label, the Spotlight
 # query echo). minimumTextHeight sets that working scale, and at these values
 # the same full frame does report it. On 172 recorded mirror frames this sweep
@@ -276,7 +290,7 @@ SWEEP_MIN_TEXT_HEIGHTS = (0.018, 0.02, 0.022, 0.025, 0.03)
 def ocr_sweep(image_path: str, languages: tuple[str, ...] = OCR_LANGUAGES,
               language_correction: bool = False,
               heights: tuple[float, ...] = SWEEP_MIN_TEXT_HEIGHTS) -> list[OCRHit]:
-    """Full-frame OCR once per minimumTextHeight in ``heights``; merged hits (F27).
+    """Full-frame OCR once per minimumTextHeight in ``heights``; merged hits.
 
     Finds isolated one- or two-character labels that ocr() at Vision's default
     scale skips. Hits are de-duplicated across heights (same text, centres
@@ -327,24 +341,31 @@ def ocr_sweep(image_path: str, languages: tuple[str, ...] = OCR_LANGUAGES,
 
 def find(text: str, image_path: str | None = None,
          exact: bool = False) -> OCRHit | None:
-    """Find the first OCR hit matching text; returns None if absent.
+    """Find the OCR hit matching text; returns None if absent.
 
-    A one- or two-character ``text`` the default pass misses is looked for
-    again with ocr_sweep() (F27). A frame this captured itself is deleted
-    after reading; a caller's ``image_path`` is left alone.
+    A hit that reads exactly ``text`` comes first; without ``exact``, the
+    first hit that contains it stands in only when no hit reads it exactly
+    ("X" is the app X, not the "Xcode" listed above it). A one- or
+    two-character ``text`` without an exact hit is looked for again with
+    ocr_sweep(), which reads short labels the default pass skips. A frame
+    this captured itself is deleted after reading; a caller's ``image_path``
+    is left alone.
     """
-    def first(hits):
-        for hit in hits:
-            if (hit.text == text) if exact else (text in hit.text):
-                return hit
-        return None
+    def best(hits):
+        hits = list(hits)
+        same = next((h for h in hits if h.text == text), None)
+        if exact or same is not None:
+            return same
+        return next((h for h in hits if text in h.text), None)
 
     owned = image_path is None
     path = image_path or capture_window()
     try:
-        hit = first(ocr(path))
-        if hit is None and 0 < len("".join(text.split())) <= 2:
-            hit = first(ocr_sweep(path))
+        hit = best(ocr(path))
+        if (hit is None or hit.text != text) and 0 < len("".join(text.split())) <= 2:
+            swept = best(ocr_sweep(path))
+            if swept is not None and (hit is None or swept.text == text):
+                hit = swept
         return hit
     finally:
         if owned:
@@ -356,9 +377,9 @@ def read_screen(language_correction: bool = True, sweep: bool = False,
     """Convenience: capture + OCR the current mirroring window.
 
     ``language_correction`` is passed through to ocr(); see there.
-    ``sweep=True`` reads with ocr_sweep() instead (F27). ``also_sweep=True``
+    ``sweep=True`` reads with ocr_sweep() instead. ``also_sweep=True``
     reads the same frame with both and merges the hits, so a short label
-    the default pass skips is still there (F32). The frame is deleted once
+    the default pass skips is still there. The frame is deleted once
     it has been read.
     """
     path = capture_window()

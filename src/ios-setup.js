@@ -26,7 +26,7 @@ Builds noracu's on-device runner (a UI-test bundle, source in ios-runner/) for o
   --bundle-prefix <p>      bundle identifier prefix for the runner (default: dev.noracu.<teamid>)
   --register-device        let Xcode register this iPhone in the team if it is not registered yet`;
 
-const TEAM_RE = /^[A-Z0-9]{10}$/, PREFIX_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{2,100}$/;
+const TEAM_RE = /^[A-Z0-9]{10}$/, PREFIX_RE = /^(?=.{3,101}$)[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)*$/;   // parts between single dots: none empty
 
 export function parseArgs(argv) {
   const o = { team: null, udid: null, prefix: null, register: false, help: false };
@@ -42,7 +42,7 @@ export function parseArgs(argv) {
   }
   if (o.team !== null && !TEAM_RE.test(o.team)) return { error: "--team must be a 10-character team identifier (letters and digits, as shown in your Apple developer account)" };
   if (o.udid !== null && !iosApi.validUdid(o.udid)) return { error: "--udid is not a device identifier" };
-  if (o.prefix !== null && !PREFIX_RE.test(o.prefix)) return { error: "--bundle-prefix must look like a bundle identifier prefix (letters, digits, dots, hyphens)" };
+  if (o.prefix !== null && !PREFIX_RE.test(o.prefix)) return { error: "--bundle-prefix must look like a bundle identifier prefix: letters, digits and hyphens in parts separated by single dots (com.example.me)" };
   return o;
 }
 
@@ -62,6 +62,7 @@ export function explain(output, team = "your team") {
   if (/isn.t registered|is not registered|doesn.t include the currently selected device|Device .{0,80}isn.t included/i.test(t)) return `this iPhone is not registered in ${team}: run again with --register-device (it adds the device to the team), or register it at developer.apple.com.`;
   if (/No Account for Team|No profiles for|requires a development team|no signing certificate|Signing for .{0,80}requires/i.test(t)) return `Xcode has no account or certificate for ${team}: open Xcode › Settings › Accounts, sign in, then run this again.`;
   if (/Developer Mode/i.test(t)) return "turn on Developer Mode on the iPhone (Settings › Privacy & Security › Developer Mode), then run this again.";
+  if (/keychain[^\n]{0,120}\b(?:is )?locked|errSecInteractionNotAllowed|User interaction is not allowed/i.test(t)) return "this Mac's keychain is locked, so the signing key cannot be used (usual over ssh): unlock it at the Mac's own screen, or with `security unlock-keychain`, then run this again.";
   if (/device is locked|unlock the device|is locked/i.test(t)) return "unlock the iPhone and run this again.";
   return null;
 }
@@ -73,14 +74,18 @@ export const BUILD_TIMEOUT_MS = 15 * 60 * 1000;
 // killGraceMs more). Ctrl-C on this command ends the group too.
 function run(file, argv, spawnImpl, timeoutMs, killGraceMs = 3000, exit = (code) => process.exit(code)) {
   return new Promise((resolve) => {
-    let out = "", child, settled = false, timer = null, sigTimer = null, timedOut = false, signalled = false;
+    let out = "", child, settled = false, timer = null, sigTimer = null, timedOut = false, signalled = false, sigCode = 130;
     const signal = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* already gone */ } } };
     // Ctrl-C: the group is told to end and this command exits with 130 once xcodebuild is gone, a second later at the latest
-    const interrupted = () => { if (settled) return; exit(130); done({ code: null, out, signalled: true }); };
-    const onSignal = () => { if (signalled) return; signalled = true; signal("SIGTERM"); sigTimer = setTimeout(() => { signal("SIGKILL"); interrupted(); }, 1000); sigTimer.unref?.(); };
+    // done() first: the handlers and timers are off before exit is called, whatever exit does
+    const interrupted = () => { if (settled) return; done({ code: null, out, signalled: true, exitCode: sigCode }); exit(sigCode); };
+    // The handler stays until the build is gone (done() takes it off): with one that is gone after the first
+    // signal, a second Ctrl-C would be this process's default end — the SIGKILL below would never be sent, and a
+    // build that does not end on SIGTERM would go on. 130 for Ctrl-C, 143 for SIGTERM.
+    const onSignal = (sig) => { if (signalled) return; signalled = true; clearTimeout(timer); sigCode = sig === "SIGTERM" ? 143 : 130; signal("SIGTERM"); sigTimer = setTimeout(() => { signal("SIGKILL"); interrupted(); }, 1000); sigTimer.unref?.(); };
     const done = (v) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(sigTimer); process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal); resolve(v); };
     try { child = spawnImpl(file, argv, { stdio: ["ignore", "pipe", "pipe"], detached: true }); } catch (e) { return done({ code: null, out: String(e && e.message) }); }
-    process.once("SIGINT", onSignal); process.once("SIGTERM", onSignal);
+    process.on("SIGINT", onSignal); process.on("SIGTERM", onSignal);
     timer = setTimeout(() => {
       timedOut = true;
       signal("SIGTERM");
@@ -89,7 +94,8 @@ function run(file, argv, spawnImpl, timeoutMs, killGraceMs = 3000, exit = (code)
     const add = (d) => { out = (out + String(d)).slice(-200000); };
     child.stdout?.on("data", add); child.stderr?.on("data", add);
     child.on("error", (e) => done({ code: null, out: String(e && e.message) }));
-    child.on("close", (code) => (signalled ? interrupted() : done(timedOut ? { code: null, out, timedOut: true } : { code, out })));
+    // code null with a signal name: something outside this command ended xcodebuild (not the time limit, not Ctrl-C here)
+    child.on("close", (code, sig) => (signalled ? interrupted() : done(timedOut ? { code: null, out, timedOut: true } : { code, out, ...(code === null && sig ? { killedBy: String(sig) } : {}) })));
   });
 }
 
@@ -113,7 +119,13 @@ export async function main(argv, { log = (s) => process.stdout.write(s + "\n"), 
   const prefix = o.prefix || (o.team ? `dev.noracu.${o.team.toLowerCase()}` : null);
   // the same place the server looks in (NORACU_IOS_RUNNER_DIR, default ~/.noracu/ios-runner)
   const root = join(home, ".noracu"), base = env.NORACU_IOS_RUNNER_DIR || join(root, "ios-runner"), out = join(base, device.udid);
-  for (const d of env.NORACU_IOS_RUNNER_DIR ? [base, out] : [root, base, out]) { mkdirSync(d, { recursive: true, mode: 0o700 }); try { chmodSync(d, 0o700); } catch { /* not ours to change */ } }
+  // a folder the person named (NORACU_IOS_RUNNER_DIR) that is already there keeps its mode; what noracu makes is 0700
+  const theirs = env.NORACU_IOS_RUNNER_DIR && existsSync(base);
+  for (const d of env.NORACU_IOS_RUNNER_DIR ? [base, out] : [root, base, out]) {
+    mkdirSync(d, { recursive: true, mode: 0o700 });
+    if (theirs && d === base) continue;
+    try { chmodSync(d, 0o700); } catch { /* not ours to change */ }
+  }
   // A build for another bundle prefix in the same folder leaves products the next build can keep: the runner it names
   // then still carries the old bundle id, and the server starts an old runner (device run 2026-11-13). When the prefix
   // changes — or a folder from before this check holds a build of unknown prefix — the earlier build is removed first.
@@ -127,14 +139,16 @@ export async function main(argv, { log = (s) => process.stdout.write(s + "\n"), 
   }
   log(`Building the runner for ${device.name || device.udid}${device.simulated ? " (simulator)" : ` (team ${o.team}, bundle prefix ${prefix})`} — this takes a minute or two…`);
   const r = await run(api.XCODEBUILD, buildArgv({ udid: device.udid, simulated: device.simulated, out, team: o.team, prefix, register: o.register }), spawnImpl, buildTimeoutMs, killGraceMs, exit);
-  if (r.signalled) return 130;   // Ctrl-C: not a failed build
+  if (r.signalled) return r.exitCode || 130;   // Ctrl-C or SIGTERM: not a failed build
   if (r.timedOut) {
     log(`noracu ios-setup: the build did not finish in ${Math.round(buildTimeoutMs / 60000)} min and was stopped — a signing or keychain prompt may be waiting on this Mac's screen; answer it and run the command again.\n--- last lines of xcodebuild ---\n${r.out.trim().split("\n").slice(-15).join("\n")}`);
     return 1;
   }
   const xctestrun = r.code === 0 ? await api.findXctestrun(out) : null;
   if (!xctestrun) {
-    const why = r.code === null ? `xcodebuild could not be run (${r.out.slice(0, 200)}) — is Xcode installed?` : explain(r.out, o.team ? `team ${o.team}` : "your team");
+    const why = r.code === null
+      ? (r.killedBy ? `xcodebuild was ended by ${r.killedBy} from outside this command before it finished — run the command again` : `xcodebuild could not be run (${r.out.slice(0, 200)}) — is Xcode installed?`)
+      : explain(r.out, o.team ? `team ${o.team}` : "your team");
     log(`noracu ios-setup: the build failed${why ? `: ${why}` : "."}\n--- last lines of xcodebuild ---\n${r.out.trim().split("\n").slice(-15).join("\n")}`);
     return 1;
   }

@@ -24,8 +24,8 @@ function rig({ env = {}, sbDenied = false } = {}) {
     listDevices: async () => (t.listFail ? { ok: false, error: "devicectl_failed", message: "xcrun: no devicectl" } : { ok: true, devices: t.devices }),
     deviceDetails: async (udid) => ({ ok: true, device: { ...t.devices.find((d) => d.udid === udid), tunnelIP: "fd09:6c3e:c65c::1" } }),
     lockState: async () => { t.locks++; if (t.lockGate) await t.lockGate; return t.lockSeq.length ? t.lockSeq.shift() : t.lock; },
-    launchApp: async (udid, b, opts) => { t.launches.push(["device", b, opts, t.starts]); if (t.launchFail) return t.launchFail; return phone.launch(b) ? { ok: true, pid: 1, activated: true } : { ok: false, error: "devicectl_failed", message: "The application is not installed" }; },
-    simLaunch: async (udid, b, opts) => { t.launches.push(["sim", b, opts, t.starts]); return phone.launch(b) ? { ok: true, pid: 1, activated: true } : { ok: false, error: "simctl_failed", message: "not installed" }; },
+    launchApp: async (udid, b, opts) => { if (t.onLaunchPrep) t.onLaunchPrep(); const no = opts?.beforeRun?.(); if (no) return no; t.launches.push(["device", b, opts, t.starts]); if (t.launchFail) return t.launchFail; return phone.launch(b) ? { ok: true, pid: 1, activated: true } : { ok: false, error: "devicectl_failed", message: "The application is not installed" }; },
+    simLaunch: async (udid, b, opts) => { if (t.onLaunchPrep) t.onLaunchPrep(); const no = opts?.beforeRun?.(); if (no) return no; t.launches.push(["sim", b, opts, t.starts]); return phone.launch(b) ? { ok: true, pid: 1, activated: true } : { ok: false, error: "simctl_failed", message: "not installed" }; },
     findXctestrun: async (d) => { t.xdir = d; return t.xctestrun; },
     startRunner: async (args) => {
       t.starts++; t.startArgs = args;
@@ -40,7 +40,7 @@ function rig({ env = {}, sbDenied = false } = {}) {
     },
     killPending: () => { t.killed = (t.killed || 0) + 1; },
   };
-  const s = createIosSession({ env, api, runnerDir: "/x", springboardDenied: () => sbDenied, approve: (b, op) => { t.approved.push(b); t.approvedOps.push(op); return t.denied; }, now: () => t.now, sleep: async (ms) => { t.now += ms; if (t.hold && ms >= 4000) await t.hold; }, onChild: (c) => { t.onChild = c; } });
+  const s = createIosSession({ env, api, runnerDir: "/x", stopCheck: () => t.stop || null, springboardDenied: () => sbDenied, approve: (b, op) => { t.approved.push(b); t.approvedOps.push(op); return t.denied; }, now: () => t.now, sleep: async (ms) => { t.now += ms; if (t.hold && ms >= 4000) await t.hold; }, onChild: (c) => { t.onChild = c; } });
   const ops = (op) => phone.log.filter(([o]) => o === op);
   const idx = async (label, extra = {}) => J(await s.snapshot(extra)).elements.find((e) => e.label === label).i;
   return { s, t, phone, ops, idx };
@@ -219,6 +219,193 @@ function rig({ env = {}, sbDenied = false } = {}) {
   const short = await s.type({ text: "ab" });
   ok(short.text === `typed 2 characters in ${SETTINGS} — too short to tell from what was already there, so nothing was read back (delivery=delivered_unverified, retry=unsafe)` && phone.search.endsWith("ab"), "three characters or fewer: typed, and not called verified", short);
 }
+// Control Center over the app: the app still reports itself in front and is read as usual; SpringBoard shows icons
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  phone.overlay = true;
+  const tap = await s.tap({ x: 200, y: 760 });
+  const swipe = await s.swipe({ from: [200, 600], to: [200, 300] });
+  const typed = await s.type({ text: "hello" });
+  phone.overlay = false;
+  const after = await s.tap({ x: 200, y: 760 });
+  ok([tap, swipe, typed].every((r) => /^system_overlay: /.test(r.error || "") && /delivery=not_delivered/.test(r.error)) && ops("tap").length === 1 && ops("drag").length === 0 && ops("type").length === 0 && !after.error,
+    "Control Center over the app (it still reports itself in front): taps, swipes and text are not sent; once it is gone they are", [tap, swipe, typed, after, ops("tap").length]);
+  // the answer does not say it is Control Center (icons also show while an app is still coming forward): look again
+  // in a moment first; ios_home closes it but leaves the app
+  ok(/in a moment/.test(tap.error) && /leaves the app/.test(tap.error) && /ios_launch brings the app back/.test(tap.error) && !/\(Control Center\) —/.test(tap.error),
+    "system_overlay: Control Center is one case of several, the next step is to look again in a moment, and ios_home is said to leave the app", tap.error);
+}
+// the stop file made, or the phone locked, while the iPhone is looked at before an input: the input is not sent
+{
+  const { s, ops, t } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  t.onCall = (op) => { if (op === "front") t.stop = "user_stopped: /tmp/stop exists — the person at the Mac stopped noracu's input; nothing was sent (delivery=not_delivered, retry=safe); remove the file to resume"; };
+  const stopped = await s.tap({ x: 200, y: 760 });
+  t.onCall = null; t.stop = null;
+  ok(stopped.error === "user_stopped: /tmp/stop exists — the person at the Mac stopped noracu's input; remove the file to resume (delivery=not_delivered, retry=safe)" && ops("tap").length === 0,
+    "the stop file made while the iPhone is looked at before a tap: the tap is not sent, and the answer says so once", stopped);
+  t.onCall = (op) => { if (op === "front") { t.now += 1500; t.lock = { ok: true, locked: true }; } };
+  const locked = await s.tap({ x: 200, y: 760 });
+  t.onCall = null; t.lock = { ok: true, locked: false };
+  ok(/^device_locked: /.test(locked.error || "") && /delivery=not_delivered/.test(locked.error) && ops("tap").length === 0,
+    "the iPhone locked while it is looked at before a tap (the unlocked answer is then older than a second): read again, the tap is not sent", locked);
+  const after = await s.tap({ x: 200, y: 760 });
+  ok(!after.error && ops("tap").length === 1, "with the stop file gone and the iPhone unlocked, the same tap is sent", after);
+}
+// the stop file made while that lock read is under way (devicectl can take seconds): the input is not sent either —
+// the stop file is the last thing looked at
+{
+  const { s, ops, t } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  const STOP = "user_stopped: /tmp/stop exists — the person at the Mac stopped noracu's input; nothing was sent (delivery=not_delivered, retry=safe); remove the file to resume";
+  t.onCall = (op) => { if (op === "front") { t.now += 1500; t.lockGate = { then: (res) => { t.stop = STOP; res(); } }; } };
+  const r = await s.tap({ x: 200, y: 760 });
+  t.onCall = null; t.lockGate = null; t.stop = null;
+  ok(/^user_stopped: /.test(r.error || "") && ops("tap").length === 0,
+    "the stop file made while the lock is read again right before a tap: the tap is not sent", r);
+}
+// the stop file made while the client still opens its connection to the runner (a runner just started has none; up
+// to 5 s), after the session's own looks: the client looks once more right before it writes, and the tap is not sent
+{
+  const { s, ops, t } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  const STOP = "user_stopped: /tmp/stop exists — the person at the Mac stopped noracu's input; nothing was sent (delivery=not_delivered, retry=safe); remove the file to resume";
+  t.onCall = (op) => { if (op === "tap") t.stop = STOP; };
+  const r = await s.tap({ x: 200, y: 760 });
+  t.onCall = null; t.stop = null;
+  ok(/^user_stopped: /.test(r.error || "") && ops("tap").length === 0,
+    "the stop file made while the client opens its connection: the tap is not written", r);
+}
+// …but icons that are only on their way out (the app has just come to the front) do not refuse the input
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  let reads = 2;   // the fake reads phone.overlay twice per `front`: icons for the first one only
+  Object.defineProperty(phone, "overlay", { configurable: true, get: () => reads-- > 0 });
+  const r = await s.tap({ x: 200, y: 760 });
+  ok(!r.error && /delivered_unverified/.test(r.text || "") && ops("tap").length === 1, "icons still showing for a moment after the app came to the front: looked at again, and the tap goes out", [r, ops("tap").length]);
+}
+// …also when they take a little longer to go (three looks still show them)
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  let reads = 6;   // two reads of phone.overlay per `front`: icons for the first three
+  Object.defineProperty(phone, "overlay", { configurable: true, get: () => reads-- > 0 });
+  const r = await s.tap({ x: 200, y: 760 });
+  ok(!r.error && /delivered_unverified/.test(r.text || "") && ops("tap").length === 1 && ops("front").length === 4, "icons still showing at the first three looks after the app came to the front: the tap goes out at the fourth", [r, ops("front").length]);
+}
+// An input named for the Home Screen while an app is what the iPhone shows (it came forward after ios_home, behind
+// noracu's back): com.apple.springboard still reads as in front, but shows no icons — nothing is sent into that app
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  await s.home();
+  phone.front = "com.example.slow"; phone.state["com.example.slow"] = 4;
+  const tap = await s.tap({ x: 200, y: 400 });
+  const swipe = await s.swipe({ from: [300, 400], to: [60, 400] });
+  const sent = (op) => ops(op).filter(([, a]) => a.bundle_id === SPRINGBOARD && a.springboard_only !== true).length;
+  ok([tap, swipe].every((r) => /^app_not_foreground: the Home Screen is not what the iPhone is showing/.test(r.error || "") && /delivery=not_delivered/.test(r.error)) && sent("tap") === 0 && sent("drag") === 0,
+    "an app came to the front after ios_home: a tap and a swipe named for the Home Screen are not sent into it", [tap, swipe]);
+  // a system alert over that app: one tap on its button still goes out, after one look
+  phone.alert = { frame: [40, 300, 320, 200], buttons: [[60, 440, 130, 44]] };
+  const n = ops("front").length;
+  const allow = await s.tap({ bundle_id: SPRINGBOARD, x: 100, y: 460 });
+  ok(!allow.error && /delivered_unverified/.test(allow.text || "") && ops("front").length === n + 1, "…one tap on a button of a system alert over that app still goes out, after one look", [allow, ops("front").length - n]);
+  phone.alert = null;
+  // back on the Home Screen the tap goes out as before
+  phone.front = SPRINGBOARD; phone.state["com.example.slow"] = 3;
+  const home = await s.tap({ x: 200, y: 400 });
+  ok(!home.error && /delivered_unverified/.test(home.text || "") && sent("tap") === 1, "…and on the Home Screen itself the tap goes out", [home, sent("tap")]);
+}
+// …and while the app this session brought forward still reads as in front, icons that SpringBoard still shows (one
+// that has not gone yet right after ios_launch, or Control Center's) do not make the Home Screen of it
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  phone.overlay = true;   // the fake's `front` reports icons while Settings stays in front
+  const r = await s.tap({ bundle_id: SPRINGBOARD, x: 200, y: 400 });
+  ok(/^app_not_foreground: the Home Screen is not what the iPhone is showing/.test(r.error || "") && /delivery=not_delivered/.test(r.error)
+    && ops("tap").every(([, a]) => a.bundle_id !== SPRINGBOARD || a.springboard_only === true),
+    "the app that was launched is still in front and SpringBoard still shows icons: a tap named for the Home Screen is not sent into the app", r);
+}
+// …nor after a call that named the Home Screen in between: a snapshot of it, or text typed there, does not make the
+// app that is still in front forgotten
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  await s.snapshot({ bundle_id: SPRINGBOARD });
+  phone.overlay = true;   // icons (Control Center) while Settings stays in front
+  const tap = await s.tap({ bundle_id: SPRINGBOARD, x: 200, y: 400 });
+  const typed = await s.type({ bundle_id: SPRINGBOARD, text: "abcd" });
+  phone.overlay = false;
+  const into = (op) => ops(op).filter(([, a]) => a.bundle_id === SPRINGBOARD && a.springboard_only !== true).length;
+  ok([tap, typed].every((r) => /^app_not_foreground: the Home Screen is not what the iPhone is showing/.test(r.error || "") && /delivery=not_delivered/.test(r.error)) && into("tap") === 0 && into("type") === 0,
+    "a snapshot of the Home Screen taken while the launched app is still in front: a tap and text named for the Home Screen are still not sent into the app", [tap, typed]);
+}
+// the state of that app cannot be read: a failed look like the one at SpringBoard — nothing is sent, a failure XCTest
+// recorded ends the session, and no answer makes the next call ask for a sign of life first
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  phone.overlay = true; phone.issue = "app_state";
+  const a = await s.tap({ bundle_id: SPRINGBOARD, x: 200, y: 400 });
+  phone.issue = null;
+  const ended = !s._state().running;
+  ok(/^xctest_issue: .*whether com\.apple\.Preferences, the app this session brought forward, is still in front — the input was not sent\).*\(delivery=not_delivered, retry=safe\)$/.test(a.error || "") && ops("tap").length === 0 && ended,
+    "the state of the launched app cannot be read before an input named for the Home Screen (XCTest recorded a failure): nothing is sent, and the session ends", [a, ended]);
+}
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  phone.overlay = true; phone.hang = "app_state";
+  const b = await s.tap({ bundle_id: SPRINGBOARD, x: 200, y: 400 });
+  phone.hang = null;
+  ok(/^ios_timeout: .*\(delivery=not_delivered, retry=safe\)$/.test(b.error || "") && ops("tap").length === 0 && s._state().suspect === true,
+    "…no answer to it: ios_timeout, nothing sent, and the next call asks for a sign of life first", b);
+}
+// the Home Screen's icons still on their way in right after ios_home: looked at again, and the tap goes out
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  await s.home();
+  let real = phone.front, reads = 2;   // the fake reads phone.front twice per `front`: no icons for the first one
+  Object.defineProperty(phone, "front", { configurable: true, get: () => (reads-- > 0 ? SETTINGS : real), set: (v) => { real = v; } });
+  const n = ops("front").length;
+  const r = await s.tap({ x: 200, y: 400 });
+  ok(!r.error && /delivered_unverified/.test(r.text || "") && ops("front").length === n + 2 && ops("tap").at(-1)[1].springboard_only !== true,
+    "the Home Screen's icons not there yet at the first look: looked at again, and the tap goes out", [r, ops("front").length - n]);
+}
+// the look at SpringBoard made before an input fails: a failed call like any other — a failure XCTest recorded ends
+// the session — and the input is not sent, under the failure's own name
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  phone.issue = "front";
+  const a = await s.tap({ x: 200, y: 760 });
+  phone.issue = null;
+  const ended = !s._state().running;
+  ok(/^xctest_issue: .*\(delivery=not_delivered, retry=safe\)$/.test(a.error || "") && ops("tap").length === 0 && ended,
+    "the look at SpringBoard before an input meets a failure XCTest recorded: xctest_issue, nothing sent, the session ends", [a, ended]);
+}
+{
+  const { s, phone, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  phone.hang = "front";
+  const b = await s.tap({ x: 200, y: 760 });
+  phone.hang = null;
+  ok(/^ios_timeout: .*\(delivery=not_delivered, retry=safe\)$/.test(b.error || "") && ops("tap").length === 0,
+    "the look at SpringBoard before an input gets no answer: ios_timeout, nothing sent", b);
+}
+// ios_type with the index of something that is not a text input: it is not tapped
+{
+  const { s, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  const notText = J(await s.snapshot()).elements.find((e) => !["textField", "secureTextField", "searchField", "textView"].includes(e.type));
+  const r = await s.type({ element_index: notText.i, text: "hello" });
+  ok(/^not_a_text_field: /.test(r.error || "") && /delivery=not_delivered, retry=safe/.test(r.error) && ops("tap").length === 0 && ops("type").length === 0,
+    "ios_type with the index of a button or a row: refused, nothing tapped or typed", [notText, r, ops("tap").length]);
+}
 // the read-back looks at one field: the one that was tapped, or the only one that changed
 {
   const { s, phone, idx } = rig();
@@ -323,8 +510,10 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
 {
   const { s, t, phone, ops } = rig();
   await s.launch({ bundle_id: SETTINGS });
+  await s.home();
   const free = await s.tap({ bundle_id: SPRINGBOARD, x: 100, y: 100 });
-  ok(/^tapped the point/.test(free.text) && !("springboard_only" in ops("tap").at(-1)[1]), "without rules, input that names the Home Screen is sent as before", free);
+  ok(/^tapped the point/.test(free.text) && !("springboard_only" in ops("tap").at(-1)[1]), "without rules, input that names the Home Screen is sent while the Home Screen is what the iPhone shows", free);
+  await s.launch({ bundle_id: SETTINGS });
   phone.issue = "tap";
   const bad = await s.tap({ bundle_id: SETTINGS, x: 1, y: 1 });
   ok(/^xctest_issue: failed - .*look before acting again \(ios_snapshot\) \(delivery=unknown, retry=unsafe\)$/.test(bad.error), "a failure XCTest recorded during a gesture: xctest_issue, delivery unknown — never a success", bad);
@@ -400,7 +589,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   const up = await s.tap({ x: 50, y: 50 });
   phone.refuseOnce = { op: "tap", error: "system_alert", message: "com.apple.springboard could not be read, so a system alert could not be ruled out" };
   const unk = await s.tap({ x: 50, y: 50 });
-  ok(/^system_alert: a system alert is up over the app — a system prompt is up on the iPhone; the person answers it there/.test(up.error) && up.error.endsWith(NOT_SENT)
+  ok(/^system_alert: a system alert is up over the app — a system prompt is up on the iPhone; the person answers it there .*look at it with ios_screenshot to tell them what it asks /.test(up.error) && up.error.endsWith(NOT_SENT)
     && /^system_alert: com\.apple\.springboard could not be read, so a system alert could not be ruled out — noracu could not tell whether a system prompt is up on the iPhone; look at it \(ios_screenshot\) before acting again/.test(unk.error) && !/the person answers it there/.test(unk.error) && unk.error.endsWith(NOT_SENT),
     "system_alert: the answer says a system prompt is up only when the runner saw one", [up.error, unk.error]);
 }
@@ -436,7 +625,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
 }
 
 {
-  // review S4B-s6-gemini-1: a runner that goes away between the read of the element and the tap — the tap names why
+  // a runner that goes away between the read of the element and the tap — the tap names why
   const { s, t, ops, idx } = rig();
   await s.launch({ bundle_id: SETTINGS });
   const i = await idx("Search");
@@ -444,6 +633,35 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   const r = await s.tap({ element_index: i });
   ok(/^runner_unreachable: the runner stopped before the input went out/.test(r.error) && /delivery=not_delivered/.test(r.error) && ops("tap").length === 0 && t.starts === 1,
     "the runner went away after the element was read: the tap says the runner stopped, sends nothing and starts no runner", r);
+}
+// A read a tool makes inside its own call does not start a runner: one that starts puts its own app in front of the
+// screen the call is about. The runner goes away right after ios_launch started the app…
+{
+  const { s, t, phone } = rig();
+  const launch = phone.launch.bind(phone);
+  phone.launch = (b) => { const r = launch(b); t.children.at(-1).emit("exit", 1); return r; };
+  const r = await s.launch({ bundle_id: SETTINGS });
+  ok(/^launch_not_confirmed: com\.apple\.Preferences was started; whether it is in front could not be read/.test(r.error || "") && /delivery=delivered_unverified/.test(r.error) && t.starts === 1,
+    "the runner went away right after ios_launch started the app: no runner is started to read whether the app is in front", [r, t.starts]);
+}
+// …while ios_type's text went out: the fields are not read back through a new runner…
+{
+  const { s, t, idx } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  const field = await idx("Search");
+  t.onCall = (op) => { if (op === "type") { t.onCall = null; t.children.at(-1).emit("exit", 1); } };
+  const typed = await s.type({ element_index: field, text: "hello" });
+  ok(/^typed 5 characters in com\.apple\.Preferences — the text fields could not be read afterwards/.test(typed.text || "") && t.starts === 1,
+    "the runner went away while the text went out: the fields are not read back through a new runner", [typed, t.starts]);
+}
+// …and while home was pressed: no runner is started to see the app leave the front
+{
+  const { s, t } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  t.onCall = (op) => { if (op === "home") { t.onCall = null; t.children.at(-1).emit("exit", 1); } };
+  const h = await s.home();
+  ok(/^home pressed — whether com\.apple\.Preferences left the front could not be read/.test(h.text || "") && t.starts === 1,
+    "the runner went away while home was pressed: no runner is started to see the app leave the front", [h, t.starts]);
 }
 
 // ---------- no answer, restarts ----------
@@ -537,6 +755,25 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(plain.error === `launch_failed: the launch service did not answer ${NOT_SENT}` && term.error === "launch_failed: the launch service did not answer — the running app may already have been stopped (delivery=unknown, retry=unsafe)",
     "a failed launch with terminate_existing may have stopped the app: delivery unknown, not safe to repeat; without it nothing was sent", [plain, term]);
 }
+{
+  // a failed launch that may have changed what is in front ends the earlier indexes; one that sent nothing does not
+  const { s, t, ops, idx } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  const kept = await idx("Wi-Fi");
+  t.launchFail = { ok: false, error: "devicectl_failed", message: "the launch service did not answer" };
+  await s.launch({ bundle_id: SETTINGS });
+  const live = await s.tap({ element_index: kept });
+  ok(!live.error && ops("tap").length === 1, "a launch that failed with nothing sent leaves the earlier indexes alone", live);
+  const i = await idx("Wi-Fi");
+  await s.launch({ bundle_id: SETTINGS, terminate_existing: true });
+  const dead = await s.tap({ element_index: i });
+  ok(/^element_no_longer_valid/.test(dead.error) && ops("tap").length === 1, "a failed launch with terminate_existing ends every earlier index", dead);
+  const j = await idx("Wi-Fi");
+  t.launchFail = { ok: false, error: "ios_timeout", message: "devicectl did not answer in 30 s" };
+  await s.launch({ bundle_id: SETTINGS });
+  const late = await s.tap({ element_index: j });
+  ok(/^element_no_longer_valid/.test(late.error) && ops("tap").length === 1, "a launch that timed out ends every earlier index", late);
+}
 
 // ---------- screenshot, shutdown ----------
 {
@@ -627,7 +864,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "the fields could not be read before typing because XCTest had recorded a failure: the text is not sent, and the failure is reported", held);
   const refocus = await s.type({ text: "hello" });
   ok(/^runner_restarted/.test(refocus.error) && phone.search === "" && ops("type").length === 0,
-    "the failure ended the test session: text with no element_index is refused once a new runner has taken the front (review S4A-s6-grok-3)", refocus);
+    "the failure ended the test session: text with no element_index is refused once a new runner has taken the front", refocus);
   await s.launch({ bundle_id: SETTINGS });
   const again = await s.type({ element_index: await idx("Search"), text: "hello" });
   ok(/delivered_verified/.test(again.text) && phone.search === "hello", "the field tapped again, the text goes in", again);
@@ -659,7 +896,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   ok(/^xctest_issue: .*com\.apple\.Preferences was started; whether it is in front was not read \(delivery=delivered_unverified, retry=safe\)$/.test(l.error) && !s._state().running,
     "a failure XCTest recorded while a launched app was being waited for: ios_launch reports it, and the session has ended", [l, s._state()]);
   const r0 = await s.tap({ bundle_id: SETTINGS, x: 1, y: 1 });
-  ok(/^runner_restarted/.test(r0.error) && ops("tap").length === 0, "it was reported once: the next tap is not refused with it again, but a new session started under it, so its points are refused (review S4A-s6-grok-3)", r0);
+  ok(/^runner_restarted/.test(r0.error) && ops("tap").length === 0, "it was reported once: the next tap is not refused with it again, but a new session started under it, so its points are refused", r0);
   await s.launch({ bundle_id: SETTINGS });
   const r = await s.tap({ bundle_id: SETTINGS, x: 1, y: 1 });
   ok(/^tapped/.test(r.text) && ops("tap").length === 1, "with the app brought back, the next tap goes out (through the new session)", r);
@@ -1036,10 +1273,10 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   const K = "textField||", K3 = "textField|note|Note";
   ok(fieldShows([f(K, "abc", { cut: true })], [f(K, "abd", { cut: true }), f(K3, "")], "hello", null) === "mismatch"
     && fieldShows([f(K, "abc")], [f(K, "abd", { cut: true }), f(K3, "")], "hello", null) === "moved",
-    "fieldShows: the reads list different fields — a field cut in both reads does not make it 'moved'; one that is newly cut does (P14-Grok-1)");
+    "fieldShows: the reads list different fields — a field cut in both reads does not make it 'moved'; one that is newly cut does");
   ok(fieldShows([f(K, "p"), f(K, "q", { cut: true })], [f(K, "nope"), f(K, "still", { cut: true })], "hello", null) === "mismatch"
     && fieldShows([f(K, "p"), f(K, "q")], [f(K, "nope"), f(K, "still", { cut: true })], "hello", null) === "several",
-    "fieldShows: several changed — a changed field cut in both reads does not count; one that is newly cut does (P14-Grok-1)");
+    "fieldShows: several changed — a changed field cut in both reads does not count; one that is newly cut does");
 }
 
 // ---------- pre-review P15: the one field that changed came back cut and was not cut before ----------
@@ -1069,13 +1306,13 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     && fieldShows([f(K, "abcd"), f(K2, "wxyz")], [f(K, "abcd", { cut: true }), f(K2, "wxyz", { cut: true })], "hello", null) === "several"
     && fieldShows([f(K, "abcd")], [f(K, "abcd", { cut: true }), f(K2, "")], "hello", K) === "cut",
     "fieldShows: the value reads the same and came back cut, not cut before — it changed ('cut', not a mismatch and not the placeholder answer of a twin); cut before and not after, or cut in both, is no gain; two such fields are 'several' (P16-AGY-1)");
-  // pre-review P17-Grok-1: cut before and whole now, with the same value, is no change — it neither hides a field
+  // cut before and whole now, with the same value, is no change — it neither hides a field
   // that did gain the text nor the placeholder answer
   ok(fieldShows([f(K, "ab", { cut: true }), f(K2, "", { ph: "hello" })], [f(K, "ab"), f(K2, "", { ph: "hello" })], "hello", null) === "placeholder"
     && fieldShows([f(K, "ab", { cut: true }), f(K2, "abcd")], [f(K, "ab"), f(K2, "abhellocd")], "hello", null) === "shown"
     && fieldShows([f(K, "ab", { cut: true }), f(K, "abcd")], [f(K, "ab"), f(K, "abhellocd")], "hello", K) === "shown"
     && fieldShows([f(K, "ab", { cut: true })], [f(K, "ab")], "hello", K) === "mismatch",
-    "fieldShows: a cut flag that clears on the same value is no change — the placeholder answer stands, a field that gained the text by insertion is shown (twin or not), and alone it is a mismatch (P17-Grok-1)");
+    "fieldShows: a cut flag that clears on the same value is no change — the placeholder answer stands, a field that gained the text by insertion is shown (twin or not), and alone it is a mismatch");
   const { s, phone, idx } = rig();
   await s.launch({ bundle_id: SETTINGS });
   phone.search = "abcd";
@@ -1087,7 +1324,7 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
     "ios_type: the tapped field reads the same as before and came back cut, not cut before: unverified (came back cut short), not type_not_confirmed", pastCap);
 }
 {
-  // review S4A-s6-D-1 / -grok-1: "left the front" only when the app was in front before the press and is then seen
+  // "left the front" only when the app was in front before the press and is then seen
   // in a background state — not when it was already elsewhere, and never on an unknown state (0)
   const { s, phone } = rig();
   await s.launch({ bundle_id: SETTINGS });
@@ -1099,6 +1336,41 @@ const SB_RE = /^input_denied: input that names com\.apple\.springboard \(the Hom
   phone.state[SETTINGS] = 0;                                    // an unknown state, with the app on screen
   const unknown = await s.home();
   ok(!/delivered_verified/.test(unknown.text || unknown.error || ""), "ios_home: an unknown app state (0) is never read as having left the front", unknown);
+}
+
+{
+  // the stop file made while ios_home read the app's state (that read can take up to 10 s): the press is not sent
+  const { s, t, ops } = rig();
+  await s.launch({ bundle_id: SETTINGS });
+  t.stop = "user_stopped: /tmp/stop exists — the person at the Mac stopped noracu's input; nothing was sent (delivery=not_delivered, retry=safe); remove the file to resume";
+  const r = await s.home();
+  ok(r.error === t.stop && ops("home").length === 0, "ios_home: the stop file is looked at again right before the press, after its state read", r);
+  t.stop = null;
+  ok(!(await s.home()).error && ops("home").length === 1, "… and once it is gone the press goes out");
+}
+
+{
+  // the stop file made while ios_launch's gate reads the lock (the gate can also start the runner — seconds): nothing
+  // is launched, and with terminate_existing the running app is not stopped
+  const { s, t } = rig();
+  const STOP = "user_stopped: /tmp/stop exists — the person at the Mac stopped noracu's input; nothing was sent (delivery=not_delivered, retry=safe); remove the file to resume";
+  t.lockGate = { then: (res) => { t.stop = STOP; res(); } };
+  const r = await s.launch({ bundle_id: SETTINGS, terminate_existing: true });
+  t.lockGate = null; t.stop = null;
+  ok(r.error === STOP && t.launches.length === 0, "ios_launch: the stop file is looked at again right before the launch, after its gate", r);
+  const again = await s.launch({ bundle_id: SETTINGS });
+  ok(!again.error && t.launches.length === 1, "… and once it is gone the launch goes out", again);
+}
+
+{
+  // the stop file made while devicectl is being prepared (its temporary folder), after ios_launch's gate: devicectl
+  // is not started, and with terminate_existing the running app is not stopped
+  const { s, t } = rig();
+  const STOP = "user_stopped: /tmp/stop exists — the person at the Mac stopped noracu's input; nothing was sent (delivery=not_delivered, retry=safe); remove the file to resume";
+  t.onLaunchPrep = () => { t.stop = STOP; };
+  const r = await s.launch({ bundle_id: SETTINGS, terminate_existing: true });
+  t.onLaunchPrep = null; t.stop = null;
+  ok(r.error === STOP && t.launches.length === 0, "ios_launch: the stop file is looked at once more right before devicectl starts, after it is prepared", r);
 }
 
 console.log(`ios-session unit: ${n}/${n} passed`);

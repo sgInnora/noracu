@@ -12,7 +12,7 @@
 //    bundle-id / name heuristic — a denylist, not a promise: unknown apps are tried.
 //  • Only an answer that proves nothing was posted falls back to cliclick. A posted click is checked by
 //    the caller (AX observe_after) and reported as it reads — never re-sent another way, since a click
-//    that did land but changed nothing visible would then go out twice (review CR1/CR2 2026-11-09).
+//    that did land but changed nothing visible would then go out twice.
 //  • Posted events reset HIDIdleTime like any other input; mac_* input jobs run under serializedInput,
 //    whose drain() advances lastOwnInputEnd, so user_active does not mistake our own events for the
 //    person's (server.mjs, 0.2.7 comment block).
@@ -23,7 +23,7 @@ export const BGPOST_DISABLED = process.env.NORACU_NO_BGPOST === "1";
 
 // Chromium / Electron / web-shell bundle ids (and app names, for hosts that report no bundle id).
 // Anything matching keeps the physical cliclick path even when bgpost is on.
-// S4A-s11-3 / -Gemini-5: Safari (WebKit) and Firefox take the cliclick path too — a pid-posted event they swallow
+// Safari (WebKit) and Firefox take the cliclick path too — a pid-posted event they swallow
 // would still read as posted, and only a "nothing was posted" answer may fall back; Arc is company.thebrowser.*
 const WEB_ENGINE = /electron|chrome|chromium|brave|edge|arc\.|thebrowser|vivaldi|opera|safari|webkit|firefox|mozilla|discord|slack|vscode|code\.oss|notion|linear|spotify|figma|teams|zoom|feishu|lark|dingtalk|wecom|wechat|qq\.browser/i;
 export function bgCandidate(bundleId, appName) {
@@ -48,7 +48,7 @@ const MOD_FLAGS = { cmd: 1 << 20, shift: 1 << 17, alt: 1 << 19, ctrl: 1 << 18, f
 // Every event of a gesture is created before the first one is posted, so the "nothing was posted"
 // answers (bad-*, create-failed) are exact: only those may fall back to the cliclick pointer path.
 // A click carries its click state (1, 2, 3… — kCGMouseEventClickState, field 1): without it a double
-// click is two single clicks (review CR1/CR2 2026-11-09). The button number is 0 left, 1 right, 2 other
+// click is two single clicks. The button number is 0 left, 1 right, 2 other
 // (middle); macOS reads it for the "other" event types only.
 export const BG_SCRIPT = `
   ObjC.import('CoreGraphics');
@@ -58,7 +58,7 @@ export const BG_SCRIPT = `
   ObjC.bindFunction('CGEventSetFlags', ['void', ['void*', 'uint64']]);
   ObjC.bindFunction('CGEventSetIntegerValueField', ['void', ['void*', 'int', 'int64']]);
   function run(argv) {
-    // whole numbers in range only: pid_t is int32, and a fraction or a wrap would post to another process (S4A-s11-1)
+    // whole numbers in range only: pid_t is int32, and a fraction or a wrap would post to another process
     const pid = Number(argv[1]);
     if (!Number.isInteger(pid) || pid <= 0 || pid > 2147483647) return 'bad-pid';
     const src = $.CGEventSourceCreate($.kCGEventSourceStateHIDSystemState);
@@ -70,7 +70,7 @@ export const BG_SCRIPT = `
       const down = $.CGEventCreateKeyboardEvent(src, code, true);
       const up = $.CGEventCreateKeyboardEvent(src, code, false);
       if (!down || !up) return 'create-failed';
-      // always set: 0 too, so a modifier someone holds on the keyboard does not ride along (cross-verification A0)
+      // always set: 0 too, so a modifier someone holds on the keyboard does not ride along
       $.CGEventSetFlags(down, flags); $.CGEventSetFlags(up, flags);
       events.push(down, up);
     } else if (argv[0] === 'click') {
@@ -87,7 +87,7 @@ export const BG_SCRIPT = `
         const down = $.CGEventCreateMouseEvent(src, dT, pt, btn);
         const up = $.CGEventCreateMouseEvent(src, uT, pt, btn);
         if (!down || !up) return 'create-failed';
-        // no modifier rides along from the HID state the source was created from (S4A-s11-Gemini-3)
+        // no modifier rides along from the HID state the source was created from
         $.CGEventSetFlags(down, 0); $.CGEventSetFlags(up, 0);
         $.CGEventSetIntegerValueField(down, 1, i + 1);
         $.CGEventSetIntegerValueField(up, 1, i + 1);
@@ -103,7 +103,7 @@ const MOUSE = { left: { types: [1, 2], button: 0 }, right: { types: [3, 4], butt
 // answers that prove nothing was posted
 export const NOT_POSTED = new Set(["bad-pid", "bad-key", "bad-point", "bad-count", "bad-op", "create-failed"]);
 
-// S4A-s11-Gemini-1 / -2: null, "", false and fractions are not numbers here — Number(null) is 0, which is the A
+// null, "", false and fractions are not numbers here — Number(null) is 0, which is the A
 // key, the pid of no process and the screen corner. A bad value goes out as "NaN" and the script answers bad-*.
 const num = (v) => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
 const intIn = (v, lo, hi) => { const n = num(v); return Number.isInteger(n) && n >= lo && n <= hi ? n : NaN; };
@@ -111,13 +111,13 @@ const intIn = (v, lo, hi) => { const n = num(v); return Number.isInteger(n) && n
 // The argv after `--` for one gesture (pure: the contract tests check it).
 export function keyArgv(pid, keyCode, mods = []) {
   let flags = 0;
-  // an unknown modifier is a bad chord, not a bare key (S4A-s11-2)
+  // an unknown modifier is a bad chord, not a bare key
   for (const m of mods) { if (!Object.hasOwn(MOD_FLAGS, m)) { flags = NaN; break; } flags |= MOD_FLAGS[m]; }
   return ["key", intIn(pid, 1, 2147483647), intIn(keyCode, 0, 127), flags].map(String);
 }
 export function clickArgv(pid, x, y, { button = "left", count = 1 } = {}) {
   const m = MOUSE[button] || MOUSE.left;
-  const c = intIn(count, 1, Number.MAX_SAFE_INTEGER);  // 0 or a fraction is not one click (S4A-s11-2)
+  const c = intIn(count, 1, Number.MAX_SAFE_INTEGER);  // 0 or a fraction is not one click
   return ["click", intIn(pid, 1, 2147483647), num(x), num(y), m.types[0], m.types[1], Number.isNaN(c) ? NaN : Math.min(c, 5), m.button].map(String);
 }
 

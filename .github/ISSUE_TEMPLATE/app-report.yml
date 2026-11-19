@@ -1,0 +1,34 @@
+name: App or site report
+description: An app or a website that noracu reads or operates badly
+labels: [app-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Some apps expose little through accessibility, and some pages are built in ways the element list
+        misses. A short report of which one, and what you saw, is enough.
+  - type: input
+    id: target
+    attributes:
+      label: Which app or site?
+      description: App name and version, or the site's address
+      placeholder: "e.g. Notes 4.11, or https://example.com/settings"
+    validations:
+      required: true
+  - type: input
+    id: tool
+    attributes:
+      label: Which tool?
+      placeholder: "e.g. mac_ax_state, mac_click, browser_snapshot"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What did you see?
+      description: What you asked for and what came back (paste the tool's text if you have it).
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: noracu version, macOS version, MCP client
+      placeholder: "e.g. 0.3.0, macOS 15.2, Claude Desktop"

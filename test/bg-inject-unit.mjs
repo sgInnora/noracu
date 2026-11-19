@@ -20,7 +20,7 @@ assert.deepEqual(keyArgv(7, 36, ["cmd", "shift"]), ["key", "7", "36", String((1 
 assert.ok(/CGEventSetIntegerValueField\(down, 1, i \+ 1\)/.test(BG_SCRIPT) && /CGEventSetIntegerValueField\(up, 1, i \+ 1\)/.test(BG_SCRIPT), "each click carries its click state (kCGMouseEventClickState = field 1)");
 assert.ok(BG_SCRIPT.indexOf("CGEventPostToPid(pid, ev)") > BG_SCRIPT.lastIndexOf("create-failed"), "every event is created before the first one is posted");
 assert.ok(/if \(!Number\.isInteger\(n0\) \|\| n0 < 1\) return 'bad-count';/.test(BG_SCRIPT) && /Math\.min\(n0, 5\)/.test(BG_SCRIPT), "the script refuses a count below 1 and clamps to 5");
-// S4A-s11-1 / -2 / -Gemini-1 / -Gemini-3: no value turns into 0, a wrapped pid or a dropped modifier
+// no value turns into 0, a wrapped pid or a dropped modifier
 for (const bad of [null, undefined, "", false, 1.2, 4294967301, -3, "7x"]) assert.equal(keyArgv(bad, 36)[1], "NaN", `pid ${String(bad)} is refused`);
 for (const bad of [null, "", 1.5, 128, -1]) assert.equal(keyArgv(7, bad)[2], "NaN", `key code ${String(bad)} is refused`);
 assert.equal(keyArgv(7, namedKeyCode("enter"))[2], "NaN", "an unknown key name is not key 0 (A)");
@@ -90,7 +90,7 @@ delete process.env.NORACU_DENY_APPS;
   const denied = evaluateApproval({ bundleId: "com.googlecode.iterm2", appName: "iTerm2" });
   assert.equal(denied.verdict, "deny", "iTerm2 denied by the default deny list");
 
-  // NORACU_DENY_APPS adds to the default list (S4A-s11-Gemini-2: it used to replace it)
+  // NORACU_DENY_APPS adds to the default list (it used to replace it)
   process.env.NORACU_DENY_APPS = "com.example.app, WeirdApp";
   assert.equal(evaluateApproval({ bundleId: "com.example.app" }).verdict, "deny");
   assert.equal(evaluateApproval({ bundleId: "com.weird", appName: "WeirdApp" }).verdict, "deny", "a listed name");
@@ -104,7 +104,7 @@ delete process.env.NORACU_DENY_APPS;
   // empty identity is never allowed while a rule is in force (S4A-s11-4)
   assert.ok(refused(evaluateApproval({})), "no identity: refused");
   assert.ok(refused(evaluateApproval({ bundleId: "", appName: "" })), "blank identity: refused");
-  // S4A-s11-Gemini-4: editions and terminals the list missed
+  // editions and terminals the list missed
   for (const [b, n] of [["dev.warp.Warp-Preview", "Warp Preview"], ["com.microsoft.VSCodeInsiders", "Visual Studio Code - Insiders"], ["org.tabby", "Tabby"], ["com.todesktop.nightly", "Cursor Nightly"], ["dev.zed.Zed-Preview", "Zed Preview"]]) {
     assert.equal(evaluateApproval({ bundleId: b, appName: n }).verdict, "deny", `${n} denied by default`);
   }
@@ -121,7 +121,7 @@ delete process.env.NORACU_DENY_APPS;
     assert.ok(/IDEs with a terminal/.test(r.reason), "the reason names the default list with IDEs");
   }
   assert.equal(evaluateApproval({ bundleId: "com.example.fork", appName: "PyCharm Community Edition" }).verdict, "deny", "a JetBrains IDE by name, with an edition suffix");
-  // P18-Gemini-5: editions and channels
+  // editions and channels
   for (const [b, n] of [["com.microsoft.VSCodeInsiders", "Code - Insiders"], ["com.microsoft.VSCodeExploration", "Code - Exploration"], ["dev.zed.Zed-Nightly", "Zed Nightly"], ["com.google.android.studio-EAP", "Android Studio Preview"]]) {
     assert.equal(evaluateApproval({ bundleId: b, appName: n }).verdict, "deny", `${n} denied by default`);
     assert.ok(refused(evaluateApproval({ bundleId: null, appName: n })), `${n} known only by name is refused by default`);
@@ -186,6 +186,59 @@ delete process.env.NORACU_DENY_APPS;
   execFileSync("/usr/bin/mkfifo", ["-m", "600", fifo]);
   process.env.NORACU_APPROVAL_FILE = fifo;
   assert.ok(/is not a regular file/.test(evaluateApproval({ bundleId: "com.good.app" }).error || ""), "a FIFO approval file fails closed without blocking");
+  process.env.NORACU_APPROVAL_FILE = file;
+  // Tabby, Rio and Wave by bundle id: denied under whatever name they show (they were on the list by name only)
+  delete process.env.NORACU_APPROVAL_FILE;
+  for (const bid of ["org.tabby", "com.raphaelamorim.rio", "dev.commandline.waveterm"]) assert.equal(evaluateApproval({ bundleId: bid, appName: "Renamed Terminal" }).verdict, "deny", `${bid} is on the default deny list by its bundle id`);
+  process.env.NORACU_APPROVAL_FILE = file;
+  // a Mac app whose name cannot be read is refused while a rule that names apps is in force (the default deny list
+  // has some); an iOS app, matched on its bundle id alone, is judged on that id as before
+  delete process.env.NORACU_APPROVAL_FILE;
+  const noName = evaluateApproval({ bundleId: "com.some.app", appName: "", needName: true });
+  assert.ok(/name of the app .* could not be read/.test(noName.error || ""), `no readable name, name rules in force: refused (${JSON.stringify(noName)})`);
+  assert.equal(evaluateApproval({ bundleId: "com.some.app", appName: "Some", needName: true }).verdict, "allow", "with its name read, the same app is allowed");
+  assert.equal(evaluateApproval({ bundleId: "com.some.app" }).verdict, "allow", "an iOS app (no name to read): its bundle id decides");
+  assert.equal(evaluateApproval({ bundleId: "com.apple.Terminal", needName: true }).verdict, "deny", "denied by its bundle id: still a deny, not the unnamed error");
+  process.env.NORACU_DENY_APPS = "none, com.listed.app";
+  assert.equal(evaluateApproval({ bundleId: "com.some.app", needName: true }).verdict, "allow", "a list of bundle ids only: the bundle id decides");
+  delete process.env.NORACU_DENY_APPS;
+  process.env.NORACU_APPROVAL_FILE = file;
+  writeFileSync(file, JSON.stringify({ allow: ["com.some.app"], deny: ["Some Name"] }));
+  process.env.NORACU_DENY_APPS = "none";
+  assert.ok(/entries of .* that name apps/.test(evaluateApproval({ bundleId: "com.some.app", needName: true }).error || ""), "an approval file entry that names an app: refused without a name");
+  delete process.env.NORACU_DENY_APPS;
+  writeFileSync(file, JSON.stringify({ allow: ["com.good.*"], ask: ["com.askme"], deny: ["com.bad.*"] }));
+  // a file that is not JSON is refused without a piece of it in the answer (which the agent reads); one over 64 KB
+  // is refused before it is read
+  writeFileSync(file, '{"allow": ["com.good.*"], secret-token-abc123 }');
+  const broken = evaluateApproval({ bundleId: "com.good.app" }).error || "";
+  assert.ok(/is not valid JSON/.test(broken) && !/secret|token|abc123|SyntaxError|Unexpected/.test(broken), `a broken approval file is named without its text: ${broken}`);
+  writeFileSync(file, JSON.stringify({ allow: ["com.good.*"], deny: ["x".repeat(100)].concat(Array(6000).fill("com.pad.app")) }));
+  assert.ok(/larger than 64 KB/.test(evaluateApproval({ bundleId: "com.good.app" }).error || ""), "an approval file over 64 KB fails closed unread");
+  writeFileSync(file, JSON.stringify({ allow: ["com.good.*"] }));
+  assert.equal(evaluateApproval({ bundleId: "com.good.app" }).verdict, "allow", "a small file that is JSON is read as before");
+
+  // R4 (2026-11-17): an "allow" entry that names an app of the default deny list exactly lets that app through;
+  // a wildcard does not, the file's own "deny" wins, and so does the user's NORACU_DENY_APPS
+  writeFileSync(file, JSON.stringify({ allow: ["com.googlecode.iterm2", "Cursor", "com.jetbrains.*", "*"] }));
+  const iterm = evaluateApproval({ bundleId: "com.googlecode.iterm2", appName: "iTerm2" });
+  assert.equal(iterm.verdict, "allow", "an allow entry with iTerm2's bundle id lets iTerm2 through the default deny list");
+  assert.ok(/names this app of the default deny list/.test(iterm.reason || ""), "the reason says so");
+  assert.equal(evaluateApproval({ bundleId: "com.todesktop.230313mzl4w4u92", appName: "Cursor" }).verdict, "allow", "an entry with the app's name does too");
+  assert.equal(evaluateApproval({ bundleId: "com.jetbrains.pycharm", appName: "PyCharm" }).verdict, "deny", "a wildcard entry does not");
+  const terminal = evaluateApproval({ bundleId: "com.apple.Terminal", appName: "Terminal" });
+  assert.equal(terminal.verdict, "deny", "\"*\" in allow does not open the default deny list");
+  assert.ok(/naming it exactly/.test(terminal.reason || ""), "the refusal says how the person can let it through");
+  writeFileSync(file, JSON.stringify({ allow: ["com.googlecode.iterm2"], deny: ["iTerm2"] }));
+  assert.equal(evaluateApproval({ bundleId: "com.googlecode.iterm2", appName: "iTerm2" }).verdict, "deny", "the file's own deny wins over its allow");
+  writeFileSync(file, JSON.stringify({ allow: ["com.googlecode.iterm2"] }));
+  process.env.NORACU_DENY_APPS = "com.googlecode.iterm2";
+  assert.equal(evaluateApproval({ bundleId: "com.googlecode.iterm2", appName: "iTerm2" }).verdict, "deny", "the user's NORACU_DENY_APPS wins over an allow entry");
+  process.env.NORACU_DENY_APPS = "none, iTerm2";
+  assert.equal(evaluateApproval({ bundleId: "com.googlecode.iterm2", appName: "iTerm2" }).verdict, "deny", "so does a list of the user's own with the default dropped");
+  delete process.env.NORACU_DENY_APPS;
+  delete process.env.NORACU_APPROVAL_FILE;
+  assert.ok(/naming it exactly/.test(evaluateApproval({ bundleId: "com.googlecode.iterm2", appName: "iTerm2" }).reason || ""), "without an approval file the refusal says how too");
   process.env.NORACU_APPROVAL_FILE = file;
 
   // A0: once NORACU_APPROVAL_FILE is set, a missing file, a symlink or an unknown key fails closed

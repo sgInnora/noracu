@@ -10,6 +10,7 @@ export function loadEngine(path) {
   const fns = {
     AXIsProcessTrusted: () => true,
     NSThread: { sleepForTimeInterval() {} },
+    CGEventSourceSecondsSinceLastEventType: () => 86400,   // nobody at the keyboard or mouse unless a test says so
     NSNumber: { numberWithBool: (b) => Boolean(b), numberWithDouble: (n) => Number(n) },
   };
   const dollar = new Proxy(function () {}, {

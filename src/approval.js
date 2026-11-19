@@ -8,13 +8,13 @@
 //    approval_required — the person at the Mac edits the file to allow; noracu itself never writes it
 //    (an agent must not be able to grant itself always-allow). Once the variable is set, a missing,
 //    malformed or unreadable file, a symlink, an unknown key, or an empty or non-string pattern fails
-//    CLOSED: no input goes out until it is fixed (cross-verification A0 2026-11-09: a missing file
-//    allowed everything). Unset: no approval check (0.2.7 behaviour).
+//    CLOSED: no input goes out until it is fixed (before 0.3.0 a missing file allowed everything).
+//    Unset: no approval check (0.2.7 behaviour).
 //  • NORACU_DENY_APPS: comma-separated bundle ids / app names that never get input, on top of the default
 //    list — the terminal apps and the IDEs with a built-in terminal below, plus the terminal hosting this
 //    server when the PPID chain shows one that is not on the list — so an agent cannot type into a shell.
 //    A list that starts with "none" drops the default ("none" alone: no deny list; "none,com.x.y": only
-//    com.x.y). Review S4A-s11-Gemini-2: a custom list used to replace the default, so naming one app
+//    com.x.y). a custom list used to replace the default, so naming one app
 //    silently let input into Terminal again. The PPID
 //    chain stops at launchd (a tmux or screen session started elsewhere, npx under a GUI host): then only
 //    the listed terminals apply.
@@ -22,22 +22,26 @@
 //    nothing. stat errors other than ENOENT fail closed.
 //  • A variable that is set but blank (NORACU_APPROVAL_FILE= or NORACU_STOP_FILE=, e.g. an unfilled
 //    placeholder in a client's config) is a broken setting, not "unset": input is refused until it is
-//    removed or given a path (review S4A-s11-me-1: blank read as unset and turned both checks off).
+//    removed or given a path (blank read as unset and turned both checks off).
 
 import { readFileSync, statSync, openSync, fstatSync, closeSync, constants as fsc } from "node:fs";
 import { execFileSync } from "node:child_process";
 
-// Terminal apps by bundle id, and how their executable path looks in ps (review CR1/CR2 T6: iTerm2,
+// Terminal apps by bundle id, and how their executable path looks in ps (iTerm2,
 // wezterm-gui, Ghostty and Warp were missed, and the walk stopped at tmux/screen)
 const TERMINALS = [
   { bundle: "com.apple.Terminal", path: /\/Terminal\.app\//i },
   { bundle: "com.googlecode.iterm2", path: /\/iTerm2?\.app\//i },
   { bundle: "com.github.wez.wezterm", path: /\/WezTerm\.app\/|\/wezterm(-gui)?$/i },
   { bundle: "com.mitchellh.ghostty", path: /\/Ghostty\.app\/|\/ghostty$/i },
-  { bundle: "dev.warp.Warp*", path: /\/Warp[^/]*\.app\//i },  // Warp, Warp Preview (S4A-s11-Gemini-4)
+  { bundle: "dev.warp.Warp*", path: /\/Warp[^/]*\.app\//i },  // Warp, Warp Preview
   { bundle: "org.alacritty", path: /\/Alacritty\.app\/|\/alacritty$/i },
   { bundle: "net.kovidgoyal.kitty", path: /\/kitty\.app\/|\/kitty$/i },
   { bundle: "co.zeit.hyper", path: /\/Hyper\.app\//i },
+  // bundle ids from their signed bundles' code requirements and Homebrew's cask (2026-11-18)
+  { bundle: "org.tabby", path: /\/Tabby\.app\//i },
+  { bundle: "com.raphaelamorim.rio", path: /\/Rio\.app\/|\/rio$/i },
+  { bundle: "dev.commandline.waveterm", path: /\/Wave\.app\//i },
 ];
 
 // --- host terminal (resolved once): the first ancestor that is a terminal app; tmux / screen are walked
@@ -62,15 +66,14 @@ function hostTerminal() {
 }
 const HOST_TERMINAL = hostTerminal();
 
-// the same apps by name too, for an app whose bundle id cannot be read (cross-verification A0)
-// (S4A-s11-Gemini-4: Warp Preview was missed; Tabby, Rio and Wave are terminals known by name only here)
+// the same apps by name too, for an app whose bundle id cannot be read (Warp Preview was missed)
 const TERMINAL_NAMES = ["Terminal", "iTerm2", "iTerm", "WezTerm", "Ghostty", "Warp*", "Alacritty", "kitty", "Hyper", "Tabby", "Rio", "Wave"];
-// IDEs with a built-in terminal (next-steps R3, 2026-11-12): keys typed into one can reach its shell, so
+// IDEs with a built-in terminal (2026-11-12): keys typed into one can reach its shell, so
 // they get no input by default either. Bundle ids (VS Code and Cursor read from installed apps), and names,
 // which also match when the bundle id is read but differs (a fork, an edition)
-// Editions and channels are covered by a trailing * (Insiders, Exploration, Preview, Nightly, Canary — P18-Gemini-5).
+// Editions and channels are covered by a trailing * (Insiders, Exploration, Preview, Nightly, Canary).
 // Two entries are broad on purpose and fail closed: the name "Code" (VS Code's own app name) also denies any other
-// app named exactly "Code", and com.jetbrains.* also denies JetBrains Toolbox, which has no shell (P18-Grok-3).
+// app named exactly "Code", and com.jetbrains.* also denies JetBrains Toolbox, which has no shell.
 const IDE_BUNDLES = [
   "com.microsoft.VSCode*", "com.vscodium*",
   "com.todesktop.230313mzl4w4u92", // Cursor
@@ -115,7 +118,7 @@ export function stopFileBlocked() {
 }
 
 // --- pattern match: "com.apple.*" glob against a bundle id or app name. A missing bundle id or name is
-// never matched (review CR1/CR2 T6: an empty pattern matched every app without a bundle id) ---
+// never matched (an empty pattern matched every app without a bundle id) ---
 function matches(pattern, bundleId, appName) {
   const p = String(pattern ?? "").trim();
   if (!p) return false;
@@ -123,9 +126,15 @@ function matches(pattern, bundleId, appName) {
   return (bundleId ? rx.test(String(bundleId)) : false) || (appName ? rx.test(String(appName)) : false);
 }
 
+// a rule written as a bundle id ("com.apple.Terminal", "com.example.*"); anything else names apps by their name
+const byBundle = (p) => /^[\w*?-]+(\.[\w*?-]+)+$/.test(String(p).trim());
+const unnamed = (what) => ({ error: `input_denied: the name of the app that would receive the input could not be read, so ${what} cannot rule it out — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` });
+
 // --- approval file (opt-in). Returns { verdict: "allow"|"ask"|"deny", reason } or { error } (fail closed). ---
-export function evaluateApproval({ bundleId, appName } = {}) {
-  // S4A-s11-4 / -Gemini-2: an app known by no name cannot be ruled out, and with a rule in force an app whose
+// needName: the app has a name to read (a Mac app). Without one, a rule that names apps cannot rule it out, so the
+// input is refused while such a rule is in force. An iOS app is matched on its bundle id alone (it has no name here).
+export function evaluateApproval({ bundleId, appName, needName = false } = {}) {
+  // an app known by no name cannot be ruled out, and with a rule in force an app whose
   // bundle id is unknown cannot be ruled out by bundle-id patterns (server.mjs approveKnown already refuses
   // both; this keeps the module safe on its own)
   const bid = String(bundleId ?? "").trim(), name = String(appName ?? "").trim();
@@ -133,28 +142,42 @@ export function evaluateApproval({ bundleId, appName } = {}) {
     return { error: `input_denied: the app that would receive the input ${name ? `("${name}") has no readable bundle id, so the deny list / approval file cannot rule it out` : "could not be identified"} — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
   }
   const deny = denyList();
+  // how many entries at the head of the list the user wrote (NORACU_DENY_APPS): those always win. The rest is the
+  // default list, which an approval file can open for an app it names exactly
+  const userCount = deny.own !== undefined ? deny.own : /^NORACU_DENY_APPS/.test(deny.source) ? deny.list.length : 0;
+  let byDefault = null;
   // the trimmed bundle id and name are what every rule is matched against, as they are what was checked above
-  // (audit S5A-s17-G-2: " com.apple.Terminal" was checked as known and then missed the deny list)
+  // (" com.apple.Terminal" was checked as known and then missed the deny list)
   for (const [i, d] of deny.list.entries()) if (matches(d, bid, name)) {
     // with a list of the user's own, say which of the two lists named the app
     const src = deny.own === undefined ? deny.source : i < deny.own ? "NORACU_DENY_APPS" : "the default deny list (terminal apps and IDEs with a terminal)";
-    return { verdict: "deny", reason: `denied by ${src} ("${d}")` };
+    if (i < userCount) return { verdict: "deny", reason: `denied by ${src} ("${d}")` };
+    byDefault = { verdict: "deny", reason: `denied by ${src} ("${d}") — the person at the Mac can let this one app through by naming it exactly (no * or ?) under "allow" in an approval file (NORACU_APPROVAL_FILE)` };
+    break;
   }
+  // the default list names some apps by name (editions and forks whose bundle id differs)
+  if (needName && !name && !byDefault && deny.list.some((d) => !byBundle(d))) return unnamed("the deny list's entries that name apps");
   const file = process.env.NORACU_APPROVAL_FILE;
-  if (file === undefined) return { verdict: "allow" };
+  if (file === undefined) return byDefault || { verdict: "allow" };
   if (!file.trim()) return { error: "approval_file_error: NORACU_APPROVAL_FILE is set but blank — remove it or give a path; nothing was sent (fail closed; delivery=not_delivered, retry=safe)" };
   let conf;
   let fd = null;
   try {
     // opened without following a symlink, and checked on the open descriptor (no swap between check and read)
     // O_NONBLOCK: a FIFO there would otherwise block the open, and the whole server with it, until something writes
-    // to it (audit S5A-s17-G-4); the open descriptor is then refused as not a regular file
+    // to it; the open descriptor is then refused as not a regular file
     fd = openSync(file, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
     const st = fstatSync(fd);
     if (!st.isFile()) return { error: `approval_file_error: ${file} is not a regular file — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
     if (st.mode & 0o077) return { error: `approval_file_insecure: ${file} must be mode 0600 (is 0${(st.mode & 0o777).toString(8)}) — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
     if (st.uid !== process.getuid?.()) return { error: `approval_file_owner: ${file} is not owned by this user — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
-    conf = JSON.parse(readFileSync(fd, "utf8"));
+    // a list of apps is small: a file over 64 KB is not read at all (it is read again before every input)
+    if (st.size > 65536) return { error: `approval_file_error: ${file} is larger than 64 KB — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
+    const text = readFileSync(fd, "utf8");
+    // JSON.parse's message quotes a piece of the file, and this answer goes to the agent: it is not passed on
+    try { conf = JSON.parse(text); } catch {
+      return { error: `approval_file_error: ${file} is not valid JSON — NORACU_APPROVAL_FILE is set, so nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
+    }
   } catch (e) {
     const why = e && e.code === "ENOENT" ? "does not exist" : e && e.code === "ELOOP" ? "is a symlink" : `is unreadable or not JSON (${e && e.code ? e.code : String(e).slice(0, 80)})`;
     return { error: `approval_file_error: ${file} ${why} — NORACU_APPROVAL_FILE is set, so nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
@@ -165,9 +188,16 @@ export function evaluateApproval({ bundleId, appName } = {}) {
   const unknown = Object.keys(conf).filter((k) => !["allow", "ask", "deny"].includes(k));
   if (unknown.length) return { error: `approval_file_error: ${file} has unknown key(s) ${unknown.slice(0, 3).map((k) => JSON.stringify(k)).join(", ")} — only "allow", "ask" and "deny"; nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
   for (const key of ["allow", "ask", "deny"]) if (conf[key] !== undefined && !Array.isArray(conf[key])) return { error: `approval_file_error: "${key}" must be an array — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
-  // review CR1/CR2 T6: an empty or non-string pattern is a broken file, not a pattern
+  // an empty or non-string pattern is a broken file, not a pattern
   for (const key of ["allow", "ask", "deny"]) for (const p of conf[key] || []) if (typeof p !== "string" || !p.trim() || p.length > 200) return { error: `approval_file_error: "${key}" holds an empty or non-string pattern (${JSON.stringify(p)?.slice(0, 40)}) — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
+  if (needName && !name && [...(conf.deny || []), ...(conf.ask || [])].some((p) => !byBundle(p))) return unnamed(`the entries of ${file} that name apps`);
   for (const d of conf.deny || []) if (matches(d, bid, name)) return { verdict: "deny", reason: `denied by approval file ("${d}")` };
+  // on the default deny list: only an "allow" entry that names this app — its bundle id or its name, without a
+  // wildcard — lets it through; "*" or "com.example.*" in "allow" does not open a terminal
+  if (byDefault) {
+    for (const a of conf.allow || []) if (!/[*?]/.test(a) && matches(a, bid, name)) return { verdict: "allow", reason: `allowed by approval file ("${a}"), which names this app of the default deny list` };
+    return byDefault;
+  }
   for (const a of conf.ask || []) if (matches(a, bid, name)) {
     return { verdict: "ask", reason: `approval_required: "${bundleId || appName}" is listed under "ask" in ${file} — the person at the Mac must move it to "allow" (noracu never edits this file); nothing was sent (delivery=not_delivered, retry=safe)` };
   }

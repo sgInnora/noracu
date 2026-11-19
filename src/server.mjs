@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // noracu MCP server — local computer-use across macOS apps, a Playwright browser, and iPhone Mirroring.
 //
-// Layers (46 tools across three surfaces; observe -> act -> verify):
+// Layers (47 tools across three surfaces, 33 by default, 42 with the XCUITest iPhone backend; observe -> act -> verify):
 //   Mac (20 mac_*):       src/mac-ax.js (JXA over the macOS Accessibility C API: snapshots, search,
 //                         element reads, semantic actions, menus, windows, apps, clipboard, notifications,
 //                         waits) + cliclick (physical pointer/keyboard) + screencapture (screenshots)
-//   Browser (12 browser_*): Playwright persistent-profile browser (or opt-in loopback CDP attach via
+//   Browser (13 browser_*): Playwright persistent-profile browser (or opt-in loopback CDP attach via
 //                         NORACU_ALLOW_CDP=1|any) with ARIA + element_index snapshots and real pointer input
 //   iPhone (14 phone_*):  EXPERIMENTAL — bundled imctl (CGEvent input, Vision OCR, pixel/OCR verification)
-//                         plus iPhone Mirroring menu commands over normalized 0-1 coordinates
+//                         plus iPhone Mirroring menu commands over normalized 0-1 coordinates; with
+//                         NORACU_PHONE_BACKEND=xcuitest, 9 ios_* tools (src/ios-session.js) take their place
 //
 // Transport: stdio JSON-RPC 2.0 (initialize / tools/list / tools/call / notifications/cancelled / ping)
 
@@ -27,9 +28,17 @@ import { bgCandidate, postKeyToPid, postClickToPid, BGPOST_DISABLED, BG_SCRIPT }
 import { stopFileBlocked, evaluateApproval, denyList, gateActive } from "./approval.js";
 import { createIosSession } from "./ios-session.js";
 import { validBundleId } from "./ios-xcuitest.js";
+import { defaultCliclick } from "./doctor.js";
 
-// `noracu ios-setup …` builds the on-device runner of the XCUITest backend and exits; every other start
-// is the MCP server on stdio.
+// `noracu doctor`, `--help` and `--version` are for a person at a terminal (src/doctor.js); `noracu ios-setup …`
+// builds the on-device runner of the XCUITest backend. Each exits when done; every other start is the MCP
+// server on stdio.
+if (["doctor", "--doctor", "--help", "--version"].includes(process.argv[2])) {
+  const { cli } = await import("./doctor.js");
+  const code = await cli(process.argv.slice(2));
+  await new Promise((done) => process.stdout.write("", done)); // a pipe is written asynchronously: let it drain before exiting
+  process.exit(code);
+}
 if (process.argv[2] === "ios-setup") {
   const { main } = await import("./ios-setup.js");
   process.exit(await main(process.argv.slice(3)));
@@ -39,10 +48,11 @@ if (process.argv[2] === "ios-setup") {
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 // imctl (the iPhone Mirroring driver, Python) ships inside the package at imctl/; NORACU_IMCTL_DIR overrides it (e.g. a dev checkout)
 const IMCTL_DIR = process.env.NORACU_IMCTL_DIR || join(__dirname, "..", "imctl");
-const CLICLICK = process.env.NORACU_CLICLICK || "/opt/homebrew/bin/cliclick";
+// cliclick: NORACU_CLICLICK, else the first of Homebrew's places that has it (Apple silicon, then Intel) — doctor.js
+const CLICLICK = process.env.NORACU_CLICLICK || defaultCliclick();
 // where the "time since the last keyboard or mouse event" is read (NORACU_IOREG is a test hook, like NORACU_CLICLICK)
 const IOREG = process.env.NORACU_IOREG || "/usr/sbin/ioreg";
-// 0.2.7 (Andy, 2026-11-08): the Mac is shared with the person sitting at it. Mac and iPhone input goes
+// 0.2.7: the Mac is shared with the person sitting at it. Mac and iPhone input goes
 // second: when the keyboard or mouse was used in the last NORACU_USER_IDLE_S seconds (default 2) — and not
 // by noracu's own last input — the call returns user_active and sends nothing; and after a pointer action
 // the pointer goes back where it was. 0 turns both off (a Mac dedicated to the agent). A value that is not
@@ -71,7 +81,7 @@ const PHONE_BACKEND = (() => {
 // 0.3.0: which layers this server offers. NORACU_LAYERS is a comma-separated list of mac, browser, iphone —
 // a tool of a layer that is left out is neither listed nor callable (for instance NORACU_LAYERS=iphone for a
 // client entry that should carry the iPhone tools only). Unset or blank: mac and browser — the experimental
-// iPhone layer is opt-in (next-steps R4, 2026-11-12): NORACU_LAYERS=mac,browser,iphone adds it. A name that
+// iPhone layer is opt-in (2026-11-12): NORACU_LAYERS=mac,browser,iphone adds it. A name that
 // is not one of the three stops the server at start instead of falling back: a typo must not widen the list.
 const LAYER_NAMES = ["mac", "browser", "iphone"];
 const DEFAULT_LAYERS = ["mac", "browser"];
@@ -95,10 +105,10 @@ if (LAYERS.has("iphone") && !existsSync(IMCTL_DIR)) {
   process.stderr.write(`[noracu] warning: imctl not found at ${IMCTL_DIR} — phone_* tools will fail. Set NORACU_IMCTL_DIR.\n`);
 }
 
-// ── F23：进程/磁盘漂移检测（server 进程比磁盘上的文件旧时提示调用方）──
+// ── 进程/磁盘漂移检测（server 进程比磁盘上的文件旧时提示调用方）──
 // MCP 客户端（如 Claude Desktop）会把 server 进程常驻数小时；磁盘上的 package.json /
 // src/server.mjs 升级后，进程里跑的仍是启动时加载的旧代码（旧版本号、旧工具描述），
-// 实际形成"旧 server + 新 imctl 驱动"混跑，调用方照旧描述传参会踩坑（F20 的根因之一）。
+// 实际形成"旧 server + 新 imctl 驱动"混跑，调用方照旧描述传参会踩坑。
 // 注意：git 切分支同样会改写 src/server.mjs 的内容 —— 这时下面的提示同样成立，因为
 // 进程里的代码确实与磁盘不同。启动时快照一次 LOADED，每次 tools/call 现读磁盘对比
 // （两个文件都很小，不做缓存）。
@@ -150,7 +160,7 @@ function staleCheck() {
 
 // ── 工具实现 ──────────────────────────────────────────────
 
-// Every child process runs asynchronously under its own timer (F39), so no tool call can block the
+// Every child process runs asynchronously under its own timer, so no tool call can block the
 // event loop: tools/list, ping and other calls keep being answered while it runs.
 async function sh(cmd, args, timeoutMs = 15000) {
   const r = await runAsync(cmd, args, { timeoutMs });
@@ -166,10 +176,13 @@ async function sh(cmd, args, timeoutMs = 15000) {
 // phone_* call, so the Mac and browser layers pay nothing. Apple's /usr/bin/python3 usually lacks pyobjc; Homebrew's
 // python3 plus the three pyobjc-framework-* packages is the common working setup.
 const PYTHON_CANDIDATES = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "python3", "/usr/bin/python3"];
-const PYOBJC_INSTALL = "python3 -m pip install pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-Cocoa";
+const PYOBJC_PKGS = "pyobjc-framework-Quartz pyobjc-framework-Vision pyobjc-framework-Cocoa";
+const PYOBJC_INSTALL = `python3 -m pip install ${PYOBJC_PKGS}`;
+// the install command for one interpreter: its own path, quoted when it needs it — "python3" may be another one
+const pyobjcInstallFor = (path) => `${/^[\w@%+=:,./-]+$/.test(path) ? path : `'${String(path).replace(/'/g, "'\\''")}'`} -m pip install ${PYOBJC_PKGS}`;
 let pythonProbe = null; // { path, tried } once resolved; path === null when nothing qualified
 function pythonArgv(path) { return path === "python3" ? ["/usr/bin/env", ["python3"]] : [path, []]; }
-// F39 (2026-11-05): execFileSync's timeout only sends a signal and then keeps waiting for the
+// 2026-11-05: execFileSync's timeout only sends a signal and then keeps waiting for the
 // child to exit. On 2026-11-04 an imctl child stuck in an uninterruptible wait never exited, so
 // the whole server stopped answering — tools/call, tools/list, even ping — for minutes. Every
 // iPhone-layer subprocess now runs asynchronously under its own timer and in its own process
@@ -260,19 +273,22 @@ async function runAsync(cmd, argv, opts) {
   // out, then its gesture fallback).
   if (lingering.size) await Promise.all([...lingering]);
   if (shuttingDown) return { code: null, error: new Error("server is shutting down"), stdout: "", stderr: "" };
+  // a call the client cancelled before its child was started: the child is not started
+  if (opts?.live?.cancelled) return { code: null, cancelled: true, stdout: "", stderr: "" };
   return spawnTimed(cmd, argv, opts);
 }
 
 // `input` (optional) is written to the child's stdin, which is then closed; without it stdin is
 // ignored as before. The Mac accessibility engine takes its whole request this way, so text to
 // insert never appears in argv (a process list shows argv to every local user).
-function spawnTimed(cmd, argv, { timeoutMs, cwd, env, input }) {
+function spawnTimed(cmd, argv, { timeoutMs, cwd, env, input, live }) {
   return new Promise((resolve) => {
-    let stdout = "", stderr = "", size = 0, done = false, exited = false, child = null, timer = null;
+    let stdout = "", stderr = "", size = 0, done = false, exited = false, child = null, timer = null, unhook = null;
     const finish = (r) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      unhook?.();
       resolve({ stdout, stderr, ...r });
     };
     const terminate = () => {
@@ -303,6 +319,15 @@ function spawnTimed(cmd, argv, { timeoutMs, cwd, env, input }) {
       child.stdin.end(input);
     }
     timer = setTimeout(() => { terminate(); finish({ code: null, timedOut: true }); }, timeoutMs);
+    // the client cancelled the call (notifications/cancelled): the child is stopped as on a timeout — imctl puts the
+    // clipboard back when its paste had not gone out yet, and only then
+    if (live) {
+      const onCancel = () => { terminate(); finish({ code: null, cancelled: true }); };
+      if (!live.hooks) live.hooks = new Set();
+      live.hooks.add(onCancel);
+      unhook = () => live.hooks.delete(onCancel);
+      if (live.cancelled) onCancel();
+    }
     const collect = (which) => (chunk) => {
       if (done) return;
       size += chunk.length;
@@ -313,7 +338,8 @@ function spawnTimed(cmd, argv, { timeoutMs, cwd, env, input }) {
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", collect("out"));
     child.stderr.on("data", collect("err"));
-    child.on("error", (error) => { activeChildren.delete(child); finish({ code: null, error }); });
+    // spawned: the program did start (an error that comes later than that is not "it never ran")
+    child.on("error", (error) => { activeChildren.delete(child); finish({ code: null, error, spawned: child.pid !== undefined }); });
     child.on("close", (code, signal) => { exited = true; activeChildren.delete(child); finish({ code, signal }); });
   });
 }
@@ -354,7 +380,7 @@ function resolvePython() {
 // 原样透传匹配到的那一行，不归类为 imctl unavailable。后续任务会往列表里追加更多前缀。
 // "app not found" (phone_open, printed on stdout) is taken from stdout or stderr as one whole line, so a
 // warning on stderr or a long label list cannot hide the "could not go back" note retryOpenHome looks for.
-const IMCTL_PASS_THROUGH = ["mirror_not_live", "mirror_state_unknown", "mirror_setup_required", "type_not_confirmed", "scroll_no_effect", "expect_not_found", "capture_failed", "open_not_confirmed", "focus_lost", "app not found", "keyboard_layout", "out_of_screen"];
+const IMCTL_PASS_THROUGH = ["mirror_not_live", "mirror_state_unknown", "mirror_setup_required", "type_not_confirmed", "scroll_no_effect", "expect_not_found", "capture_failed", "open_not_confirmed", "focus_lost", "app not found", "keyboard_layout", "out_of_screen", "spotlight_unavailable"];
 
 // What a timed-out command may have left behind, appended to imctl_timeout.
 const IMCTL_TIMEOUT_HINT = new Map([
@@ -368,7 +394,7 @@ const BROWSER_STOPPABLE = new Set(["browser_click", "browser_type", "browser_fil
 const IMCTL_LOOK = new Set(["status", "screenshot", "ocr", "find", "wait", "expect", "state", "rect"]);
 // text that would otherwise sit in argv (visible in the process list) goes in on stdin: imctl reads "-"
 function imctlIn(input, ...args) { return imctlRun(args, input); }
-async function imctlRun(args, input) {
+async function imctlRun(args, input, live) {
   if (shuttingDown) return { ok: false, out: "server_shutting_down: nothing was done" };
   const py = await resolvePython();
   if (!py.path) {
@@ -376,23 +402,24 @@ async function imctlRun(args, input) {
   }
   const [cmd, pre] = pythonArgv(py.path);
   const timeoutMs = PHONE_TIMEOUT_OVERRIDE ?? IMCTL_TIMEOUT_MS.get(args[0]) ?? IMCTL_DEFAULT_TIMEOUT_MS;
-  if (!IMCTL_LOOK.has(args[0])) { const stop = stopFileBlocked(); if (stop) return { ok: false, out: stop }; }  // S4A-s1-3
+  if (!IMCTL_LOOK.has(args[0])) { const stop = stopFileBlocked(); if (stop) return { ok: false, out: stop }; }
   // wait for any lingering child first, so the deadline below is counted from the actual spawn
   if (lingering.size) {
     await Promise.all([...lingering]);
-    // a stop file made while that child was reaped still stops this input (audit S5A-s1-X-1)
+    // a stop file made while that child was reaped still stops this input
     if (!IMCTL_LOOK.has(args[0])) { const stop = stopFileBlocked(); if (stop) return { ok: false, out: stop }; }
   }
   const marginMs = Math.min(OPEN_DEADLINE_MARGIN_MS, timeoutMs * 0.4);
   const r = await runAsync(cmd, [...pre, "-m", "imctl.cli", ...args], {
-    timeoutMs, cwd: IMCTL_DIR, input,
+    timeoutMs, cwd: IMCTL_DIR, input, live,
     env: { ...process.env, PYTHONPATH: join(IMCTL_DIR, "src"), PYTHONDONTWRITEBYTECODE: "1",
       NORACU_OPEN_DEADLINE_EPOCH: String((Date.now() + timeoutMs - marginMs) / 1000) },
   });
   // phone input posts HID events into iPhone Mirroring — unless imctl refused before sending anything (it exits non-zero
   // and says so): stamping a refusal would let the person's key or mouse move of that moment pass for noracu's on the
-  // next call (review S4B-s10-gemini-1)
+  // next call
   if (!r.error && !IMCTL_LOOK.has(args[0]) && !imctlSentNothing(r)) noteHid(r);
+  if (r.cancelled) return { ok: false, out: `cancelled: the client cancelled phone ${args[0]} and imctl was stopped — the action may have partly run; check phone_screenshot before retrying` };
   if (r.timedOut) {
     let hint = IMCTL_TIMEOUT_HINT.get(args[0]) ?? "";
     if (args[0] === "open") {
@@ -403,11 +430,11 @@ async function imctlRun(args, input) {
     return { ok: false, out: `imctl_timeout: phone ${args[0]} did not finish within ${timeoutMs / 1000}s (the Mac may be under heavy load) — the action may have partly run${hint}; check phone_status / phone_screenshot before retrying` };
   }
   if (r.overflow) {
-    return { ok: false, out: `imctl_output_overflow: phone ${args[0]} printed more than 10 MB and was stopped` };
+    return { ok: false, out: `imctl_output_overflow: phone ${args[0]} printed more than 10 MB and was stopped — the action may have partly run; check phone_status / phone_screenshot before retrying` };
   }
   if (!r.error && r.code === 0) return { ok: true, out: r.stdout.trim() };
   const message = r.error ? String(r.error.message || r.error) : `imctl exited with code ${r.code}${r.signal ? ` (${r.signal})` : ""}`;
-  // G23（0.1.2）/ G26：镜像不在线（mirror_not_live）或粘贴未上屏（type_not_confirmed）时
+  // 0.1.2：镜像不在线（mirror_not_live）或粘贴未上屏（type_not_confirmed）时
   // imctl 拒绝输入并在 stderr 带前缀行 —— 原样透传那一行，不归类为 imctl unavailable
   const combined = String(r.stderr || "") + "\n" + String(r.stdout || "");
   for (const prefix of IMCTL_PASS_THROUGH) {
@@ -418,7 +445,7 @@ async function imctlRun(args, input) {
   // Collapse Python import/spawn errors into one actionable line so phone_* fail cleanly and tests can skip (graceful degradation).
   if (/No module named|ModuleNotFoundError|ImportError/.test(raw)) {
     const mod = (raw.match(/No module named '([^']+)'/) || [])[1];
-    return { ok: false, out: `imctl unavailable: ${py.path} is missing ${mod ? `the ${mod} module` : "a module"} — run \`${PYOBJC_INSTALL}\` for that python, or set NORACU_PYTHON (see README)` };
+    return { ok: false, out: `imctl unavailable: ${py.path} is missing ${mod ? `the ${mod} module` : "a module"} — run \`${pyobjcInstallFor(py.path)}\`, or set NORACU_PYTHON to another python3 (see README)` };
   }
   if (/Traceback \(most recent/.test(raw)) {
     const last = raw.trim().split("\n").map((l) => l.trim()).filter(Boolean).pop() || message;
@@ -438,7 +465,7 @@ async function retryOpenHome(args, out) {
   return out.replace(OPEN_HOME_FAILED, "noracu then sent the Home Screen command (the screen was not checked)");
 }
 
-// F40: phone_* and mac_* drive the same real mouse, keyboard, clipboard and windows. Until F39
+// phone_* and mac_* drive the same real mouse, keyboard, clipboard and windows. At first
 // every one of them ran synchronously, so tool calls were implicitly serialized; now that imctl
 // runs asynchronously, two concurrent calls (MCP clients do issue parallel tool calls) could
 // interleave taps and pastes and race on the clipboard. They go through one FIFO queue instead.
@@ -451,41 +478,81 @@ const QUEUE_WAIT_LIMIT_MS = Math.max(60000, (PHONE_TIMEOUT_OVERRIDE ?? 0) + 1500
 const CANCELLED = Symbol("cancelled");  // a skipped job's result: the dispatcher sends nothing
 const queuedRequests = new Set();     // ids of jobs waiting in the queue (not yet started)
 const cancelledRequests = new Set();  // ids among them the client cancelled
+// Every tools/call that is under way, waiting or running: id → { cancelled }. The client's notifications/cancelled
+// (its Stop button, or its own timeout) sets the flag: the call is not answered any more (MCP), and a tool that
+// works in steps looks at the flag between them — browser_type stops typing. A tool that waits on a child process
+// hands it to spawnTimed, which puts a stop in `hooks`: mac_wait's engine and phone_type's imctl end at once.
+const liveCalls = new Map();
 let inputChain = Promise.resolve();
 // The person at the Mac goes first (0.2.7, see USER_IDLE_S). macOS keeps one "time since the last keyboard
 // or mouse event" (IOHIDSystem HIDIdleTime), and noracu's own events reset it too (cliclick, imctl and
 // CGEventPost alike — measured 2026-11-08; a cursor warp does not). So an event counts as the person's only
 // when it came after noracu's last input — and every child it left running — had ended.
 let lastOwnInputEnd = 0;
-// 0.3.0 (review RF-3, then S4A-s1-me-1 / -reviewer-1): only a child that posts keyboard or mouse events through
+// 0.3.0: only a child that posts keyboard or mouse events through
 // the HID system moves lastOwnInputEnd — cliclick, the wheel script, the engine's key and paste, and imctl's
 // phone input — and to the moment that child ended, not the end of the whole call: the 250 ms look after a
 // click, an AXPress, a pid-targeted bgpost or a refusal post no such event, and stamping them would let the
 // person's own key or mouse move of that moment pass for noracu's on the next call. A child that timed out may
 // post until it is gone: then the stamp waits for it (the queue's drain).
 let hidRuns = 0, hidEnd = 0, hidLate = false;
+// hidRuns when the input call that is running left the queue: more than that means this call has sent events
+let jobHidBase = 0;
 // imctl refused before any event went out: a non-zero exit whose output says nothing was sent, or names a refusal
 // that comes before any input (the mirror not live, its state unknown, a setup page)
 function imctlSentNothing(r) {
   if (r.timedOut || r.code === 0) return false;
   const out = `${r.stderr || ""}\n${r.stdout || ""}`;
-  return /\bnothing was sent\b/.test(out) || /^(mirror_not_live|mirror_state_unknown|mirror_setup_required):/m.test(out);
+  // a driver that could not import its modules (pyobjc missing) ended before it could post any event
+  return /\bnothing was sent\b/.test(out) || /^(mirror_not_live|mirror_state_unknown|mirror_setup_required):/m.test(out)
+    || /No module named|ModuleNotFoundError|ImportError/.test(out);
 }
 function noteHid(r) { hidRuns++; hidEnd = Date.now(); if (r?.timedOut) hidLate = true; }
-async function userActive() {
-  if (!SHARED_INPUT) return null;
-  // the clock is read before ioreg runs: ioreg samples the idle time later than t0, so
-  // t0 - idle is never later than the event itself — ioreg's exit and the event loop cannot push noracu's
-  // own last event past lastOwnInputEnd
+// ownEnd: when the events this same call already sent ended (they are noracu's own); partly: something of this
+// call did go out before, so a refusal must not say "nothing was sent"
+// One look at the time since the last keyboard or mouse event: { t0, idleMs }, or null when it cannot be read.
+// The clock is read before ioreg runs: ioreg samples the idle time later than t0, so t0 - idle is never later than
+// the event itself — ioreg's exit and the event loop cannot push noracu's own last event past lastOwnInputEnd.
+async function idleSample() {
   const t0 = Date.now();
   const r = await runAsync(IOREG, ["-c", "IOHIDSystem", "-d", "4", "-r", "-k", "HIDIdleTime"], { timeoutMs: 3000 });
   const m = /"HIDIdleTime" = (\d+)/.exec(String(r.stdout || ""));
-  // unreadable: input is not held up — this is a courtesy to the person at the Mac, not a safety check
-  if (!m) return null;
-  const idleMs = Number(m[1]) / 1e6;
-  if (!(idleMs < USER_IDLE_S * 1000)) return null;
-  if (t0 - idleMs <= lastOwnInputEnd + 50) return null;  // the last event was noracu's own
-  return `user_active: this Mac's keyboard or mouse was used ${(idleMs / 1000).toFixed(1)} s ago, not by noracu — the person at the Mac goes first, so nothing was sent; retry in a few seconds (noracu acts once there has been no keyboard or mouse input for ${USER_IDLE_S} s; NORACU_USER_IDLE_S=0 turns this off) (delivery=not_delivered, retry=safe)`;
+  return m ? { t0, idleMs: Number(m[1]) / 1e6 } : null;
+}
+async function userActive(ownEnd = 0, partly = false) {
+  if (!SHARED_INPUT) return null;
+  // the person's: an event less than USER_IDLE_S old that is not noracu's own. Unreadable: input is not held
+  // up — this is a courtesy to the person at the Mac, not a safety check
+  const persons = (s) => Boolean(s) && s.idleMs < USER_IDLE_S * 1000 && s.t0 - s.idleMs > Math.max(lastOwnInputEnd, ownEnd) + 50;
+  let s = await idleSample();
+  if (!persons(s)) return null;
+  // The person's last key or click is often the Return that sent this very request. It is
+  // waited out once — the rest of USER_IDLE_S, nothing is sent meanwhile — and the time read again: the input
+  // goes ahead when they did nothing more, and is refused as before when they did.
+  const waitMs = Math.max(0, USER_IDLE_S * 1000 - s.idleMs) + 100;
+  await new Promise((r) => setTimeout(r, waitMs));
+  const again = await idleSample();
+  if (!persons(again)) {
+    // a stop file made during the wait still stops the input
+    const stop = stopFileBlocked();
+    return stop || null;
+  }
+  s = again;
+  const idleMs = s.idleMs;
+  const used = `user_active: this Mac's keyboard or mouse was used ${(idleMs / 1000).toFixed(1)} s ago, not by noracu, and again after noracu had waited ${(waitMs / 1000).toFixed(1)} s for it — the person at the Mac goes first`;
+  const when = `(noracu acts once there has been no keyboard or mouse input for ${USER_IDLE_S} s; NORACU_USER_IDLE_S=0 turns this off)`;
+  return partly
+    ? `${used}, so the rest of this call was not sent — an earlier part of it was: look before retrying ${when} (delivery=unknown, retry=unsafe)`
+    : `${used}, so nothing was sent; retry in a few seconds ${when} (delivery=not_delivered, retry=safe)`;
+}
+// The same check once more, right before keyboard or mouse events go out: the queue's check is older by then
+// (the app rules, the engine's look at the element, a click of this same call). Events this call already
+// sent ended at hidEnd and are noracu's own; when something did go out before, a refusal says so. While a
+// child that timed out may still be posting, its events cannot be told from the person's: no check then.
+async function lateUserCheck() {
+  if (!SHARED_INPUT || hidLate) return null;
+  const sent = hidRuns > jobHidBase;
+  return userActive(sent ? hidEnd : 0, sent);
 }
 function serializedInput(fn, requestId, yieldToUser = false) {
   const queuedAt = Date.now();
@@ -494,7 +561,7 @@ function serializedInput(fn, requestId, yieldToUser = false) {
   // setImmediate: after a synchronous mac_* job the event loop polls I/O once before the next job
   // starts, so a notifications/cancelled line already sent for it is read first
   const result = inputChain.then(() => new Promise((r) => setImmediate(r))).then(async () => {
-    // the job stays cancellable until it runs: the idle read below can take seconds (audit S5A-s1-G-1)
+    // the job stays cancellable until it runs: the idle read below can take seconds
     const settle = () => { queuedRequests.delete(requestId); return requestId !== undefined && cancelledRequests.delete(requestId); };
     if (settle()) return CANCELLED;
     if (requestId !== undefined) queuedRequests.add(requestId);
@@ -506,14 +573,14 @@ function serializedInput(fn, requestId, yieldToUser = false) {
     }
     if (yieldToUser) {
       // 0.3.0: the person's stop file first — it covers every phone_* and mac_* input, including the
-      // semantic (AXPress / AXSetValue) paths that send no event (review CR1/CR2 2026-11-09)
+      // semantic (AXPress / AXSetValue) paths that send no event
       const stop = stopFileBlocked();
       if (stop) { settle(); return { error: stop }; }
       // ios_* input ("stop") does not use this Mac's keyboard or mouse, so it does not wait for the person at it
       const busy = yieldToUser === "stop" ? null : await userActive();
       if (busy) { settle(); return { error: busy }; }
       // what was checked before the idle read (ioreg, after any child still being reaped) is checked again: a cancel,
-      // a shutdown or a stop file that came meanwhile still wins (audit S5A-s1-X-1 / -G-1)
+      // a shutdown or a stop file that came meanwhile still wins
       if (settle()) return CANCELLED;
       if (shuttingDown) return { error: "server_shutting_down: nothing was done (delivery=not_delivered, retry=safe)" };
       const stopNow = stopFileBlocked();
@@ -521,7 +588,7 @@ function serializedInput(fn, requestId, yieldToUser = false) {
     }
     settle();
     ran = true;
-    hidBefore = hidRuns; hidLate = false;
+    hidBefore = hidRuns; jobHidBase = hidRuns; hidLate = false;
     return fn();
   });
   const drain = () => Promise.all([...lingering]).then(() => {
@@ -546,10 +613,23 @@ function afterQueuedInput(fn, limitMs) {
   });
 }
 // phone_* reads stay in the queue: imctl reads the mirroring window through System Events and
-// captures it, and a read running alongside a phone gesture can catch it mid-transition (F40)
+// captures it, and a read running alongside a phone gesture can catch it mid-transition
 const OBSERVE_TOOLS = new Set(["mac_ax_state", "mac_find", "mac_get", "mac_windows", "mac_apps", "mac_screenshot", "mac_status", "mac_wait"]);
 
 // ── Mac 层 ──
+
+// Screen Recording as the engine's status sees it (no other app's window title can be read without it). Without it
+// a capture holds the desktop picture and the host's own windows only — which reads as "nothing is open". Seen
+// granted once, it is not asked again (a permission taken back makes macOS ask for the host to be reopened);
+// anything else is asked again at the next screenshot.
+let screenRecordingSeen = false;
+const SCREEN_RECORDING_NOTE = "Screen Recording looks not granted to the app that runs noracu (no other app's window title can be read): the image then shows the desktop picture and that app's own windows, not other apps' windows — turn it on in System Settings → Privacy & Security → Screen & System Audio Recording (Screen Recording before macOS 15), then quit and reopen that app";
+async function screenRecordingNote() {
+  if (screenRecordingSeen) return null;
+  const st = await axEngine({ op: "status" }, 10000);
+  if (st?.ok && st.screen_recording === true) { screenRecordingSeen = true; return null; }
+  return st?.ok && st.screen_recording === false ? SCREEN_RECORDING_NOTE : null;
+}
 
 // 主屏 DPR（backingScaleFactor）读取 — 结果缓存 60s，失败返回 null（截图主路径不依赖它）
 let _mainScaleCache = null; // { value, ts }
@@ -563,7 +643,7 @@ async function mainScreenScale() {
 }
 
 // The frontmost app, by pid, from the accessibility engine (NSWorkspace): no System Events, no
-// Automation permission, and asynchronous under a timer like every other child (F39). spec: {} or
+// Automation permission, and asynchronous under a timer like every other child. spec: {} or
 // { app } (name, bundle id or .app path, resolved like every other app argument) or { pid }.
 async function frontmost(spec = {}) {
   const r = await axEngine({ op: "frontmost", ...spec }, 8000);
@@ -578,14 +658,15 @@ async function frontmostApp() { return (await frontmost())?.front?.name ?? null;
 // own app (by pid), the screenshot's window's app, the app named in the call, or — only when the input
 // goes to whatever is in front — the frontmost app. An app that cannot be identified gets nothing (fail
 // closed). The engine names an app's bundle id `bundle`; mac_apps and the gate call it bundle_id.
-// (review CR1/CR2 and device run 2026-11-09: the gate read bundle_id from the engine's `bundle`, so
+// (device run 2026-11-09: the gate read bundle_id from the engine's `bundle`, so
 // bundle-id patterns, the Terminal/iTerm2 defaults included, never matched)
 const appInfo = (a) => (a && (a.name || a.bundle || a.bundle_id) ? { pid: a.pid, name: a.name ?? null, bundle_id: a.bundle_id ?? a.bundle ?? null } : null);
 function approveKnown(a, what) {
   if (!a) return { error: `input_denied: could not identify ${what} — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
-  // cross-verification A0 (2026-11-09): bundle-id rules cannot rule out an app whose bundle id is unknown
+  // bundle-id rules cannot rule out an app whose bundle id is unknown
   if (!a.bundle_id && gateActive()) return { error: `input_denied: "${a.name}" has no readable bundle id, so the deny list / approval file cannot rule it out — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
-  const ap = evaluateApproval({ bundleId: a.bundle_id, appName: a.name });
+  // a Mac app has a name to read: without it, a rule that names apps cannot rule the app out
+  const ap = evaluateApproval({ bundleId: a.bundle_id, appName: a.name, needName: true });
   if (ap.error) return { error: ap.error };
   if (ap.verdict === "deny") return { error: `input_denied: "${a.name || a.bundle_id}" — ${ap.reason} (delivery=not_delivered, retry=safe)` };
   if (ap.verdict === "ask") return { error: ap.reason };
@@ -598,12 +679,14 @@ async function approveTarget(...specs) {
   const seen = new Set();
   for (const spec of specs.length ? specs : [{}]) {
     // a pid that was asked for but not read (an AX answer without one) is an app that cannot be identified —
-    // never the frontmost app in its place (review S4A-s1-me-2)
+    // never the frontmost app in its place
     if (Object.hasOwn(spec, "pid") && (spec.pid === undefined || spec.pid === null)) return { error: "input_denied: could not identify the app that would receive the input (no pid) — nothing was sent (fail closed; delivery=not_delivered, retry=safe)" };
     const key = spec.pid !== undefined ? `pid:${spec.pid}` : spec.app !== undefined ? `app:${spec.app}` : "front";
     if (seen.has(key)) continue;
     seen.add(key);
     const r = await frontmost(spec.pid !== undefined ? { pid: spec.pid } : spec.app !== undefined ? { app: spec.app } : {});
+    // a name several running apps share: none of them is picked — the engine's refusal lists them
+    if (r?.ambiguous) return { error: axErrorText(r.ambiguous) };
     // a named app that is not running gets nothing anyway: say so plainly (an unreadable answer is not this)
     if (r && spec.app !== undefined && spec.pid === undefined && !r.target) return { error: `app_not_found: "${spec.app}" is not running — nothing was sent (delivery=not_delivered, retry=safe)` };
     const a = appInfo(spec.pid !== undefined || spec.app !== undefined ? r?.target : r?.front);
@@ -621,6 +704,7 @@ async function focusGuard(app) {
   const r = await frontmost(app === undefined ? {} : { app });
   const fm = r?.front?.name ?? null;
   if (app !== undefined) {
+    if (r?.ambiguous) return { error: axErrorText(r.ambiguous) };
     if (!r || !r.front) return { error: "focus_unknown: could not read the frontmost app — no input was sent (delivery=not_delivered, retry=safe)" };
     if (!r.target) return { error: `focus_lost: "${app}" is not running (frontmost is "${fm}") — no input was sent (delivery=not_delivered, retry=safe)` };
     if (!r.match) return { error: `focus_lost: expected "${r.target.name}", frontmost is "${fm}" — no input was sent (delivery=not_delivered, retry=safe)` };
@@ -630,7 +714,7 @@ async function focusGuard(app) {
   return { fm, front: g.app };
 }
 
-// cliclick runs asynchronously under a timer like every other child (F39). A spawn error means nothing
+// cliclick runs asynchronously under a timer like every other child. A spawn error means nothing
 // was sent; a timeout or a failing exit may come after some of the events went out.
 // pointer: the commands move the pointer (click, drag). With a shared Mac (USER_IDLE_S) the pointer goes back
 // where it was: 0.1 s after cliclick is done, and only while it is still at the last point the commands sent it
@@ -650,8 +734,11 @@ const POINTER_SCRIPT = `
       $.CGAssociateMouseAndMouseCursorPosition(true);
       return 'back';
     }`;
+// test hook (with NORACU_AX_ENGINE only): a stand-in for osascript running POINTER_SCRIPT
+const POINTER_RUNNER = process.env.NORACU_AX_ENGINE && process.env.NORACU_TEST_POINTER ? process.env.NORACU_TEST_POINTER : "/usr/bin/osascript";
+const POINTER_NOT_BACK = "the pointer's position could not be read before the click, so it was not put back";
 const pointerAt = async () => {
-  const r = await sh("/usr/bin/osascript", ["-l", "JavaScript", "-e", POINTER_SCRIPT, "--", "get"], 5000);
+  const r = await sh(POINTER_RUNNER, ["-l", "JavaScript", "-e", POINTER_SCRIPT, "--", "get"], 5000);
   const v = r.ok ? r.out.trim().split(",").map(Number) : [];
   return v.length === 2 && v.every(Number.isFinite) ? v : null;
 };
@@ -661,33 +748,37 @@ const lastPointOf = (cmds) => {
   return m ? [Number(m[1].replace("=", "")), Number(m[2].replace("=", ""))] : null;
 };
 async function cliclick(cmds, timeoutMs = 15000, { pointer = false, recovery = false } = {}) {
-  // review S4A-s1-3: the person's stop file once more, right before events go out — the queue's check can be a
+  // the person's stop file once more, right before events go out — the queue's check can be a
   // second old by now (re-identification, hit test). A recovery mouse-up is never held back: it lets go of a
   // button an earlier event pressed.
   if (!recovery) { const stop = stopFileBlocked(); if (stop) return { ok: false, sent: false, refused: true, out: stop }; }
   const home = pointer && SHARED_INPUT ? await pointerAt() : null;
-  if (pointer && SHARED_INPUT) {
-    // 0.3.0 (review GH-1): the person-goes-first check once more, as late as it can be made. By now the
+  if (!recovery) {
+    // 0.3.0: the person-goes-first check once more, as late as it can be made. By now the
     // queue's check is older than the re-identification and the hit test that ran since, and `home` was read a
     // moment ago: someone who took the keyboard or mouse in between keeps it — nothing is sent and the pointer
     // is not touched. What remains is the time from this read to cliclick's first event (two process starts).
-    const busy = await userActive();
+    // Keystrokes are checked like the pointer (they used to go out unchecked, up to seconds after the queue's
+    // check when a click came first).
+    const busy = await lateUserCheck();
     if (busy) return { ok: false, sent: false, refused: true, out: busy };
   }
   const r = await runAsync(CLICLICK, cmds, { timeoutMs });
   if (!r.error) noteHid(r);  // it started, so it may have posted events
   const last = home ? lastPointOf(cmds) : null;
   if (home && last && !r.error) {
-    await sh("/usr/bin/osascript", ["-l", "JavaScript", "-e", POINTER_SCRIPT, "--", "back", ...[...home, ...last].map(String)], 5000);
+    await sh(POINTER_RUNNER, ["-l", "JavaScript", "-e", POINTER_SCRIPT, "--", "back", ...[...home, ...last].map(String)], 5000);
   }
+  // the pointer was to go back and its position was not known: the click went out all the same — the result says so
+  const pointerNote = pointer && SHARED_INPUT && !home && !r.error ? POINTER_NOT_BACK : null;
   if (r.error) return { ok: false, sent: false, out: r.error.code === "ENOENT" ? "cliclick not found — brew install cliclick (or set NORACU_CLICLICK)" : `cliclick could not start: ${String(r.error.message || r.error).slice(0, 160)}` };
   if (r.timedOut) return { ok: false, sent: "unknown", out: `cliclick did not finish within ${Math.round(timeoutMs / 1000)} s` };
   if (r.code !== 0) return { ok: false, sent: "unknown", out: String(r.stderr || r.stdout || `cliclick exited with ${r.code}`).trim().slice(0, 300) };
-  return { ok: true, out: String(r.stdout || "").trim() };
+  return { ok: true, out: String(r.stdout || "").trim(), ...(pointerNote ? { pointerNote } : {}) };
 }
 function cliFail(r) { return r.refused ? r.out : r.sent === false ? `${r.out} (delivery=not_delivered, retry=safe)` : `action_failed: ${r.out} (delivery=unknown, retry=unsafe)`; }
 
-// 0.3.0 P1: screenshot_id — every mac_screenshot gets one; a window capture also records a geometry
+// 0.3.0: screenshot_id — every mac_screenshot gets one; a window capture also records a geometry
 // fingerprint {pid, bounds} so a later mac_click screenshot_id+x/y (screenshot pixels) can refuse a
 // window that moved, resized or was rebuilt (stale) instead of clicking whatever is there now.
 const SCREENSHOTS = new Map();  // screenshot_id → { window_id?, pid?, bounds?, scale, px, ts } (insertion order = age)
@@ -701,6 +792,22 @@ function screenshotEntry(id) {
 // Test hook (never set in normal use, honoured only with NORACU_AX_ENGINE, like NORACU_AX_TIMEOUT_MS): a
 // program that takes screencapture's argv and writes the PNG to the last argument.
 const SCREENCAPTURE = process.env.NORACU_AX_ENGINE && process.env.NORACU_SCREENCAPTURE ? process.env.NORACU_SCREENCAPTURE : "/usr/sbin/screencapture";
+// Test hook (never set in normal use, honoured only with NORACU_AX_ENGINE, like NORACU_SCREENCAPTURE): the
+// program the wheel script is handed to, so a test sends no wheel event to this Mac
+const WHEEL_RUNNER = process.env.NORACU_AX_ENGINE && process.env.NORACU_TEST_WHEEL ? process.env.NORACU_TEST_WHEEL : "/usr/bin/osascript";
+// One wheel event at a point. Whether the script ran is taken from how it ended, not from what it printed:
+// one that could not be started sent nothing and stamps nothing; one that did start sent its event or may
+// have, so that event is noracu's own (the next input is not refused as the person's), whatever it printed.
+async function wheelAt(dy, dx, px, py) {
+  const w = await runAsync(WHEEL_RUNNER, ["-l", "JavaScript", "-e", WHEEL_SCRIPT, "--", String(dy), String(dx), String(px), String(py), SHARED_INPUT ? "1" : "0"], { timeoutMs: 8000 });
+  if (w.error && !w.spawned) return { error: `scroll failed: the wheel script could not be started (${String(w.error.code || w.error.message || w.error).slice(0, 80)}) (delivery=not_delivered, retry=safe)` };
+  noteHid(w);
+  if (w.error || w.timedOut || w.overflow || w.code !== 0) {
+    const why = w.timedOut ? "the wheel script did not finish within 8 s" : String(w.stderr || w.stdout || w.error?.message || `exit ${w.code}`).trim().slice(0, 200);
+    return { error: `scroll failed: ${why} (delivery=unknown, retry=unsafe)` };
+  }
+  return {};
+}
 const windowById = async (id) => {
   const wl = await axEngine({ op: "windows" }, 15000);
   return (wl?.ok ? wl.windows || [] : []).find((w) => w.id === id && Array.isArray(w.bounds) && w.bounds[2] > 0 && w.bounds[3] > 0) || null;
@@ -737,7 +844,7 @@ async function macScreenshot(args = {}) {
   // DPR 元数据 — logical_size 单位 = 显示点（mac_click 坐标系）
   //   全屏：像素尺寸读 PNG IHDR（bytes 16-23，big-endian）÷ 主屏 scale
   //   region：-R rect 本身是点坐标 → logical_size 直接取 region 的 w,h（实测 2x 屏 100pt rect 出 200px PNG）
-  //   window（0.3.0，review CR1/CR2）：按窗口所在显示器的 scale = PNG 宽 ÷ 窗口宽（点），不再一律取主屏的
+  //   window（0.3.0）：按窗口所在显示器的 scale = PNG 宽 ÷ 窗口宽（点），不再一律取主屏的
   let scale = await mainScreenScale();
   if (args.display !== undefined && args.window_id === undefined) {
     // a display other than the main one may have another backing scale (a 1x screen next to a 2x laptop panel)
@@ -763,18 +870,20 @@ async function macScreenshot(args = {}) {
   const entry = { scale, px: pngW && pngH ? [pngW, pngH] : null, ts: Date.now() };
   if (win && !args.region) Object.assign(entry, { window_id: args.window_id, pid: win.pid, bounds: win.bounds });
   else if (args.window_id !== undefined) meta.screenshot_note = "the window moved or could not be measured during the capture: this screenshot_id has no window fingerprint, so mac_click cannot take its pixels — capture again";
-  // bounded: expired ids go first, then the oldest one (review CR1/CR2: clear() dropped ids still in their 30 s)
+  // bounded: expired ids go first, then the oldest one (clear() dropped ids still in their 30 s)
   for (const [k, v] of SCREENSHOTS) if (Date.now() - v.ts > SCREENSHOT_TTL_MS) SCREENSHOTS.delete(k);
   while (SCREENSHOTS.size >= SCREENSHOT_MAX) SCREENSHOTS.delete(SCREENSHOTS.keys().next().value);
   SCREENSHOTS.set(screenshot_id, entry);
   meta.screenshot_id = screenshot_id;
+  const sr = await screenRecordingNote();
+  if (sr) meta.screen_recording_note = sr;
   return { image: png.toString("base64"), mime: "image/png", meta };
 }
 
 // ── Mac 层：无障碍引擎（src/mac-ax.js）──
 // Every accessibility read and every semantic action runs in one short-lived osascript process that
 // executes the static engine file with the request as JSON on stdin (identity model: see mac-ax.js).
-// It runs asynchronously under a timer like imctl (F39), so a hung app cannot freeze the server.
+// It runs asynchronously under a timer like imctl, so a hung app cannot freeze the server.
 // NORACU_AX_ENGINE=<executable> replaces the engine with a program that speaks the same protocol (one
 // JSON request on stdin, one JSON reply on stdout) — the test suite uses it to exercise the server's Mac
 // logic without macOS permissions. Like NORACU_PYTHON / NORACU_CLICLICK it names a program to run.
@@ -788,20 +897,21 @@ const AX_TIMEOUT_MS = (() => {
   return 30000;
 })();
 const MUTATING_OPS = new Set(["act", "set_value", "insert_text", "menu", "window_op", "app_ctl", "scroll_prep", "paste", "key"]);
-async function axEngine(req, timeoutMs = AX_TIMEOUT_MS) {
+async function axEngine(req, timeoutMs = AX_TIMEOUT_MS, live) {
   const budgetMs = Number.isFinite(req?.timeout_ms) ? Math.max(timeoutMs, Number(req.timeout_ms) + 12000) : timeoutMs;
   const mutating = MUTATING_OPS.has(req?.op) || (req?.op === "notifications" && req.action !== undefined && req.action !== "list");
   if (mutating) {
-    // the stop file right before an action goes out (S4A-s1-3), as in cliclick
+    // the stop file right before an action goes out, as in cliclick
     const stop = stopFileBlocked();
     const m = stop && /^([a-z_]+): ([\s\S]*)$/.exec(stop);
     if (m) return { ok: false, code: m[1].toUpperCase(), message: m[2] };
   }
-  const r = await runAsync(AX_ENGINE_CMD[0], AX_ENGINE_CMD[1], { timeoutMs: budgetMs, input: JSON.stringify(req) });
+  const r = await runAsync(AX_ENGINE_CMD[0], AX_ENGINE_CMD[1], { timeoutMs: budgetMs, input: JSON.stringify(req), live });
   if (!r.error && (req?.op === "key" || req?.op === "paste")) noteHid(r);  // the engine's two ops that post HID events
   if (r.timedOut) return { ok: false, code: "TIMEOUT", message: `the accessibility engine did not answer within ${Math.round(budgetMs / 1000)}s — the target app may be busy or hung${req?.op === "paste" ? " (clipboard restored: unknown — it may still hold the pasted text)" : ""}`, ...(mutating ? { delivery: "unknown", retry: "unsafe" } : {}) };
   // a mutating op whose engine was stopped or answered garbage may have acted; one that never started did not
   const maybe = mutating ? { delivery: "unknown", retry: "unsafe" } : {};
+  if (r.cancelled) return { ok: false, code: "CANCELLED", message: "the client cancelled the call — the accessibility engine was stopped", ...maybe };
   if (r.overflow) return { ok: false, code: "INTERNAL", message: "the accessibility engine printed more than 10 MB and was stopped", ...maybe };
   if (r.error) return { ok: false, code: "INTERNAL", message: `osascript could not run: ${String(r.error.message || r.error).slice(0, 200)}`, ...(mutating ? { delivery: "not_delivered", retry: "safe" } : {}) };
   const out = String(r.stdout || "").trim();
@@ -818,7 +928,7 @@ const AX_ERROR_PREFIX = {
   ACTION_NOT_SUPPORTED: "action_not_supported", ACTION_FAILED: "action_failed", OCCLUDED: "occluded",
   APP_UNRESPONSIVE: "app_unresponsive", NOT_CONFIRMED: "not_confirmed", POLICY_DENIED: "policy_denied", INTERNAL: "ax_error",
   FOCUS_LOST: "focus_lost", FOCUS_UNKNOWN: "focus_unknown", CLIPBOARD_REMOTE: "clipboard_remote", CLIPBOARD_TOO_LARGE: "clipboard_too_large",
-  NOTIFICATION_NOT_FOUND: "notification_not_found",
+  NOTIFICATION_NOT_FOUND: "notification_not_found", CANCELLED: "cancelled",
 };
 function axErrorText(e) {
   const prefix = AX_ERROR_PREFIX[e.code] || String(e.code || "ax_error").toLowerCase();
@@ -904,11 +1014,11 @@ async function macAxState(args = {}) {
   }
   const o = { app: res.app, pid: res.pid, snapshot_id: snap.id, surface: res.surface };
   if (drill) o.root = args.root;
-  if (res.window) o.window = { title: res.window.title, frame: res.window.frame, window_id: res.window.window_id };
+  if (res.window) o.window = { title: res.window.title, frame: res.window.frame, window_id: res.window.window_id, ...(res.window.title_match ? { title_match: res.window.title_match } : {}) };
   o.complete = res.complete;
   o.truncated = !res.complete;
   if (res.web_accessibility) o.web_accessibility = res.web_accessibility;
-  if (res.web_accessibility === "unsupported") o.web_accessibility_hint = WEB_AX_HINT;
+  if (res.web_accessibility === "unsupported" || res.web_accessibility === "unknown") o.web_accessibility_hint = WEB_AX_HINT;
   if (res.window_identity) { o.window_identity = res.window_identity; o.window_identity_hint = WINDOW_ID_HINT; }
   o.elements = elements;
   if (!res.complete) o.hint = "partial tree: raise depth or max_nodes, use interactive:true, or drill into one element with root";
@@ -916,7 +1026,8 @@ async function macAxState(args = {}) {
 }
 
 // web_accessibility "unsupported": the app refused AXManualAccessibility and no web content was found in
-// the window (Google Chrome does this); "exposed": it refused, but its pages are in the tree anyway.
+// the window (Google Chrome does this); "exposed": it refused, but its pages are in the tree anyway; "unknown": it
+// refused, and the window was too large to look through for web content in time (the hint goes with it too).
 // window_identity "unverifiable": the window has no CGWindowID (seen only on Finder's desktop, which is
 // exempt), so element_index actions in it are refused with policy_denied.
 const WINDOW_ID_HINT = "this window has no window ID, so a closed and reopened window with the same title could not be told apart from it: element_index actions here are refused (policy_denied). Use mac_menu_command, or mac_click x,y (checked against the window on top)";
@@ -933,7 +1044,7 @@ async function macFind(args = {}) {
   const matches = addItems(snap, res, res.nodes, true);
   const o = { app: res.app, pid: res.pid, snapshot_id: snap.id, count: matches.length, complete: res.complete };
   if (res.web_accessibility) o.web_accessibility = res.web_accessibility;
-  if (res.web_accessibility === "unsupported") o.web_accessibility_hint = WEB_AX_HINT;
+  if (res.web_accessibility === "unsupported" || res.web_accessibility === "unknown") o.web_accessibility_hint = WEB_AX_HINT;
   if (res.window_identity) { o.window_identity = res.window_identity; o.window_identity_hint = WINDOW_ID_HINT; }
   o.matches = matches;
   return { text: JSON.stringify(o) };
@@ -956,7 +1067,7 @@ async function macStatus() {
   out.noracu = LOADED.version;
   out.node = process.versions.node;
   out.read_only = process.env.NORACU_READ_ONLY === "1";
-  // next-steps R3: browser_evaluate is opt-in
+  // browser_evaluate is opt-in
   out.browser_evaluate = process.env.NORACU_DISABLE_EVAL === "1" ? "off (NORACU_DISABLE_EVAL=1)" : process.env.NORACU_ENABLE_EVAL === "1" ? "on (NORACU_ENABLE_EVAL=1)" : "off (default; NORACU_ENABLE_EVAL=1 turns it on)";
   out.chrome = process.env.NORACU_ALLOW_CHROME === "1" ? `allowed (NORACU_ALLOW_CHROME=1): browser_launch chrome:true works in your own Chrome — ${process.env.NORACU_CHROME_TABS === "all" ? "all your tabs (NORACU_CHROME_TABS=all)" : "only the tabs noracu opens"}` : "off (default; NORACU_ALLOW_CHROME=1 lets browser_launch chrome:true work in your own Chrome)";
   out.user_idle_s = USER_IDLE_S;  // 0.2.7: Mac/iPhone input waits this long after the person's last keyboard or mouse input (0: off)
@@ -1024,7 +1135,7 @@ const CLICK_VERB = { left: "c:", right: "rc:", middle: "mc:" };
 const cc = (v) => { const n = Math.round(Number(v)); return n < 0 ? `=${n}` : String(n); };
 const ccPoint = (x, y) => `${cc(x)},${cc(y)}`;
 // a left double or triple click is one cliclick verb (dc: / tc:): repeated c: posts single clicks with a click count of 1
-// each, which apps do not take for a double click (audit S5A-s2-D-2)
+// each, which apps do not take for a double click
 const clickCmds = (button, count, x, y) => (button === "left" && (count === 2 || count === 3)
   ? [`${count === 2 ? "dc:" : "tc:"}${ccPoint(x, y)}`]
   : Array(count).fill(`${CLICK_VERB[button] || "c:"}${ccPoint(x, y)}`));
@@ -1033,10 +1144,18 @@ const clickCmds = (button, count, x, y) => (button === "left" && (count === 2 ||
 // element's window (by CGWindowID; by app when the element's window has none, e.g. Finder's desktop).
 // Something that came on top in between refuses the input, nothing sent (Reddit r/mcp review 2026-11-06).
 async function lateTopCheck(points) {
-  for (const { point: [x, y], pid, wid } of points) {
+  for (const { point: [x, y], pid, wid, topWid } of points) {
     const r = await frontmost({ at: [x, y] });
     if (!r || r.top === undefined) return { error: `focus_unknown: could not re-check the window on top at ${x},${y} right before the input — nothing was sent (delivery=not_delivered, retry=safe)` };
     const top = r.top;
+    // An element with no window id of its own (a menu item, a menu bar item, Finder's desktop): the engine noted
+    // which window was on top at its point when it hit-tested it, and it must still be that one. A menu that
+    // closed leaves the app's own window or the desktop there; and the menu bar is the window server's window,
+    // so whose window is on top says nothing for these.
+    if (!wid && topWid !== undefined) {
+      if ((top ? top.wid : null) !== topWid) return { error: `occluded: what is on top at ${x},${y} changed between the hit test and the input (a menu that closed, a window that came up) — nothing was sent (delivery=not_delivered, retry=safe)` };
+      continue;
+    }
     if (!top) { if (wid) return { error: `occluded: the element's window is no longer on screen at ${x},${y} (it moved or closed after the hit test) — nothing was sent (delivery=not_delivered, retry=safe)` }; continue; }
     if (top.pid !== pid || (wid && top.wid !== wid)) return { error: `occluded: a window of "${top.owner}" came on top at ${x},${y} between the hit test and the input — nothing was sent (delivery=not_delivered, retry=safe)` };
   }
@@ -1053,8 +1172,8 @@ async function testGap(what) {
 }
 
 // bgpost children run like every other child: timed, killed on shutdown, waited for by the input queue
-// (review CR1/CR2: they ran outside activeChildren / lingering)
-// a stop file that appeared since the queue's check: nothing is posted, and the fallback path refuses on its own (S4A-s1-3)
+// (they ran outside activeChildren / lingering)
+// a stop file that appeared since the queue's check: nothing is posted, and the fallback path refuses on its own
 const bgRun = (argv) => {
   const stop = stopFileBlocked();
   if (stop) return Promise.resolve({ error: Object.assign(new Error(stop), { code: "STOPPED" }) });
@@ -1070,10 +1189,10 @@ async function physicalClickAt(target, label, button, count, timeoutMs, { real =
   if (!prep.ok) return { error: axErrorText(prep) };
   const [x, y] = prep.point;
   // the approval check judges the element's own app (the hit test proved the point reaches it) —
-  // whether or not bgpost is on (review CR1/CR2 2026-11-09)
+  // whether or not bgpost is on
   const gate = await approveTarget({ pid: prep.pid });
   if (gate.error) return { error: gate.error };
-  const late = await lateTopCheck([{ point: prep.point, pid: prep.pid, wid: prep.wid }]);
+  const late = await lateTopCheck([{ point: prep.point, pid: prep.pid, wid: prep.wid, topWid: prep.top_wid }]);
   if (late.error) return { error: late.error };
   await testGap(`physical click at ${x},${y}`);
   // 0.3.0 bgpost route (src/bg-inject.js): a native app gets the click posted straight to its pid —
@@ -1087,22 +1206,24 @@ async function physicalClickAt(target, label, button, count, timeoutMs, { real =
     // a timeout or an odd exit may have posted some events: never send the click again another way
     else if (b.sent !== false) return { error: `action_failed: ${b.error} — the click may or may not have been posted (delivery=unknown, retry=unsafe)` };
     // proven not posted (bad pid, events not created): the real pointer below, after the window on top is
-    // checked again — the bgpost attempt took time (cross-verification A0)
+    // checked again — the bgpost attempt took time
     else {
       route = "cliclick (bgpost not posted)";
-      const again = await lateTopCheck([{ point: prep.point, pid: prep.pid, wid: prep.wid }]);
+      const again = await lateTopCheck([{ point: prep.point, pid: prep.pid, wid: prep.wid, topWid: prep.top_wid }]);
       if (again.error) return { error: again.error };
     }
   }
+  let pointerNote = null;
   if (route !== "bgpost") {
     const r = await cliclick(clickCmds(button, count, x, y), undefined, { pointer: true });
     if (!r.ok) return { error: cliFail(r) };
+    pointerNote = r.pointerNote || null;
   }
   await sleep(250);
   const after = await axEngine({ op: "observe_after", target, before: prep.before, physical: true, point: prep.point, wid: prep.wid || null });
   const res = after.ok ? { ...after } : { delivery: "delivered_unverified", retry: "unsafe" };
   if (route === "bgpost" && res.delivery !== "delivered_verified") res.note = res.note ? `${res.note}; ${BG_UNVERIFIED_NOTE}` : BG_UNVERIFIED_NOTE;
-  return { text: actText(`clicked ${button} x${count} on ${label} @ ${x},${y}`, { ...res, mechanism: "physical", hit: prep.hit, reason: prep.reason }) + ` (route: ${route})` + await frontmostNote() };
+  return { text: actText(`clicked ${button} x${count} on ${label} @ ${x},${y}`, { ...res, mechanism: "physical", hit: prep.hit, reason: prep.reason }) + ` (route: ${route})` + (pointerNote ? ` — ${pointerNote}` : "") + await frontmostNote() };
 }
 
 // A raw x,y click has no element to re-identify, so before anything is sent the window server is asked
@@ -1111,12 +1232,13 @@ async function physicalClickAt(target, label, button, count, timeoutMs, { real =
 // between this check and the click; force:true skips it.
 const MENU_BAR_LAYER = 24;
 // scroll: mac_scroll's wording — it takes no force and no app, so its refusals point at element_index instead
-// (E2 run 2026-11-07, review R39: the click advice "pass force:true" leaked into mac_scroll's occluded message)
+// (device run 2026-11-07, the click advice "pass force:true" leaked into mac_scroll's occluded message)
 // pid (0.3.0): the target is the app of that pid (a screenshot's window) instead of app or the frontmost app;
-// wid: and that very window must be the one on top at the point (cross-verification A0: another window of
-// the same app, or its menu bar, passed the app-only check)
+// wid: and that very window must be the one on top at the point (another window of the same app, or its menu
+// bar, would pass an app-only check)
 async function rawPointGuard(x, y, app, { scroll = false, pid, wid } = {}) {
   const r = await frontmost(pid !== undefined ? { pid, at: [x, y] } : app === undefined ? { at: [x, y] } : { app, at: [x, y] });
+  if (r?.ambiguous) return { error: axErrorText(r.ambiguous) };
   const named = pid !== undefined ? `pid ${pid}` : app;
   const v = scroll
     ? rawPointVerdict(r, x, y, named, "pass element_index to scroll a specific element", "scroll", false)
@@ -1159,7 +1281,7 @@ async function macClick(args) {
     if (typeof x !== "number" || typeof y !== "number") return { error: "invalid_args: x,y numbers or element_index required (delivery=not_delivered, retry=safe)" };
     if (mechanism === "semantic") return { error: "invalid_args: x,y clicks are physical; mechanism \"semantic\" needs an element_index (delivery=not_delivered, retry=safe)" };
     let px = x, py = y, viaShot = "", shot = null;
-    // 0.3.0 P1: screenshot_id + x,y names screenshot pixels (mac_screenshot meta). The window's
+    // 0.3.0: screenshot_id + x,y names screenshot pixels (mac_screenshot meta). The window's
     // geometry fingerprint is re-checked first — pid and bounds must match exactly (0 px): a window
     // that moved, resized or was rebuilt since the capture is stale, nothing is sent.
     if (args.screenshot_id !== undefined) {
@@ -1176,17 +1298,18 @@ async function macClick(args) {
       if (!w) return { error: `stale: window ${e.window_id} of the screenshot is gone — take a new mac_screenshot (delivery=not_delivered, retry=safe)` };
       if (w.pid !== e.pid || String(w.bounds) !== String(e.bounds)) return { error: `stale: window ${e.window_id} moved or resized since the screenshot (was ${e.bounds}, now ${w.bounds}) — take a new mac_screenshot (delivery=not_delivered, retry=safe)` };
       // screenshot pixels are relative to the window's own top-left corner, at the scale of its display
-      // (review CR1/CR2: the window origin was left out, so the click landed off by bounds.x,bounds.y)
+      // (the window origin was left out, so the click landed off by bounds.x,bounds.y)
       if (Array.isArray(e.px) && !(x >= 0 && y >= 0 && x < e.px[0] && y < e.px[1])) return { error: `invalid_args: ${x},${y} is outside the screenshot (${e.px[0]}×${e.px[1]} pixels) — nothing was sent (delivery=not_delivered, retry=safe)` };
       const sc = e.scale && e.scale > 0 ? e.scale : 1;
       // floor, then clamp inside the window: the last pixel column/row must not round onto the next point
       px = Math.min(Math.floor(e.bounds[0] + x / sc), e.bounds[0] + e.bounds[2] - 1);
       py = Math.min(Math.floor(e.bounds[1] + y / sc), e.bounds[1] + e.bounds[3] - 1);
       viaShot = `screenshot pixels ${x},${y} at scale ${sc} of window ${e.window_id} (fingerprint verified); `;
-      // app with screenshot_id: the screenshot's window must belong to that very app (review S4A-s1-reviewer-2:
+      // app with screenshot_id: the screenshot's window must belong to that very app (
       // the app was ignored once the screenshot named a pid, so the click went to another app's window)
       if (args.app !== undefined) {
         const fa = await frontmost({ app: args.app });
+        if (fa?.ambiguous) return { error: axErrorText(fa.ambiguous) };
         if (!fa || !fa.target) return { error: `focus_lost: "${args.app}" is not running — nothing was sent (delivery=not_delivered, retry=safe)` };
         if (fa.target.pid !== e.pid) return { error: `focus_lost: window ${e.window_id} of the screenshot belongs to pid ${e.pid}, not to "${fa.target.name ?? args.app}" — nothing was sent (delivery=not_delivered, retry=safe)` };
       }
@@ -1202,7 +1325,7 @@ async function macClick(args) {
       // the app the click will reach — and, for a screenshot click, the screenshot's app too
       const at = await frontmost({ at: [px, py] });
       ownerPid = pointOwnerPid(at);
-      // no window there: the bare desktop, which Finder draws and which gets the click (cross-verification A0)
+      // no window there: the bare desktop, which Finder draws and which gets the click
       if (ownerPid === undefined && at && at.top === null) ownerPid = "finder";
       if (ownerPid === undefined) return { error: `input_denied: could not identify the app on top at ${px},${py}, which would receive the click — nothing was sent (fail closed; delivery=not_delivered, retry=safe)` };
     }
@@ -1213,14 +1336,14 @@ async function macClick(args) {
       const late = await lateTopCheck([{ point: [px, py], pid: shot.pid, wid: shot.window_id }]);
       if (late.error) return { error: late.error };
       // ... and has not moved since its fingerprint was checked: a window dragged a little can stay on top at
-      // the old point while the control under it changed (review S4A-s1-2)
+      // the old point while the control under it changed
       const wl = await axEngine({ op: "windows" }, 15000);
       const w = (wl?.ok ? wl.windows || [] : []).find((w) => w.id === shot.window_id);
       if (!w || w.pid !== shot.pid || String(w.bounds) !== String(shot.bounds)) return { error: `stale: window ${shot.window_id} moved, resized or closed just before the click — nothing was sent; take a new mac_screenshot (delivery=not_delivered, retry=safe)` };
     }
     const r = await cliclick(clickCmds(button, count, px, py), undefined, { pointer: true });
     if (!r.ok) return { error: cliFail(r) };
-    return { text: `clicked ${button} x${count} @ ${px},${py} (xy; ${viaShot}physical, ${checked}; no element to verify — delivery=delivered_unverified, retry=unsafe)${await frontmostNote()}` };
+    return { text: `clicked ${button} x${count} @ ${px},${py} (xy; ${viaShot}physical, ${checked}; no element to verify — delivery=delivered_unverified, retry=unsafe)${r.pointerNote ? ` — ${r.pointerNote}` : ""}${await frontmostNote()}` };
   }
   const l = lookupIndex(args.element_index, args.snapshot_id);
   if (l.error) return { error: l.error };
@@ -1261,7 +1384,7 @@ async function macDrag(args) {
     // both ends' apps are judged (a drop into another app is input to that app too)
     const gate = await approveTarget({ pid: prep.pid }, { pid: prepTo.pid });
     if (gate.error) return { error: gate.error };
-    const late = await lateTopCheck([{ point: from, pid: prep.pid, wid: prep.wid }, { point: to, pid: prepTo.pid, wid: prepTo.wid }]);
+    const late = await lateTopCheck([{ point: from, pid: prep.pid, wid: prep.wid, topWid: prep.top_wid }, { point: to, pid: prepTo.pid, wid: prepTo.wid, topWid: prepTo.top_wid }]);
     if (late.error) return { error: late.error };
     await testGap(`drag ${from} → ${to}`);
   }
@@ -1279,11 +1402,11 @@ async function macDrag(args) {
     const up = await cliclick([`du:${ccPoint(to[0], to[1])}`], 5000, { recovery: true });
     return { error: `${cliFail(r)} — a mouse-up was sent at ${to} ${up.ok ? "to release the button" : `but failed too (${up.out.slice(0, 80)}): the button may still be held`}` };
   }
-  return r.ok ? { text: `dragged ${from} → ${to} (${note}; physical${holdMs ? `, hold ${holdMs}ms` : ""}${stepMs ? `, ${stepMs}ms steps` : ""} — check the drop target: delivery=delivered_unverified, retry=unsafe)` } : { error: cliFail(r) };
+  return r.ok ? { text: `dragged ${from} → ${to} (${note}; physical${holdMs ? `, hold ${holdMs}ms` : ""}${stepMs ? `, ${stepMs}ms steps` : ""} — check the drop target: delivery=delivered_unverified, retry=unsafe)${r.pointerNote ? ` — ${r.pointerNote.replace("the click", "the drag")}` : ""}` } : { error: cliFail(r) };
 }
 // 0.3.0 hold_ms / step_ms (physical path only): hold_ms presses and holds after mouse-down before the move
 // starts (timeline editors use it to tell clip-move from marquee selection); step_ms moves in steps of about
-// 20 points with that many ms between them. Review CR1/CR2 T4: the whole gesture must fit well inside
+// 20 points with that many ms between them. the whole gesture must fit well inside
 // cliclick's timer — a cliclick killed mid-drag would leave the mouse button down — so over DRAG_MAX_MS of
 // waits nothing is sent, and the timer allows the waits plus 15 s.
 const DRAG_MAX_MS = 10000;
@@ -1354,14 +1477,13 @@ async function macScroll(args) {
     if (g.error) return { error: g.error };
     const gate = await approveTarget({ pid: g.pid });  // 0.3.0: the app on top at that point (the frontmost app)
     if (gate.error) return { error: gate.error };
-    // the stop file right before the wheel event goes out, as in cliclick (review S4B-s2-NEW-1)
+    // the stop file right before the wheel event goes out, as in cliclick
     const stop = stopFileBlocked();
     if (stop) return { error: stop };
-    const r = await sh("/usr/bin/osascript", ["-l", "JavaScript", "-e", WHEEL_SCRIPT, "--", String(dy), String(dx), String(px), String(py), SHARED_INPUT ? "1" : "0"], 8000);
-    noteHid(r.ok ? {} : { timedOut: true });  // a wheel event went out, or may have: stamp once the script is gone
-    return r.ok
+    const w = await wheelAt(dy, dx, px, py);
+    return !w.error
       ? { text: `scrolled ${direction} ${pages} page(s) at the center of ${win.title ? JSON.stringify(win.title) : "the front window"} of "${front.name}" (top window: ${g.owner}; physical — delivery=delivered_unverified, retry=unsafe)` }
-      : { error: "scroll failed: " + r.out.slice(0, 200) + " (delivery=unknown, retry=unsafe)" };
+      : { error: w.error };
   }
   const l = lookupIndex(args.element_index, args.snapshot_id);
   if (l.error) return { error: l.error };
@@ -1371,9 +1493,21 @@ async function macScroll(args) {
   if (gate.error) return { error: gate.error };
   const prep = await axEngine({ op: "scroll_prep", target });
   if (!prep.ok) return { error: axErrorText(prep) };
-  if (prep.scrolled_into_view) return { text: actText(`scrolled ${label} into view`, prep) };
-  const r = await sh("/usr/bin/osascript", ["-l", "JavaScript", "-e", WHEEL_SCRIPT, "--", String(dy), String(dx), String(prep.point[0]), String(prep.point[1]), SHARED_INPUT ? "1" : "0"], 8000);
-  if (!r.ok) return { error: "scroll failed: " + r.out.slice(0, 200) + (/not found/.test(r.out) ? " (delivery=not_delivered, retry=safe)" : " (delivery=unknown, retry=unsafe)") };
+  // an element that is not a scroll area was asked to scroll itself into view; the engine says whether it is there now
+  if (prep.scrolled_into_view !== undefined) return { text: actText(prep.scrolled_into_view ? `scrolled ${label} into view` : `asked ${label} to scroll into view`, prep) };
+  // what is on top at the point, once more right before the wheel event, as for a click: a window that came up since
+  // the hit test would be scrolled instead
+  const late = await lateTopCheck([{ point: prep.point, pid: prep.pid, wid: prep.wid, topWid: prep.top_wid }]);
+  if (late.error) return { error: late.error };
+  // the stop file right before the wheel event goes out, as for a scroll that names no element
+  const stop = stopFileBlocked();
+  if (stop) return { error: stop };
+  // the person-goes-first check once more, as late as it can be made: the queue's check is older than the
+  // approval and the engine's look at the element by now, and nothing of this call has gone out yet
+  const busy = await lateUserCheck();
+  if (busy) return { error: busy };
+  const w = await wheelAt(dy, dx, prep.point[0], prep.point[1]);
+  if (w.error) return { error: w.error };
   await sleep(300);
   const after = await axEngine({ op: "observe_after", target, before: prep.before, keys: ["vscroll", "hscroll"] });
   const res = after.ok ? after : { delivery: "delivered_unverified", retry: "unsafe" };
@@ -1384,7 +1518,7 @@ async function macScroll(args) {
 async function macSetValue(args) {
   const l = lookupIndex(args.element_index, args.snapshot_id);
   if (l.error) return { error: l.error };
-  // 0.3.0: the element's own app, not the frontmost one (review CR1/CR2: a background denied app's field was writable)
+  // 0.3.0: the element's own app, not the frontmost one (a background denied app's field was writable)
   const gate = await approveTarget({ pid: l.item.pid });
   if (gate.error) return { error: gate.error };
   const res = await axEngine({ op: "set_value", target: targetOf(l.item), value: String(args.value), timeout_ms: args.timeout_ms });
@@ -1512,6 +1646,9 @@ async function macKey(args) {
       if (b.sent !== false) return { error: `action_failed: ${b.error} — the key may or may not have been posted (delivery=unknown, retry=unsafe)` };
       // proven not posted: the engine path below
     }
+    // the key goes out through the HID system like cliclick's: the person-goes-first check once more
+    const busy = await lateUserCheck();
+    if (busy) return { error: busy };
     const r = await axEngine({ op: "key", ...ek }, 8000);
     const how = ek.char !== undefined && Number.isInteger(r.code) ? `HID key event, key code ${r.code} in this layout` : "HID key event";
     return r.ok ? { text: `pressed ${key} (${how}) — delivery=delivered_unverified, retry=unsafe (frontmost: ${g.fm ?? "unknown"})${r.note ? ` — ${r.note}` : ""}` } : { error: axErrorText(r) };
@@ -1535,6 +1672,14 @@ async function macType(args) {
     if (l.error) return { error: l.error };
     item = l.item; target = targetOf(item); label = itemLabel(args.element_index, item);
   }
+  // app given with an element_index: the element must belong to that app, else nothing at all is sent — checked
+  // before either path (the accessibility path wrote into the element whatever app was named)
+  if (target && args.app) {
+    const a = await frontmost({ app: args.app });
+    // a name several running apps share: the index already names the process, which must be one of them
+    const pids = a?.ambiguous ? (a.ambiguous.details?.apps || []).map((x) => x.pid) : a?.target ? [a.target.pid] : [];
+    if (!pids.includes(target.pid)) return { error: `focus_lost: element_index ${args.element_index} belongs to another app than "${args.app}" — nothing was sent (delivery=not_delivered, retry=safe)` };
+  }
   let noFocus = false;
   if (mechanism !== "physical") {
     // 0.3.0: the app that gets the text — the element's, the named one, or the frontmost one — is judged
@@ -1552,7 +1697,7 @@ async function macType(args) {
     const fallback = mechanism === "auto" && target === null && !args.replace && res.code === "ACTION_NOT_SUPPORTED" && (res.details?.kind === "no_focus" || res.details?.textlike === true);
     if (!fallback) return { error: axErrorText(res) };
     noFocus = res.details?.kind === "no_focus";
-    // 0.2.6 (review #2): no focused element and no app named — the keystrokes would go wherever macOS
+    // 0.2.6: no focused element and no app named — the keystrokes would go wherever macOS
     // routes them in whatever app is in front; refuse
     if (noFocus && args.app === undefined) {
       const who = engineApp ? `"${engineApp}" (the frontmost app)` : "the frontmost app";
@@ -1562,11 +1707,6 @@ async function macType(args) {
   if (args.replace) return { error: "invalid_args: replace needs the accessibility path (mechanism auto or semantic) (delivery=not_delivered, retry=safe)" };
   let g;
   if (target) {
-    // app given with an element_index: the element must belong to that app (else nothing at all is sent)
-    if (args.app) {
-      const a = await frontmost({ app: args.app });
-      if (!a?.target || a.target.pid !== target.pid) return { error: `focus_lost: element_index ${args.element_index} belongs to another app than "${args.app}" — nothing was sent (delivery=not_delivered, retry=safe)` };
-    }
     // physical into an element: click it first (hit-tested), then type only if the click left the
     // element's own app in front — otherwise the keystrokes would land in whatever app is
     const c = await physicalClickAt(target, label, "left", 1, args.timeout_ms, { real: true });
@@ -1595,6 +1735,9 @@ async function macPasteImpl(args) {
   // 0.3.0: ⌘V goes to the frontmost app (with app given, the engine refuses unless that app is in front)
   const gate = await approveTarget(args.app !== undefined ? { app: args.app } : {});
   if (gate.error) return { error: gate.error };
+  // ⌘V goes out through the HID system: the person-goes-first check once more, before the clipboard is touched
+  const busy = await lateUserCheck();
+  if (busy) return { error: busy };
   const res = await axEngine({ op: "paste", text, app: args.app, force: args.force === true }, 25000);
   if (!res.ok) return { error: axErrorText(res) };
   return { text: `pasted ${text.length} chars — delivery=${res.delivery}, retry=unsafe${res.reason ? ` (${res.reason})` : ""} (clipboard restored: ${res.restored}) (frontmost: ${res.front ?? "unknown"})` };
@@ -1615,7 +1758,7 @@ async function macMenuCommand(args) {
 // ── Mac 层：等待 / 应用 / 窗口 / 剪贴板 / 通知 ──
 const WAIT_CONDITIONS = ["window", "window_gone", "text", "text_gone", "element", "menu", "menu_closed", "sheet", "sheet_gone", "app_running", "app_gone", "notification"];
 const WAIT_PREDICATES = ["exists", "gone", "enabled", "focused", "value_equals", "value_contains"];
-async function macWait(args) {
+async function macWait(args, live) {
   if (args.condition === "notification" && process.env.NORACU_READ_ONLY === "1") {
     return { error: 'mac_wait: condition "notification" blocked by NORACU_READ_ONLY=1 (observation-only mode)' };
   }
@@ -1626,7 +1769,7 @@ async function macWait(args) {
     if (l.error) return { error: l.error };
     req.target = targetOf(l.item);
   }
-  const res = await axEngine(req, timeoutMs + 15000);
+  const res = await axEngine(req, timeoutMs + 15000, live);
   if (!res.ok) return { error: `${axErrorText(res)}${res.details?.last_observed ? ` — last observed: ${JSON.stringify(res.details.last_observed)}` : ""}` };
   return { text: `${res.condition} met after ${res.elapsed_ms} ms — ${JSON.stringify(res.observed)}` };
 }
@@ -1685,6 +1828,8 @@ async function cdpVersionOnce(port, timeoutMs = 2500) {
   } catch { /* not up yet or unreachable */ }
   return null;
 }
+// test hook (with NORACU_AX_ENGINE only): a stand-in for /usr/bin/open in the DevTools-port launch
+const CDP_OPEN = process.env.NORACU_AX_ENGINE && process.env.NORACU_TEST_OPEN ? process.env.NORACU_TEST_OPEN : "/usr/bin/open";
 async function cdpVersion(port, timeoutMs) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
@@ -1694,6 +1839,21 @@ async function cdpVersion(port, timeoutMs) {
   }
   return null;
 }
+// true when a process listening on the loopback port is the app (pid) or one of its own child processes: another
+// local process could take the port between the free-port check and the app's start (lsof lists the listeners)
+async function portHeldBy(port, pid) {
+  const r = await sh("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], 5000);
+  if (!r.ok) return false;
+  for (const line of r.out.split("\n")) {
+    let p = Number(line.trim());
+    for (let i = 0; i < 4 && Number.isInteger(p) && p > 1; i++) {
+      if (p === pid) return true;
+      const up = await sh("/bin/ps", ["-o", "ppid=", "-p", String(p)], 3000);
+      p = up.ok ? Number(up.out.trim()) : NaN;
+    }
+  }
+  return false;
+}
 
 // name (the bundle's file name, as Finder shows it) and bundle id of an installed app that is not running
 async function installedBundle(path) {
@@ -1702,10 +1862,20 @@ async function installedBundle(path) {
   return { name: String(path).replace(/\/+$/, "").split("/").pop().replace(/\.app$/i, ""), bundle_id: /^[\w.-]+$/.test(id) ? id : null };
 }
 
+// Bring a running app forward. "pid:<number>" names one process of several that share a name or a bundle: the
+// engine activates that process — `open -a` would bring forward whichever copy macOS picks. Anything else goes
+// through `open -a`, as before.
+async function bringForward(app, target) {
+  if (/^pid:\d{1,7}$/.test(String(app))) {
+    const r = await axEngine({ op: "app_ctl", action: "activate", app }, 10000);
+    return r.ok ? { ok: true, out: "" } : { ok: false, out: axErrorText(r) };
+  }
+  return sh("/usr/bin/open", ["-a", target], 15000);
+}
 async function macApp(args) {
   const { action, app } = args;
   if (action === "launch") {
-    // ~/ and symlinked .app paths resolve to the real bundle path for every launch (R20)
+    // ~/ and symlinked .app paths resolve to the real bundle path for every launch
     const spec = canonicalAppSpec(app);
     const info = await axEngine({ op: "app_info", app: spec }, 10000);
     if (!info.ok) return { error: axErrorText(info) };
@@ -1720,7 +1890,7 @@ async function macApp(args) {
       }
       if (!info.chromium) return { error: `invalid_args: "${app}" is not a Chromium or Electron app, so it has no DevTools port (delivery=not_delivered, retry=safe)` };
       // a DevTools port hands the app to the browser tools, which app rules do not judge: an app the deny list or the
-      // approval file rules out is not launched with one (audit S5A-s3-G-4: an IDE with a terminal, driven over CDP)
+      // approval file rules out is not launched with one (an IDE with a terminal, driven over CDP)
       // an app that is not running has no name or bundle id from the engine: read them from the bundle on disk
       const who = info.running ? { name: info.name, bundle_id: info.bundle_id } : await installedBundle(info.path);
       const ruled = approveKnown(appInfo(who), `the app "${app}" that would be launched with a DevTools port`);
@@ -1734,19 +1904,23 @@ async function macApp(args) {
       // Chrome-family browsers (Chrome 136+) refuse remote debugging on the default profile, so they get a
       // profile of their own under ~/.noracu; an Electron app keeps its own data (no --user-data-dir)
       const extra = info.electron ? [] : [`--user-data-dir=${ensurePrivateDir(join(cdpProfilesDir, String(info.bundle_id || target).replace(/[^\w.-]+/g, "_")))}`];
-      const r = await sh("/usr/bin/open", [...(args.activate ? [] : ["-g"]), "-n", "-a", target, "--args", `--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1", ...extra], 15000);
+      const r = await sh(CDP_OPEN, [...(args.activate ? [] : ["-g"]), "-n", "-a", target, "--args", `--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1", ...extra], 15000);
       if (!r.ok) return { error: `launch_failed: ${r.out.slice(0, 200)} (delivery=unknown, retry=unsafe)` };
       const w = await axEngine({ op: "app_wait", app: info.bundle_id || target, timeout_ms: args.timeout_ms ?? 20000 }, (args.timeout_ms ?? 20000) + 10000);
       const v = await cdpVersion(port, args.timeout_ms ?? 20000);
-      if (!v || !v.webSocketDebuggerUrl || !w.ok || !Number.isInteger(w.pid)) {
-        return { text: JSON.stringify({ launched: w.ok ? w.name : app, pid: w.pid ?? null, cdp: null, note: !v ? (w.ok ? "the app started but its DevTools endpoint did not answer — use the accessibility tools instead" : "the app did not show up in time and its DevTools endpoint did not answer — check mac_apps before launching again") : "the DevTools endpoint answered, but the launched app process could not be verified — check mac_apps", delivery: "delivered_unverified", retry: "unsafe" }) };
+      // the endpoint is recorded as the app's only when it is: its websocket is on this port on 127.0.0.1, and the
+      // process listening on the port is the app (or one of its child processes)
+      const seen = Boolean(v) && w.ok && Number.isInteger(w.pid);
+      const own = seen && String(v.webSocketDebuggerUrl || "").startsWith(`ws://127.0.0.1:${port}/`) && await portHeldBy(port, w.pid);
+      if (!own) {
+        return { text: JSON.stringify({ launched: w.ok ? w.name : app, pid: w.pid ?? null, cdp: null, note: !v ? (w.ok ? "the app started but its DevTools endpoint did not answer — use the accessibility tools instead" : "the app did not show up in time and its DevTools endpoint did not answer — check mac_apps before launching again") : !seen ? "the DevTools endpoint answered, but the launched app process could not be verified — check mac_apps" : `the DevTools endpoint on 127.0.0.1:${port} is not the launched app's own (another process may hold the port), so it was not recorded — use the accessibility tools, or quit the app and launch again`, delivery: "delivered_unverified", retry: "unsafe" }) };
       }
       cdpPorts.set(port, { pid: w.pid, wsUrl: v.webSocketDebuggerUrl });
       return { text: JSON.stringify({ launched: w.name || app, pid: w.pid, cdp: { port, http_endpoint: `http://127.0.0.1:${port}`, websocket_url: v.webSocketDebuggerUrl, product: v.Browser }, next: `browser_launch with cdp_port ${port} drives its web contents through Playwright; menus, dialogs and windows stay on mac_* tools`, warning: "the DevTools port stays open until the app quits; any local process can control the app meanwhile", delivery: "delivered_verified", retry: "unsafe" }) };
     }
     if (info.running) {
       // attaching sends nothing; activate:true brings it forward, verified by the frontmost app
-      if (args.activate) await sh("/usr/bin/open", ["-a", target], 15000);
+      if (args.activate) await bringForward(app, target);
       await sleep(args.activate ? 500 : 0);
       const front = (await frontmost({ pid: info.pid }))?.match === true;
       return { text: JSON.stringify({ app: info.name, pid: info.pid, already_running: true, frontmost: front, delivery: args.activate ? (front ? "delivered_verified" : "delivered_unverified") : "not_delivered", retry: "safe" }) };
@@ -1761,8 +1935,9 @@ async function macApp(args) {
   }
   if (action === "activate") {
     const info = await axEngine({ op: "app_info", app }, 10000);
+    if (info?.code === "AMBIGUOUS_APP") return { error: axErrorText(info) };
     if (!info.ok || !info.running) return { error: `app_not_found: no running app named "${app}" (delivery=not_delivered, retry=safe)` };
-    const o = await sh("/usr/bin/open", ["-a", info.path || app], 15000);
+    const o = await bringForward(app, info.path || app);
     if (!o.ok) return { error: `activate_failed: ${o.out.slice(0, 160)} (delivery=unknown, retry=safe)` };
     await sleep(500);
     const f = await frontmost({ pid: info.pid });
@@ -1823,6 +1998,13 @@ async function macNotifications(args = {}) {
 const browsers = new Map(); // browser_id → { browser, cdpBrowser?, cdp_port?, headless, activePage, pages: Map }
 const browserElCache = new Map(); // browser_id → { elements: [{i,tag,role,name,href,x,y}], ts, page, url }
 let chromiumInstalling = null; // the in-flight `playwright install chromium`, shared by concurrent launches
+// The download can take minutes — longer than a client waits for an answer. A browser_launch waits for it up to
+// CHROMIUM_WAIT_MS, then answers browser_installing while it goes on; browser_launch again takes the browser once it
+// is there. A download that failed after its call had answered is reported by the next browser_launch, once.
+const CHROMIUM_WAIT_MS = process.env.NORACU_CI === "1" && Number(process.env.NORACU_TEST_CHROMIUM_WAIT_MS) > 0 ? Number(process.env.NORACU_TEST_CHROMIUM_WAIT_MS) : 20000;
+let chromiumInstallFailed = null;
+const chromiumFailed = (r) => Boolean(r.error || r.timedOut || r.code !== 0);
+const chromiumFailedText = (r) => "Playwright chromium missing and auto-install failed. Run manually: npx playwright install chromium. Detail: " + String(r.stderr || r.stdout || r.error?.message || (r.timedOut ? "timed out after 10 min" : "")).slice(0, 200) + " (delivery=not_delivered, retry=safe)";
 let browserLaunching = null;  // the in-flight persistent-profile launch (one at a time)
 
 // shutdown: close every browser (a CDP attachment only disconnects; the app keeps running)
@@ -1838,7 +2020,25 @@ async function closeAllBrowsers() {
 
 const SNAPSHOT_EL_LIMIT = 100;
 const INTERACTIVE_SELECTOR = 'a, button, input, select, textarea, summary, [role="button"], [role="link"], [role="tab"], [role="checkbox"], [role="radio"], [role="menuitem"], [role="option"], [role="switch"], [onclick], [tabindex]:not([tabindex="-1"])';
-const isNonDevtoolsPage = (p) => !String(p.url() || "").startsWith("devtools://");
+// A DevTools front end, however it is reached: what is typed into its console runs as script, which
+// browser_evaluate needs NORACU_ENABLE_EVAL for. By scheme (devtools://, the older chrome-devtools://); over
+// http, everything served by a DevTools port this server knows of (one it opened through mac_app, one a session
+// is attached to — the front end, and the /json endpoints that list, open and close the app's pages); and on
+// any other local port, the front end's own pages (/devtools/*.html).
+const LOOPBACK_HOST = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]|0\.0\.0\.0|.+\.localhost)$/i;
+const DEVTOOLS_REFUSED = "that address is a DevTools port or its front end — noracu does not open, read or act on one: what is typed into a DevTools console runs as script (browser_evaluate, with NORACU_ENABLE_EVAL=1, is the way to run one)";
+function isDevtoolsUrl(url) {
+  const s = String(url || "");
+  if (/^(?:chrome-)?devtools:/i.test(s)) return true;
+  if (!/^https?:\/\//i.test(s)) return false;
+  let u;
+  try { u = new URL(s); } catch { return false; }
+  if (!LOOPBACK_HOST.test(u.hostname)) return false;
+  const port = Number(u.port || (u.protocol === "https:" ? 443 : 80));
+  if (cdpPorts.has(port) || [...browsers.values()].some((b) => b.cdp_port === port)) return true;
+  return /^\/devtools\/[^/]+\.html$/i.test(u.pathname);
+}
+const isNonDevtoolsPage = (p) => !isDevtoolsUrl(p.url());
 
 function withTimeout(promise, ms, label = "browser operation") {
   let timer;
@@ -1872,7 +2072,7 @@ function pruneDeadBrowsers() {
     if (b.cdpBrowser && !b.cdpBrowser.isConnected()) {
       browsers.delete(id);
       browserElCache.delete(id);
-      // every one of noracu's tabs was seen closed before the connection went: that close is not "lost" (S4A-s3-reviewer-1)
+      // every one of noracu's tabs was seen closed before the connection went: that close is not "lost"
       if (b.chrome && !endedChrome.has(id)) endedChrome.set(id, b.allClosed ? "closed" : "lost");
     }
   }
@@ -1882,8 +2082,11 @@ function pruneDeadBrowsers() {
 // 索引仅对最近一次同 Page、同 URL 的 browser_snapshot 有效（TTL 30s）；点击时重遍历 + tag/name/href/位置校验，
 // 真实 Playwright 点击（含 actionability 检查，绝不回退合成 JS .click()）。
 
+// How deep under <body> the element walks go. Pages built from nested components put controls 30-50
+// elements deep; a control past the limit is not listed, and the snapshot says its list may be incomplete.
+const DOM_WALK_DEPTH = 64;
 async function listClickable(page) {
-  return withTimeout(page.evaluate(({ limit, sel }) => {
+  return withTimeout(page.evaluate(({ limit, sel, maxDepth }) => {
     const elemName = (el) => {
       const pick = (...vals) => {
         for (const v of vals) {
@@ -1931,8 +2134,11 @@ async function listClickable(page) {
     const shown = [];
     let total = 0;
     let visited = 0;
+    let deep = false;
+    let shadowRoots = 0, frames = 0;
     const walk = (el, depth) => {
-      if (!el || depth > 20 || visited > 10000) return;
+      if (!el || visited > 10000) return;
+      if (depth > maxDepth) { deep = true; return; }
       visited++;
       let visible = false;
       try {
@@ -1944,6 +2150,10 @@ async function listClickable(page) {
         if (shown.length < limit) shown.push(el);
         total++;
       }
+      // what is inside a shadow root or a frame is another tree: this walk does not go in — it is counted, so
+      // that the list can say what it leaves out
+      if (visible && el.shadowRoot) shadowRoots++;
+      if (visible && (el.tagName === "IFRAME" || el.tagName === "FRAME")) frames++;
       for (const c of el.children) walk(c, depth + 1);
     };
     if (document.body) walk(document.body, 0);
@@ -1961,19 +2171,20 @@ async function listClickable(page) {
         };
       }),
       total,
-      capped: visited > 10000,
+      capped: visited > 10000 || deep,
+      shadowRoots, frames,
     };
-  }, { limit: SNAPSHOT_EL_LIMIT, sel: INTERACTIVE_SELECTOR }), 5000, "snapshot DOM walk");
+  }, { limit: SNAPSHOT_EL_LIMIT, sel: INTERACTIVE_SELECTOR, maxDepth: DOM_WALK_DEPTH }), 5000, "snapshot DOM walk");
 }
 
 async function clickByIndex(page, idx, expect, button = "left") {
   let handle;
   try {
-    handle = await withTimeout(page.evaluateHandle(({ idx, sel }) => {
+    handle = await withTimeout(page.evaluateHandle(({ idx, sel, maxDepth }) => {
       const out = [];
       let visited = 0;
       const walk = (el, depth) => {
-        if (!el || depth > 20 || visited > 10000 || out.length > idx) return;
+        if (!el || depth > maxDepth || visited > 10000 || out.length > idx) return;
         visited++;
         let visible = false;
         try {
@@ -1989,7 +2200,7 @@ async function clickByIndex(page, idx, expect, button = "left") {
       };
       if (document.body) walk(document.body, 0);
       return out[idx] || null;
-    }, { idx, sel: INTERACTIVE_SELECTOR }), 5000, "element lookup");
+    }, { idx, sel: INTERACTIVE_SELECTOR, maxDepth: DOM_WALK_DEPTH }), 5000, "element lookup");
   } catch (e) {
     const msg = String(e?.message || e);
     if (/Execution context was destroyed|Target page, context or browser has been closed|detached/i.test(msg)) {
@@ -2096,13 +2307,13 @@ async function pw() {
   return chromium;
 }
 
-// browser_launch chrome:true (Andy, 2026-11-13): work inside the person's own Chrome, with its sign-ins, through
+// browser_launch chrome:true: work inside the person's own Chrome, with its sign-ins, through
 // Chrome's own remote-debugging switch (chrome://inspect/#remote-debugging, Chrome 144+). Chrome asks the person to
 // allow each connection and shows a banner while one is open. Since Chrome 136 --remote-debugging-port is ignored
 // for the default profile, so this switch is the way in. Opt-in: NORACU_ALLOW_CHROME=1. noracu opens a window of
 // its own there and works only in the tabs it opened (and tabs those open); the person's other tabs are never
 // listed, read or acted on, and the usual address rules still apply in noracu's tabs. NORACU_CHROME_TABS=all
-// (opt-in, Andy 2026-11-13) adds the person's own tabs: listed, selectable, read and acted on like noracu's, the
+// (opt-in) adds the person's own tabs: listed, selectable, read and acted on like noracu's, the
 // address rules still applying; only noracu's own tabs are ever closed.
 const chromeAllowed = () => process.env.NORACU_ALLOW_CHROME === "1";
 const chromeAllTabs = () => process.env.NORACU_CHROME_TABS === "all";
@@ -2131,7 +2342,7 @@ async function chromeOwnWindow(b) {
     while (Date.now() < deadline) {
       for (const p of fresh) {
         if (!p.isClosed() && (await targetIdOf(b, p).catch(() => null)) === targetId) {
-          b.owned.add(p);   // noracu's; browser_tabs new marks the tabs it opens itself (pre-review P22)
+          b.owned.add(p);   // noracu's; browser_tabs new marks the tabs it opens itself
           watchFreshBlank(p);   // a blank page the browser made, not one a page opened
           return p;
         }
@@ -2152,7 +2363,7 @@ async function chromeOwnWindow(b) {
 // Measured on Chromium (2026-11-13 probe): a noopener tab still reports its opener over CDP (openerId).
 async function chromeNewTab(b) {
   // the host is one of noracu's tabs on a page it may act on, never a file:// page or an error page: the blank tab
-  // takes its opener's origin (review S4A-s2-rev-1)
+  // takes its opener's origin
   const hostOk = (p) => p && !p.isClosed() && b.owned.has(p) && isNonDevtoolsPage(p) && tabAllowed(b, p) && !/^file:/i.test(p.url());
   const host = hostOk(b.activePage) ? b.activePage : b.browser.pages().find(hostOk);
   if (!host) return chromeOwnWindow(b);
@@ -2185,7 +2396,7 @@ async function chromeNewTab(b) {
     await s?.detach().catch(() => {});
   }
   // a tab window.open may have made but that could not be matched is not closed — closing by guess could reach a
-  // tab that is not noracu's — the result says it may be there (pre-review P24)
+  // tab that is not noracu's — the result says it may be there
   if (opened) b.strayTabs = (b.strayTabs || 0) + 1;
   try { return await chromeOwnWindow(b); }
   catch (e) { throw new Error(opened ? `${shortErr(e)}; a first try may also have left a blank tab in your Chrome that noracu could not tell apart (not closed)` : shortErr(e)); }
@@ -2243,7 +2454,7 @@ async function attachChrome() {
 }
 
 // one launch or attach at a time, the wait for Chrome's dialog included: a second call waits, then finds the
-// session (pre-reviews P22, P23); a loop, because another waiter can have started its own in between
+// session; a loop, because another waiter can have started its own in between
 async function oneLaunchAtATime(fn) {
   while (browserLaunching) await browserLaunching.catch(() => {});
   const p = fn();
@@ -2289,12 +2500,12 @@ async function attachCdp(args) {
   const context = contexts.find((ctx) => ctx.pages().some(isNonDevtoolsPage)) || contexts[0];
   if (!context) { await cdpBrowser.close().catch(() => {}); return { error: "cdp_connect_failed: the app exposes no browser context (delivery=not_delivered, retry=safe)" }; }
   const nonDevPages = context.pages().filter(isNonDevtoolsPage);
-  const activePage = nonDevPages[0] || context.pages()[0] || null;
+  const activePage = nonDevPages[0] || null;   // never a DevTools window, also when nothing else is open
   const browserId = `b-${randomUUID().slice(0, 8)}`;
   const entry = { browser: context, cdpBrowser, cdp_port: args.cdp_port, headless: false, activePage, pages: new Map() };
   browsers.set(browserId, entry);
   registerBrowserCleanup(browserId, entry);
-  return { text: JSON.stringify({ browser_id: browserId, cdp_port: args.cdp_port, tabs: nonDevPages.length || context.pages().length, attached: true, note: "browser_close disconnects; the app keeps running" }) };
+  return { text: JSON.stringify({ browser_id: browserId, cdp_port: args.cdp_port, tabs: nonDevPages.length, attached: true, note: "browser_close disconnects; the app keeps running" }) };
 }
 async function browserLaunch(args = {}) {
   if (args.chrome === true) return oneLaunchAtATime(attachChrome);
@@ -2337,15 +2548,23 @@ async function launchPersistent(args) {
     if (process.env.NORACU_DISABLE_AUTO_INSTALL === "1") {
       return { error: "Playwright chromium missing and auto-install disabled (NORACU_DISABLE_AUTO_INSTALL=1). Run manually: npx playwright install chromium (delivery=not_delivered, retry=safe)" };
     }
+    // a download that failed after its browser_launch had answered: this call says so (the next one tries again)
+    if (chromiumInstallFailed && !chromiumInstalling) { const f = chromiumInstallFailed; chromiumInstallFailed = null; return { error: chromiumFailedText(f) }; }
     const req = createRequire(import.meta.url);
-    const cliJs = join(dirname(req.resolve("playwright/package.json")), "cli.js");
+    // test hook (under NORACU_CI=1 only): a stand-in for Playwright's installer
+    const cliJs = process.env.NORACU_CI === "1" && process.env.NORACU_TEST_PLAYWRIGHT_CLI ? process.env.NORACU_TEST_PLAYWRIGHT_CLI : join(dirname(req.resolve("playwright/package.json")), "cli.js");
     const t0 = Date.now();
     // one install at a time: a second browser_launch during the download waits for the same install
-    if (!chromiumInstalling) chromiumInstalling = runAsync(process.execPath, [cliJs, "install", "chromium"], { timeoutMs: 600000 }).finally(() => { chromiumInstalling = null; });
-    const r = await chromiumInstalling;
-    if (r.error || r.timedOut || r.code !== 0) {
-      return { error: "Playwright chromium missing and auto-install failed. Run manually: npx playwright install chromium. Detail: " + String(r.stderr || r.stdout || r.error?.message || (r.timedOut ? "timed out after 10 min" : "")).slice(0, 200) + " (delivery=not_delivered, retry=safe)" };
+    if (!chromiumInstalling) {
+      chromiumInstallFailed = null;
+      chromiumInstalling = runAsync(process.execPath, [cliJs, "install", "chromium"], { timeoutMs: 600000 })
+        .then((r) => { if (chromiumFailed(r)) chromiumInstallFailed = r; return r; })
+        .finally(() => { chromiumInstalling = null; });
     }
+    const r = await Promise.race([chromiumInstalling, new Promise((res) => setTimeout(res, CHROMIUM_WAIT_MS, null).unref())]);
+    if (r === null) return { error: "browser_installing: Playwright's Chromium is not on this Mac yet and is being downloaded (the first time only; it can take a few minutes) — call browser_launch again in a minute (delivery=not_delivered, retry=safe)" };
+    chromiumInstallFailed = null;  // reported here
+    if (chromiumFailed(r)) return { error: chromiumFailedText(r) };
     installed = ((Date.now() - t0) / 1000).toFixed(0);
     browser = await chromium.launchPersistentContext(profileDir, launchOpts);
   }
@@ -2354,14 +2573,14 @@ async function launchPersistent(args) {
   try { page = browser.pages()[0] || await withTimeout(browser.newPage(), 10000, "newPage"); }
   catch (e) { await withTimeout(browser.close(), 10000, "close").catch(() => {}); throw e; }
   // The first tab is Chromium's, not one newPage made, and what a blank page can reach depends on how the tab got
-  // there: a blank page that a local file went to still loads local files into frames (measured, pre-review P9) and
-  // cannot be told from a fresh one from inside (P12). So the tab is not judged. When it is on a blank page noracu
+  // there: a blank page that a local file went to still loads local files into frames (measured) and
+  // cannot be told from a fresh one from inside. So the tab is not judged. When it is on a blank page noracu
   // navigates it to about:blank itself (page.goto: a navigation the browser side starts) and counts it from then
-  // on. Measured (P12, P15): a tab that had reached the blank page from a local file — by location.href, and by
+  // on. Measured: a tab that had reached the blank page from a local file — by location.href, and by
   // location.replace — loaded another local file into a frame before this navigation and did not after it; and
   // every time, for those tabs, the first tab and a newPage tab, the navigation put a new document there (a
   // property set on the window before it was gone after it). That is checked on each launch, not assumed: a mark
-  // is set before the navigation and must be gone after it. window.name survives the navigation (measured, P13);
+  // is set before the navigation and must be gone after it. window.name survives the navigation (measured);
   // it is emptied and read back. Any navigation the tab reports later, back to an earlier entry of its history
   // included, ends its standing (watchFreshBlank). If a step does not succeed, or the tab shows anything else (a
   // restored tab), it does not count as a fresh blank page: it is held to the rule like any other tab.
@@ -2374,14 +2593,14 @@ async function launchPersistent(args) {
       if (clean !== true) freshBlank.delete(page);   // the old document is still there, the name is not empty, or neither is known
     }
   }
-  // test switch (Andy, 2026-11-12): makes the first tab not count, so that the first_tab note below can be tested;
+  // test switch: makes the first tab not count, so that the first_tab note below can be tested;
   // honoured only together with NORACU_CI=1, and it only takes standing away
   if (process.env.NORACU_CI === "1" && process.env.NORACU_TEST_FIRST_TAB_UNCOUNTED === "1") freshBlank.delete(page);
   const entry = { browser, headless: Boolean(args.headless), activePage: page, pages: new Map([[page.url(), page]]) };
   browsers.set(browserId, entry);
   registerBrowserCleanup(browserId, entry);
   // a first tab that may not be the active page (the check above did not pass, or Chromium started on something
-  // else): the page tools will refuse it, and the caller is told now rather than at the first call (pre-review P16)
+  // else): the page tools will refuse it, and the caller is told now rather than at the first call
   const firstTab = tabAllowed(entry, page) ? {} : { first_tab: "not counted as a fresh blank page — use browser_navigate, or browser_tabs to open a tab" };
   return { text: JSON.stringify({ browser_id: browserId, tabs: 1, headless: Boolean(args.headless), ...(installed ? { chromium_installed_sec: installed } : {}), ...firstTab }) };
 }
@@ -2398,11 +2617,11 @@ function getActiveSession(browserId, { pageless = false, anyPage = false } = {})
   const b = id ? browsers.get(id) : null;
   if (!b) return null;
   // the active tab may have gone by itself (the page closed it, a person did): the next one takes over and what
-  // was read on the one that is gone is dropped — here as after browser_tabs close (pre-review P8)
+  // was read on the one that is gone is dropped — here as after browser_tabs close
   settleActiveTab(id, b);
   // the person's own tab (NORACU_CHROME_TABS=all) that left http(s) — a settings page, a local file — is not the
   // active page any more, not even for browser_navigate, which would replace what it shows: noracu's own tab takes
-  // over, and a call that would have acted is refused (pre-review P23)
+  // over, and a call that would have acted is refused
   if (!pageless && b.chrome && b.activePage && !b.owned.has(b.activePage) && !tabAllowed(b, b.activePage)) {
     const scheme = (String(b.activePage.url() || "").match(/^[a-z][a-z0-9+.-]*:/i) || ["another"])[0];
     const was = tabId(b.activePage);
@@ -2414,14 +2633,14 @@ function getActiveSession(browserId, { pageless = false, anyPage = false } = {})
     if (pageless) return { id, b, page: null };
     // tabs are open and none may be the active page: say that, not "no browser" (the dispatcher reports it)
     if (openTabs(b).length) throw new Refusal(NO_ACTIVE_PAGE);
-    // a session with no tab left to act on is still a session: "call browser_launch" would be refused (review
-    // S4A-s2-rev-2), so say how to go on
+    // a session with no tab left to act on is still a session: "call browser_launch" would be refused,
+    // so say how to go on
     throw new Refusal(`no_active_page: browser session ${id} has no open tab noracu may act on — open one with browser_tabs (action new) or end the session with browser_close (delivery=not_delivered, retry=safe)`);
   }
   // What a tab must show to become the active page it must show to be read or acted on, and that is looked at
   // on every call: a page can take itself to a blob it made, a load can fail (chrome-error://), a person can
   // open a file in the tab. The tab stays the active page — no other tab takes over while it is open, so no
-  // input goes to a tab nobody chose — and only browser_navigate and browser_tabs act (pre-review P8)
+  // input goes to a tab nobody chose — and only browser_navigate and browser_tabs act
   const nav = watchNavs(b, b.activePage);
   if (!tabAllowed(b, b.activePage)) {
     browserElCache.delete(id);   // what was read before the page went there is dropped, whichever tool sees it
@@ -2444,7 +2663,10 @@ async function browserNavigate(args) {
     return { error: `navigate_failed: ${shortErr(e)} (delivery=unknown, retry=unsafe)` };
   }
   const title = await withTimeout(page.title(), 5000, "page.title").catch(() => "");
-  const statusInfo = resp && resp.status() > 0 ? `HTTP ${resp.status()}` : "no response";
+  // The navigation itself went through; what loaded can still be the server's error page (404, 500). That is said in
+  // so many words, so the status code is not read past next to "delivered_verified".
+  const st = resp ? resp.status() : 0;
+  const statusInfo = st >= 400 ? `HTTP ${st} — an error page: the server did not find or could not serve this address` : st > 0 ? `HTTP ${st}` : "no response";
   return { text: `navigated: ${page.url()} (${statusInfo}, title: ${title}) — delivery=delivered_verified, retry=unsafe` };
 }
 
@@ -2455,8 +2677,8 @@ async function browserSnapshot(args = {}) {
   if (!s) return { error: "no browser — call browser_launch first" };
   const { id, page } = s;
   // The tree, the element list and the address are read one after the other. When the page navigated in between
-  // the parts can be of two pages: nothing is returned, and the list that was read is dropped (pre-review P12).
-  // e: the error a part ended with because the page went to another document (pre-review P14)
+  // the parts can be of two pages: nothing is returned, and the list that was read is dropped.
+  // e: the error a part ended with because the page went to another document
   const changed = (e) => {
     const c = pageChanged(s, "the snapshot was being taken", e ? "it was not finished" : "its parts may be of two pages and none is returned", "browser_snapshot", e);
     if (c) browserElCache.delete(id);
@@ -2466,6 +2688,7 @@ async function browserSnapshot(args = {}) {
   let elements = [];
   let total = 0;
   let capped = false;
+  let inner = "";
   let walkErr = null;
   let gone = null;
   try {
@@ -2473,12 +2696,15 @@ async function browserSnapshot(args = {}) {
     elements = r.elements;
     total = r.total;
     capped = r.capped;
+    // open shadow roots only: a closed one cannot be seen from the page, so it is not counted (and not listed)
+    const parts = [r.shadowRoots ? `${r.shadowRoots} open shadow root(s)` : "", r.frames ? `${r.frames} frame(s)` : ""].filter(Boolean);
+    if (parts.length) inner = ` — not listed: what is inside ${parts.join(" and ")} of this page (browser_click with xy reaches those; a selector reaches into an open shadow root)`;
     browserElCache.set(id, { elements, ts: Date.now(), page, url: page.url(), commits: navs.get(page).commits });
   } catch (e) {
-    // 遍历失败不影响 ARIA 快照，但要说出来（review 0.2.6 #8）：an empty list would read as "nothing clickable"
+    // 遍历失败不影响 ARIA 快照，但要说出来：an empty list would read as "nothing clickable"
     walkErr = shortErr(e);
     if (ctxGone(e)) gone = e;
-    browserElCache.delete(id);   // a list an earlier snapshot left does not stand in for this one (pre-review P15)
+    browserElCache.delete(id);   // a list an earlier snapshot left does not stand in for this one
   }
   const omitted = Math.max(0, total - elements.length);
   const truncNote = omitted > 0
@@ -2486,12 +2712,12 @@ async function browserSnapshot(args = {}) {
     : "";
   const elHeader = walkErr
     ? `[clickable elements unavailable: ${walkErr} — retry browser_snapshot before using element_index]`
-    : `[clickable elements${omitted > 0 ? ` — truncated (${omitted}${capped ? "+" : ""} left out)` : ""} — browser_click accepts element_index]`;
+    : `[clickable elements${omitted > 0 ? ` — truncated (${omitted}${capped ? "+" : ""} left out)` : capped ? " — the page is larger or more deeply nested than the walk covers, so some may be missing" : ""}${inner} — browser_click accepts element_index]`;
   const elList = elements.map((e) => `[${e.i}] ${e.role || e.tag} "${e.name}"${e.href ? ` (${e.href.slice(0, 40)})` : ""} @${e.x},${e.y}`).join("\n") + truncNote;
   const elBlock = `\n\n${elHeader}\n${elList}`;
   const headPrefix = `URL: ${page.url()}\n`;
   const snapBudget = Math.max(1500, 14000 - headPrefix.length - elBlock.length);
-  // review 0.2.6 #8: a cut snapshot says so — the page goes on below what is shown
+  // a cut snapshot says so — the page goes on below what is shown
   const snapCut = snap.length > snapBudget ? `\n[aria snapshot truncated: showing ${snapBudget} of ${snap.length} chars — browser_read or browser_scroll for the rest]` : "";
   const left = refusedSince(s, "the page was being read");
   if (left) return left;
@@ -2516,7 +2742,7 @@ async function browserScreenshot(args = {}) {
     opts.fullPage = false; // clip 与 fullPage 互斥
   }
   const buf = await withTimeout(page.screenshot(opts), 17000, "screenshot").catch((e) => readFailed(s, e));
-  // looked at here as well as at the end: nothing more is asked of a page that stopped passing (pre-review P13)
+  // looked at here as well as at the end: nothing more is asked of a page that stopped passing
   const gone = refusedSince(s, "the page was being read");
   if (gone) return gone;
   const metrics = await withTimeout(
@@ -2536,17 +2762,23 @@ async function browserClick(args) {
   if (!s) return { error: "no browser — call browser_launch first (delivery=not_delivered, retry=safe)" };
   const { id, page } = s;
   const button = args.button || "left";
+  // A click that made the page navigate says so, as browser_fill and browser_scroll do: the elements of the
+  // snapshot went with the page. A navigation the click started is given a moment to show.
+  const moved = async () => {
+    for (let i = 0; i < 3 && !navigated(s); i++) await sleep(50);
+    return navigated(s) ? ` — the page navigated after the click (it shows ${showsNow(s)} now); take a new browser_snapshot before using element_index` : "";
+  };
   if (args.element_index !== undefined) {
     const c = browserElCache.get(id);
     if (!c || Date.now() - c.ts > 30000) return { error: "element_no_longer_valid: no fresh snapshot (TTL 30s) — re-run browser_snapshot (delivery=not_delivered, retry=safe)" };
     if (c.page !== page) return { error: "element_no_longer_valid: active page changed since snapshot — re-run browser_snapshot (delivery=not_delivered, retry=safe)" };
-    // the address is compared, and the count of navigations: a reload of the same address is one (pre-review P13)
+    // the address is compared, and the count of navigations: a reload of the same address is one
     if (c.url !== page.url() || c.commits !== navs.get(page).commits) return { error: "element_no_longer_valid: page navigated since snapshot — re-run browser_snapshot (delivery=not_delivered, retry=safe)" };
     const want = c.elements[args.element_index];
     if (!want) return { error: `invalid_element_index: ${args.element_index} (snapshot has ${c.elements.length} elements) (delivery=not_delivered, retry=safe)` };
     const r = await clickByIndex(page, args.element_index, want, button);
     if (r.error) return { error: r.error };
-    return { text: `clicked element_index ${args.element_index} (${want.tag} "${want.name}") — delivery=delivered_unverified, retry=unsafe` };
+    return { text: `clicked element_index ${args.element_index} (${want.tag} "${want.name}")${await moved()} — delivery=delivered_unverified, retry=unsafe` };
   }
   if (args.selector) {
     try {
@@ -2554,7 +2786,7 @@ async function browserClick(args) {
     } catch (e) {
       return { error: `action_failed: click selector "${args.selector}" failed: ${shortErr(e)} (delivery=unknown, retry=unsafe)` };
     }
-    return { text: `clicked selector: ${args.selector} — delivery=delivered_unverified, retry=unsafe` };
+    return { text: `clicked selector: ${args.selector}${await moved()} — delivery=delivered_unverified, retry=unsafe` };
   }
   if (Array.isArray(args.xy)) {
     try {
@@ -2562,7 +2794,7 @@ async function browserClick(args) {
     } catch (e) {
       return { error: `action_failed: click @ ${args.xy} failed: ${shortErr(e)} (delivery=unknown, retry=unsafe)` };
     }
-    return { text: `clicked @ ${args.xy} — delivery=delivered_unverified, retry=unsafe` };
+    return { text: `clicked @ ${args.xy}${await moved()} — delivery=delivered_unverified, retry=unsafe` };
   }
   return { error: "selector, xy:[x,y], or element_index required (delivery=not_delivered, retry=safe)" };
 }
@@ -2571,13 +2803,16 @@ async function browserFill(args) {
   const s = getActiveSession(args.browser_id);
   if (!s || !args.selector) return { error: "no browser or selector (delivery=not_delivered, retry=safe)" };
   const { page } = s;
-  const val = String(args.value ?? "");
+  const val = String(args.value);
   try {
     await withTimeout(page.fill(args.selector, val, { timeout: 10000 }), 12000, "fill");
   } catch (e) {
     return { error: `action_failed: fill "${args.selector}" failed: ${shortErr(e)} (delivery=unknown, retry=unsafe)` };
   }
   const actual = await withTimeout(page.locator(args.selector).first().inputValue({ timeout: 2000 }), 2500, "inputValue").catch(() => null);
+  // a fill can make the page navigate (a search box that reloads as it is typed in): what is read back then
+  // may be a field of the next page, which says nothing about this fill
+  if (navigated(s)) return { text: `filled ${args.selector} — the page navigated after the fill (it shows ${showsNow(s)} now), so the field was not read back — delivery=delivered_unverified, retry=unsafe` };
   const delivery = actual === val ? "delivered_verified" : "delivered_unverified";
   return { text: `filled ${args.selector} — delivery=${delivery}, retry=unsafe` };
 }
@@ -2594,19 +2829,62 @@ async function browserPressKey(args) {
   return { text: `pressed ${args.key} — delivery=delivered_unverified, retry=unsafe` };
 }
 
-async function browserType(args) {
+async function browserType(args, live) {
   const s = getActiveSession(args.browser_id);
   if (!s || !args.text) return { error: "no browser or text (delivery=not_delivered, retry=safe)" };
   const { page } = s;
   // the budget covers the 20 ms/key typing time with margin (validateArgs caps text at 2000 chars), so an
   // ordinary type is never cut off with keystrokes still going out
   const budget = Math.max(10000, args.text.length * 30 + 5000);
+  // One character at a time, as keyboard.type does itself — so that typing can be stopped: a timeout here does
+  // not stop a keyboard.type that is under way, and the rest of the text would keep arriving after the error,
+  // into whatever has the focus by then.
+  const chars = [...args.text];
+  let sent = 0, stop = false, under = false, left = false, halted = null;
+  const typing = (async () => {
+    for (const ch of chars) {
+      if (stop) return;
+      // the client gave the call up (its Stop button): the rest of the text is not typed
+      if (live?.cancelled) return;
+      // a long text outlasts a navigation: once the tab shows a page noracu does not act on, the rest of the
+      // text is not typed into it
+      if (!tabAllowed(s.b, page)) { left = true; return; }
+      // the stop file is the person's switch: a long text does not go on being typed once the file is there
+      halted = stopFileBlocked();
+      if (halted) return;
+      under = true;
+      try {
+        if (ch.codePointAt(0) > 0x7f) {
+          // keyboard.type waits its delay and then inserts such a character; the wait is made here instead, so
+          // that a stop during it keeps the character from going out
+          await sleep(20);
+          if (stop || live?.cancelled) return;
+          halted = stopFileBlocked();   // the file may have come during the wait
+          if (halted) return;
+          await page.keyboard.insertText(ch);
+        } else await page.keyboard.type(ch, { delay: 20 });
+      } finally { under = false; }
+      sent++;
+    }
+  })();
   try {
-    await withTimeout(page.keyboard.type(args.text, { delay: 20 }), budget, "keyboard.type");
+    await withTimeout(typing, budget, "keyboard.type");
   } catch (e) {
-    return { error: `action_failed: type failed: ${shortErr(e)} (delivery=unknown, retry=unsafe)` };
+    const going = under;   // read before the loop is told to stop: a character was on its way when the time ran out
+    stop = true;
+    typing.catch(() => {});
+    const rest = chars.length - sent - (going ? 1 : 0);
+    return { error: `action_failed: type failed: ${shortErr(e)} — ${sent} of ${chars.length} character(s) had gone out${going ? "; one more was under way and may still arrive" : ""}${rest > 0 ? `; the other ${rest} are not sent` : ""} (delivery=unknown, retry=unsafe)` };
   }
-  return { text: `typed ${args.text.length} chars — delivery=delivered_unverified, retry=unsafe` };
+  if (left) return { error: `active_page_not_allowed: the tab went to a page noracu does not act on while the text was being typed (it shows ${showsNow(s)} now) — ${sent} of ${chars.length} character(s) had gone out before that and the rest are not sent ${sent ? "(delivery=unknown, retry=unsafe)" : "(delivery=not_delivered, retry=safe)"}` };
+  if (halted) {
+    if (!sent) return { error: halted };
+    // the reason as it is given (the file is there, or it could not be checked), without its "nothing was sent":
+    // part of the text did go out
+    const why = halted.split(/\s*[;—]?\s*nothing was sent/)[0].trim();
+    return { error: `${why} — this came up while the text was being typed: ${sent} of ${chars.length} character(s) had gone out before that and the rest are not sent (delivery=unknown, retry=unsafe)${/^user_stopped/.test(halted) ? "; remove the file to resume" : ""}` };
+  }
+  return { text: `typed ${chars.length} chars — delivery=delivered_unverified, retry=unsafe` };
 }
 
 async function browserScroll(args = {}) {
@@ -2643,16 +2921,20 @@ async function browserScroll(args = {}) {
       "scroll read"
     );
   } catch (e) {
-    return { error: `action_failed: scroll ${direction} failed: ${shortErr(e)} (delivery=unknown, retry=unsafe)` };
+    return { error: `action_failed: scroll ${direction} failed: ${shortErr(e)}${navigated(s) || ctxGone(e) ? " — the page navigated meanwhile" : ""} (delivery=unknown, retry=unsafe)` };
   }
+  const where = `scrolled ${direction} ${pages} page(s) at (${cx},${cy}): scrollX ${before.x} → ${after.x}, scrollY ${before.y} → ${after.y}`;
+  // the two positions are of two pages: a new page starts at the top, which says nothing about the wheel
+  if (navigated(s)) return { text: `${where} — the page navigated meanwhile (it shows ${showsNow(s)} now), so the positions are of two pages — delivery=delivered_unverified, retry=unsafe` };
   const moved = after.x !== before.x || after.y !== before.y;
-  if (!moved) {
-    return { text: `scrolled ${direction} ${pages} page(s) at (${cx},${cy}): scrollX ${before.x} → ${after.x}, scrollY ${before.y} → ${after.y} (did not move) — delivery=delivered_unverified, retry=unsafe` };
-  }
-  return { text: `scrolled ${direction} ${pages} page(s) at (${cx},${cy}): scrollX ${before.x} → ${after.x}, scrollY ${before.y} → ${after.y} — delivery=delivered_verified, retry=unsafe` };
+  if (!moved) return { text: `${where} (did not move) — delivery=delivered_unverified, retry=unsafe` };
+  // verified only when the page went the way that was asked: a page can move itself, also the other way
+  const went = dy > 0 ? after.y > before.y : dy < 0 ? after.y < before.y : dx > 0 ? after.x > before.x : dx < 0 ? after.x < before.x : false;
+  if (!went) return { text: `${where} (the page moved, but not ${direction}) — delivery=delivered_unverified, retry=unsafe` };
+  return { text: `${where} — delivery=delivered_verified, retry=unsafe` };
 }
 
-// review 0.2.6 #8: cut text says where it was cut
+// cut text says where it was cut
 function capText(t, max) {
   return t.length > max ? `${t.slice(0, max)}\n[truncated: showing ${max} of ${t.length} chars]` : t;
 }
@@ -2673,11 +2955,11 @@ async function browserRead(args = {}) {
 async function browserEvaluate(args) {
   // 安全：熔断开关——NORACU_DISABLE_EVAL=1 时禁用任意 JS 执行（优先于开启开关）
   if (process.env.NORACU_DISABLE_EVAL === "1") return { error: "browser_evaluate disabled by NORACU_DISABLE_EVAL=1 (delivery=not_delivered, retry=safe)" };
-  // next-steps R3 (2026-11-12): running any script in the page is opt-in — off unless NORACU_ENABLE_EVAL=1
+  // 2026-11-12: running any script in the page is opt-in — off unless NORACU_ENABLE_EVAL=1
   if (process.env.NORACU_ENABLE_EVAL !== "1") return { error: "eval_disabled: browser_evaluate is off by default — it runs any script in the page; set NORACU_ENABLE_EVAL=1 in the server's environment to turn it on (delivery=not_delivered, retry=safe)" };
   const s = getActiveSession(args.browser_id);
   if (!s || !args.js) return { error: "no browser or js (delivery=not_delivered, retry=safe)" };
-  // Andy 2026-11-13: in the person's own Chrome a script runs with every sign-in they have — never there
+  // in the person's own Chrome a script runs with every sign-in they have — never there
   if (s.b.chrome) return { error: "eval_disabled: browser_evaluate does not run in your own Chrome (browser_launch chrome:true) — a script there runs with every sign-in you have; use browser_read or browser_snapshot (delivery=not_delivered, retry=safe)" };
   const { page } = s;
   let r, failed = null;
@@ -2706,7 +2988,7 @@ let tabSeq = 0;
 const tabId = (p) => { if (!tabIds.has(p)) tabIds.set(p, `t${++tabSeq}`); return tabIds.get(p); };
 // in the person's own Chrome (chrome:true) only noracu's tabs count: the others are not listed, read or acted on
 // the person's tabs (NORACU_CHROME_TABS=all) count only while they show an http(s) page — never file://, whatever
-// NORACU_ALLOW_FILE_URL says, and never a browser page (pre-review P23)
+// NORACU_ALLOW_FILE_URL says, and never a browser page
 const personTabOk = (b, p) => b.allTabs && /^https?:\/\//.test(String(p.url() || ""));
 const openTabs = (b) => b.browser.pages().filter((p) => !p.isClosed() && isNonDevtoolsPage(p) && (!b.chrome || b.owned.has(p) || personTabOk(b, p)));
 // Which tab may be the active page — picked with select, taking over when the active tab goes, or still being
@@ -2714,15 +2996,15 @@ const openTabs = (b) => b.browser.pages().filter((p) => !p.isClosed() && isNonDe
 // on a local file, a browser page (chrome://) or a blob is listed only; the active page that comes to show one
 // is not read or acted on while it does. about:blank counts only in a tab noracu opened itself (browser_launch,
 // browser_tabs new), and only while that tab has loaded nothing else (freshBlank): a blank tab that a page
-// opened shares that page's origin and can read it — measured with a file:// page (pre-review P7). A session attached to an app (cdp_port) is that app's own pages, whatever
+// opened shares that page's origin and can read it — measured with a file:// page. A session attached to an app (cdp_port) is that app's own pages, whatever
 // they show: there the rule does not apply.
 // Tabs still on the blank page noracu opened them on (browser_launch's first tab, browser_tabs new). Once a tab
-// has loaded anything, a blank page it shows later is whatever page sent it there: measured (pre-review P9), a
+// has loaded anything, a blank page it shows later is whatever page sent it there: measured, a
 // blank page reached from a local file still loads other local files into frames — a screenshot shows them —
-// and keeps that file's window.name. A new tab left alone reports no main-frame navigation (measured again in
-// pre-review P13). Any navigation it does report ends its standing: a fragment put on the blank page, and also
+// and keeps that file's window.name. A new tab left alone reports no main-frame navigation (measured again).
+// Any navigation it does report ends its standing: a fragment put on the blank page, and also
 // one whose address is about:blank again — history.back() to a blank page that a local file had reached is
-// reported that way, and that page loads local files again (measured, P13).
+// reported that way, and that page loads local files again (measured).
 const freshBlank = new WeakSet();
 function watchFreshBlank(page) {
   if (String(page.url() || "") !== "about:blank") return;
@@ -2735,20 +3017,26 @@ function watchFreshBlank(page) {
   page.on("framenavigated", onNav);
 }
 const urlPasses = (b, p, url) => {
-  if (b.cdpBrowser && !b.chrome) return true;
-  // the person's own tabs (NORACU_CHROME_TABS=all): http(s) only, whatever NORACU_ALLOW_FILE_URL says (P24)
+  // a DevTools front end is not read or acted on in any session: keys typed into its console run as script
+  if (isDevtoolsUrl(url)) return false;
+  // an app attached over its DevTools port shows what it shows (file://, app://…); a page that has no address
+  // yet is not known to be one of the app's
+  if (b.cdpBrowser && !b.chrome) return url !== "";
+  // the person's own tabs (NORACU_CHROME_TABS=all): http(s) only, whatever NORACU_ALLOW_FILE_URL says
   if (b.chrome && !b.owned.has(p)) return Boolean(b.allTabs) && /^https?:\/\//.test(url);
   if (url === "about:blank") return freshBlank.has(p);
   return /^https?:\/\//.test(url) || (process.env.NORACU_ALLOW_FILE_URL === "1" && /^file:\/\//.test(url));
 };
 const tabAllowed = (b, p) => (!b.chrome || b.owned.has(p) || personTabOk(b, p)) && urlPasses(b, p, String(p.url() || ""));
+// a tab's address as a result names it: whole for a page the tools read, its first 60 characters otherwise
+const shownUrl = (b, p) => { const u = String(p.url() || ""); return tabAllowed(b, p) ? u : u.slice(0, 60); };
 // How many times a tab's main frame has committed a page the tools do not read, counted from the first call the
 // tab is the active page of. A content tool notes the count when it starts and compares when it is done: a tab
 // that went to such a page and came back while the tool worked may have answered from there, and the address
-// at the end does not show it (pre-review P11).
+// at the end does not show it.
 // commits: every navigation the main frame reported — another address, a fragment, a reload of the same address,
 // history.pushState. A snapshot, whose parts are read one after the other, is not returned when one happened
-// while it was taken, and an element_index is not used after one (pre-reviews P12, P13).
+// while it was taken, and an element_index is not used after one.
 const navs = new WeakMap();   // page → { strays, commits }
 function watchNavs(b, page) {
   let n = navs.get(page);
@@ -2765,10 +3053,10 @@ function watchNavs(b, page) {
 const NO_ACTIVE_PAGE = "no_active_page: none of the open tabs may be the active page — they show a local file, a browser page, a blob, or a blank page other than the one browser_launch or browser_tabs opened the tab on; open a tab with browser_tabs (action new) or select one on an http(s) page (delivery=not_delivered, retry=safe)";
 // The active page is open and shows what no tab may show to be the active page. With the url held to 60
 // characters the text stays under 400; it is thrown as a Refusal, which the dispatcher does not cut.
-const pageNote = (url) => (url.startsWith("chrome-error://") ? " (a load that failed)" : url === "about:blank" ? " (not the blank page noracu opened the tab on)" : "");
+const pageNote = (url) => (isDevtoolsUrl(url) ? " (DevTools — noracu does not read or act on it)" : url.startsWith("chrome-error://") ? " (a load that failed)" : url === "about:blank" ? " (not the blank page noracu opened the tab on)" : "");
 // What a read or a script returned is handed over only if the active page still passes once it is done: a
 // navigation can commit while a slow read runs, and a read that waits for a selector, or that starts while a
-// page is arriving, is answered by the new page (pre-review P10). Input tools are checked when the call
+// page is arriving, is answered by the new page. Input tools are checked when the call
 // starts only. s: what getActiveSession returned.
 function refusedSince(s, during, tail = " (delivery=not_delivered, retry=safe)") {
   const passes = tabAllowed(s.b, s.page);
@@ -2789,9 +3077,9 @@ function readFailed(s, e, onNav = null) {
 // what was read may be of the page before or of the one after. A snapshot, and a read of the whole page, are not
 // returned. A read that waits for a selector is: going on across the page's own move to the next page is what
 // "click, then read" relies on — its first line says that the page navigated, and gives both addresses
-// (pre-reviews P12, P13).
-// A read that a move to another document cuts short is rejected before that navigation is reported (measured,
-// pre-review P14: 23 of 24 page.evaluate reads racing a reload or a move to another address), so the count does
+//.
+// A read that a move to another document cuts short is rejected before that navigation is reported (measured:
+// 23 of 24 page.evaluate reads racing a reload or a move to another address), so the count does
 // not show it yet; Playwright's own message does ("Execution context was destroyed, most likely because of a
 // navigation"). e: the error a read ended with, when it did.
 const navigated = (s) => navs.get(s.page).commits !== s.commits;
@@ -2802,12 +3090,12 @@ const pageChanged = (s, what, lost, again, e = null) => (navigated(s) || (e && c
 const movedNote = (s) => {
   const n = navs.get(s.page).commits - s.commits;
   if (!n) return "";
-  // more than one navigation: the text may also be of a page the tab only passed through (pre-review P14)
+  // more than one navigation: the text may also be of a page the tab only passed through
   return `[the page navigated ${n === 1 ? "" : `${n} times `}while this was read: it showed ${s.url.slice(0, 80)} when the read began and shows ${showsNow(s)} now — the text may be of either${n === 1 ? "" : ", or of a page in between"}]\n`;
 };
 // A script's result and a screenshot name no page and are handed over when the page navigated, between pages the
 // tools read, while they were made: a script often navigates itself, and a refusal here would leave nothing to see
-// of a page that keeps changing its address. They say that it happened (pre-review P15).
+// of a page that keeps changing its address. They say that it happened.
 const navNote = (s, during) => {
   const n = navs.get(s.page).commits - s.commits;
   return n ? `the page navigated ${n === 1 ? "" : `${n} times `}while ${during}: it showed ${s.url.slice(0, 80)} when the call began and shows ${showsNow(s)} now${n === 1 ? "" : ", by way of at least one page in between"}` : "";
@@ -2820,7 +3108,7 @@ const activePageRefused = (p) => {
 // The tab that takes over when the active page is gone: the first open one that may be the active page, never
 // one select would refuse — closing the active tab is not a way around select. None: there is no active page.
 function nextActiveTab(b) {
-  if (b.cdpBrowser && !b.chrome) { const open = b.browser.pages().filter((p) => !p.isClosed()); return open.find(isNonDevtoolsPage) || open[0] || null; }
+  if (b.cdpBrowser && !b.chrome) { const open = b.browser.pages().filter((p) => !p.isClosed()); return open.find(isNonDevtoolsPage) || null; }
   // in the person's Chrome only one of noracu's tabs takes over: the person's become the active page by select alone
   return openTabs(b).find((p) => (!b.chrome || b.owned.has(p)) && tabAllowed(b, p)) || null;
 }
@@ -2828,14 +3116,20 @@ function nextActiveTab(b) {
 // Returns how a result names it.
 function settleActiveTab(id, b) {
   if (!b.activePage || b.activePage.isClosed()) { b.activePage = nextActiveTab(b); browserElCache.delete(id); }
-  return b.activePage ? `tab ${tabId(b.activePage)} (${b.activePage.url()})` : "none";
+  return b.activePage ? `tab ${tabId(b.activePage)} (${shownUrl(b, b.activePage)})` : "none";
 }
 async function describeTabs(b) {
   const out = [];
   for (const p of openTabs(b)) {
     // null: the page did not answer in 3 s (busy or stuck) — not the same as a page that has no title
-    const title = await withTimeout(p.title(), 3000, "page.title").then((t) => String(t).slice(0, 120), () => null);
-    out.push({ tab_id: tabId(p), url: p.url(), title, active: p === b.activePage, opened_by_browser_tabs: ownTabs.has(p), ...(b.chrome ? { noracu_tab: b.owned.has(p) } : {}) });
+    // a tab on a page the tools do not read: its title is page content and is not asked for, and of its address
+    // only the start is given, as in the refusals — enough to tell the tab apart, select another or close it
+    let reads = tabAllowed(b, p);
+    let title = reads ? await withTimeout(p.title(), 3000, "page.title").then((t) => String(t).slice(0, 120), () => null) : null;
+    // the title is a round trip to the page: a tab that left for a page the tools do not read meanwhile may have
+    // answered with that page's title
+    if (reads && !tabAllowed(b, p)) { reads = false; title = null; }
+    out.push({ tab_id: tabId(p), url: shownUrl(b, p), title, ...(reads ? {} : { not_read: true }), active: p === b.activePage, opened_by_browser_tabs: ownTabs.has(p), ...(b.chrome ? { noracu_tab: b.owned.has(p) } : {}) });
   }
   return out;
 }
@@ -2856,7 +3150,7 @@ async function browserTabs(args = {}) {
     b.activePage = page;
     browserElCache.delete(id);
     const stray = (b.strayTabs || 0) > strayBefore ? " (a first try may have left a blank tab in your Chrome that noracu could not tell apart; it was not closed)" : "";
-    // review S4A-s3-2: the tab's own address, read now; and with a stray tab about, which tab is noracu's is not certain
+    // the tab's own address, read now; and with a stray tab about, which tab is noracu's is not certain
     const how = stray ? "delivery=delivered_unverified, retry=unsafe" : "delivery=delivered_verified, retry=unsafe";
     if (!args.url) return { text: `opened tab ${tabId(page)} (${String(page.url()).slice(0, 80) || "about:blank"})${stray} — it is the active page now; ${how}` };
     try { await withTimeout(page.goto(args.url, { timeout: 30000, waitUntil: "domcontentloaded" }), 32000, "navigate"); }
@@ -2865,7 +3159,7 @@ async function browserTabs(args = {}) {
       if (page.isClosed()) return { error: `navigate_failed: tab ${tabId(page)} was opened and closed again before the page loaded: ${shortErr(e)} — the active page is ${settleActiveTab(id, b)}${stray} (delivery=unknown, retry=unsafe)` };
       return { error: `navigate_failed: tab ${tabId(page)} was opened and is the active page, but the page did not load: ${shortErr(e)}${stray} (delivery=unknown, retry=unsafe)` };
     }
-    // review S4A-s3-reviewer-2: the page can close itself or go somewhere the other tools refuse while it loads
+    // the page can close itself or go somewhere the other tools refuse while it loads
     if (page.isClosed()) return { error: `navigate_failed: tab ${tabId(page)} closed itself while loading ${String(args.url).slice(0, 80)} — the active page is ${settleActiveTab(id, b)}${stray} (delivery=unknown, retry=unsafe)` };
     if (!tabAllowed(b, page)) return { error: `active_page_not_allowed: tab ${tabId(page)} was opened and asked for ${String(args.url).slice(0, 80)}, but it shows ${String(page.url()).slice(0, 80)} now — it is the active page and the other browser tools refuse it; use browser_navigate on it, or browser_tabs to select another${stray} (delivery=delivered_unverified, retry=unsafe)` };
     return { text: `opened tab ${tabId(page)}: ${page.url()}${stray} — it is the active page now; ${how}` };
@@ -2890,7 +3184,7 @@ async function browserTabs(args = {}) {
   const now = settleActiveTab(id, b);
   if (!page.isClosed()) return { error: `action_failed: could not close tab ${args.tab_id}: ${shortErr(failed || "the tab is still open")} — the active page is ${now} (delivery=unknown, retry=unsafe)` };
   // closed, but close() did not answer: the person or the page may have closed it — it is gone, noracu's close is not
-  // confirmed as the cause (review S4B-s3 / S4A-s3-3)
+  // confirmed as the cause
   if (failed) return { text: `tab ${args.tab_id} (${url}) is closed, but noracu's close did not answer (${shortErr(failed)}), so what closed it is not confirmed — the active page is ${now}; delivery=delivered_unverified, retry=safe` };
   return { text: `closed tab ${args.tab_id} (${url}) — the active page is ${now}; delivery=delivered_verified, retry=unsafe` };
 }
@@ -2900,7 +3194,7 @@ async function browserClose(args = {}) {
   const lostMsg = (ids) => ({ error: `chrome_disconnected: ${ids.join(", ")} ${ids.length > 1 ? "are" : "is"} no longer connected to your Chrome (the connection ended) — noracu could not close its tabs there, they may still be open; noracu did not quit Chrome (delivery=not_delivered, retry=safe)` });
   if (!args.browser_id && browsers.size === 0) {
     // nothing open: a session in the person's Chrome whose connection was lost is named, never hidden behind a later
-    // clean close (pre-review P25)
+    // clean close
     const lostIds = [...endedChrome].filter(([, v]) => v === "lost").map(([k]) => k);
     if (lostIds.length) return lostMsg(lostIds);
     const last = [...endedChrome.keys()].pop();
@@ -2916,7 +3210,7 @@ async function browserClose(args = {}) {
   const port = b.cdp_port;
   if (b.chrome) return closeChromeSession(id, b);
   // the standalone browser, or a DevTools-port attach (the app keeps running): said done only once it is seen —
-  // the context's close event, or the connection gone (pre-review P24)
+  // the context's close event, or the connection gone
   let seen = isCdp ? !b.cdpBrowser.isConnected() : false;
   const ev = new Promise((r) => (isCdp ? b.cdpBrowser : b.browser).once(isCdp ? "disconnected" : "close", () => { seen = true; r(); }));
   await withTimeout(isCdp ? b.cdpBrowser.close() : b.browser.close(), 10000, "close").catch(() => {});
@@ -2930,7 +3224,7 @@ async function browserClose(args = {}) {
 
 // browser_close in the person's Chrome: noracu closes its own tabs and then disconnects; it never quits Chrome. The
 // session stays listed until the disconnect is seen, so no second attach starts meanwhile; while one of noracu's
-// tabs is still open it does not disconnect, so a later browser_close can close it (pre-reviews P22, P23)
+// tabs is still open it does not disconnect, so a later browser_close can close it
 async function closeChromeSession(id, b) {
   // the connection ended (Chrome quit, the switch turned off): which tabs closed is not known — say so
   const lost = (when) => {
@@ -2944,7 +3238,7 @@ async function closeChromeSession(id, b) {
   const tabs = () => b.browser.pages().filter((p) => !p.isClosed() && b.owned.has(p));
   const mine = tabs();
   // a tab counts as closed by noracu only when its close() answered; one that went while noracu was closing it
-  // (the person, the page) is named apart (review S4A-s3-3)
+  // (the person, the page) is named apart
   let closed = 0, gone = 0;
   for (const p of mine) {
     const ok = await withTimeout(p.close(), 5000, "page.close").then(() => true, () => false);
@@ -3005,7 +3299,7 @@ function phoneSwipe(args) {
 // the imctl gesture; disabled / not-running return mirror_not_live, and unknown/timeout returns menu_unknown
 // without retrying via imctl (which could send the gesture a second time).
 async function mirrorMenu(command, timeoutMs = 15000) {
-  // by bundle id: the app's display name is localized on non-English macOS (R18)
+  // by bundle id: the app's display name is localized on non-English macOS
   const r = await axEngine({ op: "menu", app: "com.apple.ScreenContinuity", command, require_enabled: true }, timeoutMs);
   if (r.ok === true && r.delivery !== "unknown") {
     return { ok: true, delivery: r.delivery || "delivered_unverified" };
@@ -3041,7 +3335,7 @@ function phoneScroll(args = {}) {
   if (args.expect) a.push(`--expect=${args.expect}`);
   return imctl(...a);
 }
-function phoneType(args) {
+function phoneType(args, live) {
   if (!args.text) return { error: "text required" };
   // Options first, then `--`, then the free text: the text is a positional and
   // may start with "-" (argparse would otherwise treat it as an option).
@@ -3051,7 +3345,7 @@ function phoneType(args) {
   if (args.replace) a.push("--replace");
   if (args.expect) a.push(`--expect=${args.expect}`);
   a.push("--", "-");
-  return imctlIn(args.text, ...a);
+  return imctlRun(a, args.text, live);  // the client's Stop ends imctl (see spawnTimed)
 }
 function phoneKey(args) {
   if (!args.key) return { error: "key required (return/delete/up/down/left/right)" };
@@ -3096,9 +3390,9 @@ async function phoneScreenshot() {
 // reads as "in front" under every app (measured: state 4 with Settings in front, simulator, iOS 26.5) — a rule
 // that allows SpringBoard would let a tap reach an app the rules do not allow. So while an approval file or a
 // NORACU_DENY_APPS of the user's own is in force, no input that names it is sent — not even one tap on a button
-// of a system prompt, which 0.3.0's first cut let through (next-steps R4, 2026-11-12). On the Home Screen a tap
+// of a system prompt, which 0.3.0's first cut let through (2026-11-12). On the Home Screen a tap
 // on an icon would open an app no rule was asked about, which is what ios_launch is for; text goes wherever the
-// keyboard focus is, which cannot be read (pre-review P1 to P3, both reviewers). With no rules, such input is
+// keyboard focus is, which cannot be read. With no rules, such input is
 // sent as asked. The runner still understands springboard_only (docs/ios-runner-protocol.md); noracu no longer
 // sends it.
 const iosRulesInForce = () => process.env.NORACU_APPROVAL_FILE !== undefined || !/^(|none)$/i.test((process.env.NORACU_DENY_APPS || "").trim());
@@ -3113,6 +3407,7 @@ if (PHONE_BACKEND === "xcuitest") {
   iosSession = createIosSession({
     approve: iosApprove,
     springboardDenied: iosRulesInForce,
+    stopCheck: stopFileBlocked,
     // a process group of its own, known to the exit hooks: a server that goes away takes xcodebuild with it
     spawnImpl: (file, argv, opts) => { const c = spawn(file, argv, { ...opts, detached: true }); iosChild = c; c.once("close", () => { if (iosChild === c) iosChild = null; }); return c; },
   });
@@ -3148,8 +3443,8 @@ function inputSchemaFromArgs(args, required) {
 const TOOL_DEFS = [
   // Mac computer-use
   { name: "mac_screenshot", desc: "Capture the Mac screen as PNG base64: the main display, display (index from mac_windows), or one window by window_id (CGWindowID from mac_windows; works when covered). A display capture can be cropped to region {x,y,w,h} in screen points as mac_windows reports them (the main display's top-left is 0,0; a display to its left has negative x), not relative to the display; with display given, a region not inside that display is refused. Returns {scale, logical_size, screen, screenshot_id}; click coordinates are in points (pixels / scale). screenshot_id (valid 30 s) lets mac_click take x,y in screenshot pixels: the window's geometry is re-checked first and a window that moved, resized or was rebuilt since the capture is refused as stale.", args: { region: "object?", window_id: "integer?", display: "integer?" }, fn: macScreenshot },
-  { name: "mac_ax_state", desc: "Read an app's accessibility tree through the macOS Accessibility API (default: the frontmost app's focused window). Returns {app, snapshot_id, window, complete, elements:[{i, d, role, title, value, states, actions, frame}]}; i is the element_index for mac_click, mac_get, mac_set_value, mac_type, mac_scroll and mac_drag — unique across snapshots (an index never names an element of a later snapshot) and valid 30 s; an action first re-identifies the element and returns element_no_longer_valid if it is gone, moved or replaced. Options: interactive (only actionable elements), compact (default true: skip empty layout wrappers), skeleton (shallow map with children_count) then root (an element_index to drill into; adds new indexes to the same snapshot), surface (window|menubar|menu|sheet|alert|dialog|popover|focused|app), window (index or title) or window_id (from mac_windows), depth (logical depth, default 12, 1-40), max_nodes (default 400), web_accessibility (default true, false under NORACU_READ_ONLY=1: sets AXManualAccessibility on Electron/Chromium apps to expose web content, never AXEnhancedUserInterface which alters window behaviour; the result's web_accessibility is enabled / already_on, exposed when the app refused but its pages are in the tree anyway, or unsupported with a web_accessibility_hint — Google Chrome refuses it). window_identity unverifiable marks a window without a window ID: element_index actions in it are refused. ax_empty when the app has no readable window.", args: { app: "string?", interactive: "boolean?", compact: "boolean?", skeleton: "boolean?", root: "integer?", snapshot_id: "string?", surface: "string?", window: "string?", window_id: "integer?", depth: "number?", max_nodes: "integer?", web_accessibility: "boolean?" }, fn: macAxState },
-  { name: "mac_click", desc: "Click a UI element by element_index (from mac_ax_state / mac_find; valid 30 s) or at raw {x,y}. With element_index the element is re-identified first (element_no_longer_valid if gone or changed). mechanism auto (default): its own accessibility action (press / show menu / select — no pointer, no focus change, works in background windows) when it has one, else a physical click that is sent only if a hit test shows the point reaches the element (occluded otherwise); semantic / physical force one path. count 2-3 and button middle are physical. A physical click is re-checked right before it is sent, and is delivered_verified only if the element is still there, changed, and its window is still on top at the point. A raw {x,y} click is sent only when the window on top at that point belongs to app (default: the frontmost app; the menu bar counts as the frontmost app's) — otherwise occluded names what covers it and nothing is sent; force:true skips that check. Results state delivery (delivered_verified / delivered_unverified / not_delivered / unknown) and whether a retry is safe, plus newly opened sheets, dialogs or menus. Under mechanism auto, a physical click on a native app is posted straight to the app's pid (route: bgpost — no pointer move, no frontmost needed); web-engine apps (Chromium/Electron) use the real pointer (route: cliclick). A bgpost click is never re-sent another way: no visible change is reported as delivered_unverified with a note, a timeout as delivery=unknown. mechanism physical always uses the real pointer. screenshot_id + x,y names pixels of a mac_screenshot window capture (relative to the window's top-left corner; the window's position and size are re-checked first and a window that moved, resized or was rebuilt is refused as stale; the screenshot's window's app is the target).", args: { element_index: "integer?", snapshot_id: "string?", x: "number?", y: "number?", screenshot_id: "string?", app: "string?", force: "boolean?", button: "string?", count: "number?", mechanism: "string?", timeout_ms: "integer?" }, fn: macClick },
+  { name: "mac_ax_state", desc: "Read an app's accessibility tree (default: the frontmost app's focused window). app: a name, a bundle id, a .app path or pid:<n> — ambiguous_app when several running apps match; pick one by pid:<n> from its list. Returns {app, snapshot_id, window, complete, elements:[{i, d, role, title, value, states, actions, frame}]}; i is the element_index for mac_click, mac_get, mac_set_value, mac_type, mac_scroll and mac_drag — unique across snapshots, valid 30 s; an action re-identifies the element first (element_no_longer_valid if gone, moved or replaced). Options: interactive (actionable elements only), compact (default true: skip empty layout wrappers), skeleton (a shallow map with children_count), then root (an element_index to drill into, given alone: not with app, window, window_id or surface; adds indexes to the same snapshot), surface (window|menubar|menu|sheet|alert|dialog|popover|focused|app), window (index or title) or window_id (from mac_windows), depth (default 12, 1-40), max_nodes (default 400), web_accessibility (default true; false under NORACU_READ_ONLY=1): sets AXManualAccessibility on Electron/Chromium apps, never AXEnhancedUserInterface; the result says enabled, already_on, exposed (refused, but the pages are in the tree) or unsupported with a web_accessibility_hint (Google Chrome refuses it) — unknown, with the hint, when the window was too large to look through. window_identity unverifiable marks a window without a window ID: element_index actions in it are refused. ax_empty when the app has no readable window.", args: { app: "string?", interactive: "boolean?", compact: "boolean?", skeleton: "boolean?", root: "integer?", snapshot_id: "string?", surface: "string?", window: "string?", window_id: "integer?", depth: "integer?", max_nodes: "integer?", web_accessibility: "boolean?" }, fn: macAxState },
+  { name: "mac_click", desc: "Click a UI element by element_index (from mac_ax_state / mac_find; valid 30 s; snapshot_id only with it: the snapshot the index came from) or at raw {x,y}. The element is re-identified first (element_no_longer_valid if gone or changed). mechanism auto (default): the element's own accessibility action (press / show menu / select — no pointer, works in background windows) when it has one, else a physical click, sent only if a hit test shows the point reaches the element (occluded otherwise); semantic / physical force one path. count 2-3 and button middle are physical. Under auto a physical click on a native app is posted to its pid (route bgpost: no pointer move; never re-sent another way — no visible change is delivered_unverified with a note, a timeout delivery=unknown); web-engine apps (Chromium/Electron) and mechanism physical use the real pointer (route cliclick), re-checked right before it is sent. A physical click is delivered_verified only if the element is still there, changed, and its window is still on top at the point. A raw {x,y} click is sent only when the window on top at that point belongs to app (default: the frontmost app; the menu bar counts as its) — otherwise occluded names what covers it; force:true skips that check. screenshot_id + x,y: pixels of a mac_screenshot window capture, relative to its top-left corner; a window that moved, resized or was rebuilt since is refused as stale. Results state delivery (delivered_verified / delivered_unverified / not_delivered / unknown) and whether a retry is safe, plus newly opened sheets, dialogs or menus.", args: { element_index: "integer?", snapshot_id: "string?", x: "number?", y: "number?", screenshot_id: "string?", app: "string?", force: "boolean?", button: "string?", count: "number?", mechanism: "string?", timeout_ms: "integer?" }, fn: macClick },
   { name: "mac_drag", desc: "Drag from one UI element to another (sliders, selections, list items) with the physical pointer; from_index/to_index come from mac_ax_state or mac_find (valid 30 s). Both ends are re-identified and hit-tested first (either one gone or covered: nothing sent). hold_ms (0-2000) presses and holds after mouse-down before the move starts (timeline editors use it to tell clip-move from marquee selection); step_ms (1-500) moves in steps of about 20 points with that many ms between them. A drag whose holds and steps add up to more than 10 s is refused; a drag that fails midway gets a mouse-up so the button is not left held. Check the drop target afterwards.", args: { from_index: "integer", to_index: "integer", snapshot_id: "string?", hold_ms: "integer?", step_ms: "integer?" }, required: ["from_index", "to_index"], fn: macDrag },
   { name: "mac_scroll", desc: "Scroll up/down/left/right by a number of pages (default 1). Without element_index: the center of the frontmost app's front window (the pointer moves there), only when that app's window is on top at that point (else occluded, nothing scrolled). With element_index: a scroll area is scrolled at its own center (hit-tested; reports when the position did not change), any other element is scrolled into view (AXScrollToVisible).", args: { direction: "string?", pages: "number?", element_index: "integer?", snapshot_id: "string?" }, fn: macScroll },
   { name: "mac_key", desc: "Press a key or modifier chord, e.g. 'return', 'esc', 'cmd-c', 'cmd-shift-v', 'arrow-up'. Named keys (return, esc, tab, space, delete, arrows, home/end, page keys, F1-F16), with or without modifiers, go out as HID key events with each modifier pressed and released around the key; a chord with cmd or ctrl on a character key (cmd-c, cmd-shift-v) goes out the same way on the key that types that character in the current keyboard layout (no such key: not_delivered, keyboard_layout); a plain character or a shift/alt-only chord is typed through cliclick. Pass app to refuse input unless that app is frontmost (focus guard). A named key for a native frontmost app is posted straight to its pid (route: bgpost — no focus theft); web-engine apps and layout-dependent chords use the engine HID path. Chords that quit, log out, lock, force-quit, delete immediately or empty the Trash (cmd-q, alt-cmd-q, cmd-shift-q, cmd-alt-esc, ctrl-cmd-q, cmd-alt-delete, cmd-shift-delete…) are refused unless force:true.", args: { key: "string", app: "string?", force: "boolean?" }, fn: macKey },
@@ -3172,14 +3467,14 @@ const TOOL_DEFS = [
   { name: "browser_navigate", desc: "Navigate the active page to an http(s) URL (file:// is disabled unless NORACU_ALLOW_FILE_URL=1). Reports the final URL, HTTP status (or \"no response\" for same-document navigations), title, and delivery/retry.", args: { url: "string" }, fn: browserNavigate },
   { name: "browser_snapshot", desc: "Return the active page's ARIA accessibility snapshot (about 14000 characters with the list; a longer snapshot is cut and marked) plus up to 100 indexed interactive elements (reporting truncation and omitted count beyond 100, or that the list could not be read); indexes feed browser_click. When the page navigates while the snapshot is being taken it returns page_changed and nothing else (ask again); an element_index is not used after the page navigated. The active page stays the tab noracu is driving: a tab the page opens itself (window.open, target=_blank) is never switched to; another tab becomes active only after the active one closes.", args: { browser_id: "string?" }, fn: browserSnapshot },
   { name: "browser_screenshot", desc: "Screenshot the active page with optional fullPage, format png|jpeg, quality (1-100, jpeg) and clip {x,y,width,height} (uses scale:\"css\" when attached over CDP); returns the image plus DPR/viewport metadata (with a navigated note when the page navigated while the picture was taken).", args: { fullPage: "boolean?", format: "string?", quality: "number?", clip: "object?" }, fn: browserScreenshot },
-  { name: "browser_click", desc: "Click an element on the active page, preferring element_index from the latest browser_snapshot of that page (valid 30 s; re-checks page, URL, tag, name, href and position, returning element_no_longer_valid when stale). Uses real Playwright pointer input with actionability checks (returns occluded or not_actionable when covered or disabled — never falls back to synthetic JS .click()). selector is a fallback; xy pixel coordinates are not recommended. Reports delivery and retry.", args: { element_index: "integer?", selector: "string?", xy: "array?", button: "string?" }, fn: browserClick },
-  { name: "browser_fill", desc: "Fill an input field matched by selector; fill replaces the whole value (browser_type appends keystrokes). Reports delivery and retry.", args: { selector: "string", value: "string?" }, fn: browserFill },
+  { name: "browser_click", desc: "Click an element on the active page. Give exactly one of element_index (from the latest browser_snapshot of that page; valid 30 s; page, URL, tag, name, href and position are re-checked, element_no_longer_valid when stale), selector (a fallback) or xy (pixel coordinates; not recommended). Real Playwright pointer input with actionability checks: occluded or not_actionable when covered or disabled — never a synthetic JS .click(). Reports delivery and retry.", args: { element_index: "integer?", selector: "string?", xy: "array?", button: "string?" }, fn: browserClick },
+  { name: "browser_fill", desc: "Fill an input field matched by selector with value; fill replaces the whole value — pass \"\" to clear the field (browser_type appends keystrokes). Reports delivery and retry.", args: { selector: "string", value: "string" }, fn: browserFill },
   { name: "browser_press_key", desc: "Press a key or chord, e.g. 'Enter' or 'Control+A'. Reports delivery and retry.", args: { key: "string" }, fn: browserPressKey },
   { name: "browser_type", desc: "Type up to 2000 characters via the keyboard into the focused element; type appends keystrokes (browser_fill replaces the whole value and suits longer text). Reports delivery and retry.", args: { text: "string" }, fn: browserType },
   { name: "browser_scroll", desc: "Scroll the active page up, down, left, or right by a number of pages (default: down, 1 page) via mouse wheel at the viewport center; reports the scrollX/scrollY change (or \"did not move\") plus delivery and retry.", args: { direction: "string?", pages: "number?" }, fn: browserScroll },
   { name: "browser_read", desc: "Read the active page's visible text (up to 12000 characters; 8000 with a selector; longer text is cut and marked), optionally scoped to a selector. When the page navigated while it was read: without a selector it returns page_changed (ask again); with one — a read that waits for a selector goes on across the page's own move to the next page — the first line of the result says so and gives both addresses.", args: { selector: "string?" }, fn: browserRead },
   { name: "browser_evaluate", desc: "Evaluate JavaScript in the active page and return the result plus delivery and retry. Off by default: runs only when the server was started with NORACU_ENABLE_EVAL=1 (eval_disabled otherwise), and never when NORACU_DISABLE_EVAL=1 or in your own Chrome (browser_launch chrome:true). When the page navigated while the script ran, a line after the result says so.", args: { js: "string" }, fn: browserEvaluate },
-  { name: "browser_tabs", desc: "List, open, select or close the tabs of the browser session. action list (the default) returns each tab's tab_id, url, title (null when the page did not answer in 3 s), whether it is the active page, and whether browser_tabs opened it. new opens a tab — with url (http(s); file:// needs NORACU_ALLOW_FILE_URL=1) it goes there — and makes it the active page. select makes tab_id the active page — only a tab on an http(s) page, or one still on the blank page that browser_launch or browser_tabs opened it on (file:// with NORACU_ALLOW_FILE_URL=1; tab_not_selectable otherwise): the other browser_* tools act on the active page only, and a tab the page itself opens (a link with target=_blank, window.open) is listed but never followed on its own. close closes tab_id only when browser_tabs opened it (tab_not_owned otherwise, nothing closed) and never the last open tab. After new, select, or a close of the active tab, element_index values from an earlier snapshot no longer apply; when the active tab goes, the first open tab that select would take is the active page, and when there is none the other browser_* tools return no_active_page until browser_tabs opens or selects one. When the active tab itself comes to show a page select would refuse (a blob the page made, a load that failed, a blank page after it has loaded something), it stays the active page and the other browser_* tools return active_page_not_allowed — except browser_navigate, which can take it to an http(s) page. new, select and close report delivery and retry.", args: { action: "string?", tab_id: "string?", url: "string?", browser_id: "string?" }, fn: browserTabs },
+  { name: "browser_tabs", desc: "List, open, select or close the tabs of the browser session. list (the default): each tab's tab_id, url, title (null when the page did not answer in 3 s; a tab on a page the tools do not read has not_read:true, no title and the start of its address), whether it is the active page and whether browser_tabs opened it. new: opens a tab (url: http(s); file:// needs NORACU_ALLOW_FILE_URL=1) and makes it the active page. select: makes tab_id the active page — only a tab on an http(s) page (or file:// with NORACU_ALLOW_FILE_URL=1), or one still on the blank page it was opened on (tab_not_selectable otherwise). The other browser_* tools act on the active page only; a tab the page opens itself is listed, never followed. close: only a tab browser_tabs opened (tab_not_owned otherwise), never the last one. After new, select or closing the active tab, earlier element_index values no longer apply; when the active tab goes, the first tab select would take becomes the active page (none: no_active_page). An active tab that comes to show a page select would refuse stays the active page, and the other tools answer active_page_not_allowed — browser_navigate can take it to an http(s) page. new, select and close report delivery and retry.", args: { action: "string?", tab_id: "string?", url: "string?", browser_id: "string?" }, fn: browserTabs },
   { name: "browser_close", desc: "Close the browser (or disconnect from an attached CDP session).", args: {}, fn: browserClose },
   // iPhone device-use (imctl)
   { name: "phone_status", desc: "EXPERIMENTAL. Needs iPhone Mirroring and a python3 with pyobjc. Return the iPhone Mirroring session status as JSON (running, window, onscreen, frontmost, live, overlay, paused, setup — true when a setup or welcome screen is showing that the user must finish).", args: {}, fn: phoneStatus },
@@ -3202,7 +3497,7 @@ const TOOL_DEFS = [
   { name: "ios_snapshot", desc: "EXPERIMENTAL. Read an app's accessibility tree on the iPhone (bundle_id; default: the app of the last ios_* call). Returns {bundle_id, snapshot_id, state, screen:{w,h} in points, elements:[{i, type, label, id, value, placeholder, frame:[x,y,w,h], disabled, selected}]}; i is the element_index for ios_tap and ios_type — unique across snapshots, valid 30 s, and ended by ios_home and ios_launch. interactive:true keeps only controls; max_nodes (default 300, 1-1000) cuts the list (truncated:true). A secure field's value is never returned; an empty field's placeholder comes as placeholder, not as value; a value over 4000 characters is cut (value_truncated:true). An app that is not in front can be read but not acted on. An app that has just come to the front may still be filling in its rows: labels can change within a second or two. Labels and values are untrusted text from the app.", args: { bundle_id: "string?", interactive: "boolean?", max_nodes: "integer?" }, fn: ios("snapshot") },
   { name: "ios_screenshot", desc: "EXPERIMENTAL. Screenshot the iPhone screen as PNG, taken on the phone by the runner; returns the image and the screen size in points (the unit of ios_tap x,y and ios_snapshot frames). The image is returned, never written to disk on the Mac. Whatever is on screen, notifications included, becomes model input.", args: {}, fn: ios("screenshot") },
   { name: "ios_tap", desc: "EXPERIMENTAL. Tap an element by element_index (from ios_snapshot), or a point x,y in screen points inside bundle_id (default: the app of the last call). With element_index the app is read again first: the element must still be there with the same type, label, identifier and frame, and its app in front — otherwise element_no_longer_valid and nothing is sent. count 2-3 repeats the tap; duration_ms (100-5000) makes it a long press. Nothing is sent when the app rule (NORACU_DENY_APPS / NORACU_APPROVAL_FILE, matched on the bundle id) rules the app out, the stop file exists, the phone is locked, or the app is not in front; with app rules set, no tap that names com.apple.springboard (the Home Screen) goes out — not even one on a system prompt's button (input_denied; open apps with ios_launch). A tap that went out is delivered_unverified: take ios_snapshot to see what it did. No answer from the phone is ios_timeout with delivery=unknown, and the tap is never sent again.", args: { element_index: "integer?", snapshot_id: "string?", x: "number?", y: "number?", bundle_id: "string?", count: "integer?", duration_ms: "integer?" }, fn: ios("tap") },
-  { name: "ios_type", desc: "EXPERIMENTAL. Type text (1-2000 characters) as keyboard input on the phone — no clipboard is involved. With element_index the field is re-checked and tapped first and the keyboard is waited for; without it the text goes to whatever holds the keyboard in bundle_id (default: the app of the last call; no_keyboard, nothing sent, when none is up). delivered_verified only when the field that took the text — the one tapped, or the only one whose value changed — afterwards holds its old value with the text put in at one place; type_not_confirmed when it does not (autocorrection or completion changed it, the field hides its value, part of the text was lost, or the text went elsewhere) — read the field before typing again. With app rules set, text that names com.apple.springboard is not sent (input_denied). Text shorter than 4 characters, a secure field, text that contains a return, and text typed while the app's fields could not be read, are not read back (delivered_unverified). The result never repeats the text.", args: { text: "string", element_index: "integer?", snapshot_id: "string?", bundle_id: "string?" }, fn: ios("type") },
+  { name: "ios_type", desc: "EXPERIMENTAL. Type text (1-2000 characters) as keyboard input on the phone — no clipboard is involved. With element_index — of a text field, a secure field, a search field or a text view; anything else is refused (not_a_text_field) and nothing is tapped — the field is re-checked and tapped first and the keyboard is waited for; without it the text goes to whatever holds the keyboard in bundle_id (default: the app of the last call; no_keyboard, nothing sent, when none is up). delivered_verified only when the field that took the text — the one tapped, or the only one whose value changed — afterwards holds its old value with the text put in at one place; type_not_confirmed when it does not (autocorrection or completion changed it, the field hides its value, part of the text was lost, or the text went elsewhere) — read the field before typing again. With app rules set, text that names com.apple.springboard is not sent (input_denied). Text shorter than 4 characters, a secure field, text that contains a return, and text typed while the app's fields could not be read, are not read back (delivered_unverified). The result never repeats the text.", args: { text: "string", element_index: "integer?", snapshot_id: "string?", bundle_id: "string?" }, fn: ios("type") },
   { name: "ios_key", desc: "EXPERIMENTAL. Press return or delete (count 1-50) on the phone's keyboard in bundle_id (default: the app of the last call); no_keyboard, nothing sent, when no keyboard is up. With app rules set, keys that name com.apple.springboard are not sent (input_denied). Reports delivery and retry.", args: { key: "string", count: "integer?", bundle_id: "string?" }, fn: ios("key") },
   { name: "ios_swipe", desc: "EXPERIMENTAL. Drag from [x,y] to [x,y] in screen points inside bundle_id (default: the app of the last call), to scroll a list or move something: hold_ms (0-2000, default 50) is the press before the move — a long hold picks an item up; end_hold_ms (0-2000, default 300) is the pause before lifting; velocity slow (default), default or fast. A list usually moves a little less than the finger. With app rules set, a swipe that names com.apple.springboard is not sent (input_denied). Reports delivery and retry; take ios_snapshot to see the result.", args: { from: "array", to: "array", bundle_id: "string?", hold_ms: "integer?", end_hold_ms: "integer?", velocity: "string?" }, fn: ios("swipe") },
   { name: "ios_home", desc: "EXPERIMENTAL. Press the Home button (go to the Home Screen). Ends every earlier element_index; the Home Screen (com.apple.springboard) becomes the default app of later calls. delivered_verified when the app that was in front is seen to leave it. The app rule judges it as com.apple.springboard. Reports delivery and retry.", args: {}, fn: ios("home") },
@@ -3228,23 +3523,24 @@ function validateArgs(name, a) {
       if (a.snapshot_id !== undefined && !S(a.snapshot_id, 20)) return "mac_click: snapshot_id string required";
       if (a.app !== undefined && !S(a.app, 200)) return "mac_click: app string (max 200) required";
       if (a.force !== undefined && typeof a.force !== "boolean") return "mac_click: force must be a boolean";
-      // 0.3.0 (review CR1/CR2 T5): screenshot_id is an 8-character id from mac_screenshot
+      // 0.3.0: screenshot_id is an 8-character id from mac_screenshot
       if (a.screenshot_id !== undefined && !S(a.screenshot_id, 16)) return "mac_click: screenshot_id must be the id string from mac_screenshot (max 16)";
       if (a.element_index !== undefined) {
         if (!Number.isInteger(a.element_index) || a.element_index < 0) return "mac_click: element_index must be non-negative int";
         if (a.app !== undefined || a.force !== undefined) return "mac_click: app and force apply to x,y clicks only (an element_index already names its app and is hit-tested)";
         if (a.screenshot_id !== undefined) return "mac_click: screenshot_id names screenshot pixels for x,y — it cannot be combined with element_index";
-        if (a.x !== undefined && !N(a.x)) return "mac_click: x,y finite numbers or element_index required";
-        if (a.y !== undefined && !N(a.y)) return "mac_click: x,y finite numbers or element_index required";
+        // two ways to name the target: the point would be dropped without a word
+        if (a.x !== undefined || a.y !== undefined) return "mac_click: give element_index, or x and y — one of the two (with both, the point would be ignored)";
         return null;
       }
       if (!N(a.x) || !N(a.y)) return "mac_click: x,y finite numbers or element_index required";
+      if (a.snapshot_id !== undefined) return "mac_click: snapshot_id goes with element_index — a click at x,y is not checked against a snapshot";
       if (a.screenshot_id !== undefined && a.app !== undefined) return "mac_click: screenshot_id already names the window and its app — leave app out";
       return null;
     case "mac_drag":
       if (!(Number.isInteger(a.from_index) && a.from_index >= 0 && Number.isInteger(a.to_index) && a.to_index >= 0)) return "mac_drag: from_index/to_index (non-negative ints) required (delivery=not_delivered, retry=safe)";
       if (a.snapshot_id !== undefined && !S(a.snapshot_id, 20)) return "mac_drag: snapshot_id string required";
-      // 0.3.0 (review CR1/CR2 T5): integers within the ranges the description gives
+      // 0.3.0: integers within the ranges the description gives
       if (a.hold_ms !== undefined && (!Number.isInteger(a.hold_ms) || a.hold_ms < 0 || a.hold_ms > 2000)) return "mac_drag: hold_ms must be an integer 0-2000";
       if (a.step_ms !== undefined && (!Number.isInteger(a.step_ms) || a.step_ms < 1 || a.step_ms > 500)) return "mac_drag: step_ms must be an integer 1-500";
       return null;
@@ -3253,6 +3549,7 @@ function validateArgs(name, a) {
       if (a.pages !== undefined && (!N(a.pages) || a.pages < 0.1 || a.pages > 10)) return "mac_scroll: pages 0.1-10";
       if (a.element_index !== undefined && (!Number.isInteger(a.element_index) || a.element_index < 0)) return "mac_scroll: element_index must be a non-negative integer";
       if (a.snapshot_id !== undefined && !S(a.snapshot_id, 20)) return "mac_scroll: snapshot_id string required";
+      if (a.snapshot_id !== undefined && a.element_index === undefined) return "mac_scroll: snapshot_id goes with element_index — without one there is nothing to check against the snapshot";
       return null;
     case "mac_set_value":
       if (!Number.isInteger(a.element_index) || a.element_index < 0) return "mac_set_value: element_index must be a non-negative integer";
@@ -3277,6 +3574,7 @@ function validateArgs(name, a) {
       if (name === "mac_type") {
         if (a.element_index !== undefined && (!Number.isInteger(a.element_index) || a.element_index < 0)) return "mac_type: element_index must be a non-negative integer";
         if (a.snapshot_id !== undefined && !S(a.snapshot_id, 20)) return "mac_type: snapshot_id string required";
+        if (a.snapshot_id !== undefined && a.element_index === undefined) return "mac_type: snapshot_id goes with element_index — without one there is nothing to check against the snapshot";
         if (a.mechanism !== undefined && !MECHANISMS.includes(a.mechanism)) return "mac_type: mechanism must be auto|semantic|physical";
         if (a.replace !== undefined && typeof a.replace !== "boolean") return "mac_type: replace must be a boolean";
         if (a.replace === true && a.mechanism === "physical") return "mac_type: replace needs mechanism auto or semantic";
@@ -3288,11 +3586,13 @@ function validateArgs(name, a) {
       for (const k of ["interactive", "compact", "skeleton", "web_accessibility"]) if (a[k] !== undefined && typeof a[k] !== "boolean") return `mac_ax_state: ${k} must be a boolean`;
       if (a.surface !== undefined && !AX_SURFACES.includes(a.surface)) return `mac_ax_state: surface must be one of ${AX_SURFACES.join("|")}`;
       if (a.window !== undefined && !WIN(a.window)) return "mac_ax_state: window must be an index or a title (max 200)";
-      if (a.depth !== undefined && (!N(a.depth) || a.depth < 1 || a.depth > 40)) return "mac_ax_state: depth 1-40";
+      if (a.depth !== undefined && (!Number.isInteger(a.depth) || a.depth < 1 || a.depth > 40)) return "mac_ax_state: depth integer 1-40";
       if (a.max_nodes !== undefined && (!Number.isInteger(a.max_nodes) || a.max_nodes < 10 || a.max_nodes > 2000)) return "mac_ax_state: max_nodes integer 10-2000";
       if (a.root !== undefined && (!Number.isInteger(a.root) || a.root < 0)) return "mac_ax_state: root must be a non-negative element_index";
       if (a.window_id !== undefined && (!Number.isInteger(a.window_id) || a.window_id < 0)) return "mac_ax_state: window_id must be a non-negative integer (from mac_windows)";
       if (a.snapshot_id !== undefined && !S(a.snapshot_id, 20)) return "mac_ax_state: snapshot_id string required";
+      // a root is an element of an earlier snapshot: it names its app and window, and these were not looked at
+      if (a.root !== undefined && ["app", "window", "window_id", "surface"].some((k) => a[k] !== undefined)) return "mac_ax_state: root drills into an element of an earlier snapshot, which names its app and window — pass root (with its snapshot_id) without app, window, window_id or surface";
       return null;
     case "mac_find":
       for (const k of ["app", "role", "title", "value", "text", "id"]) if (a[k] !== undefined && !S(a[k], 200)) return `mac_find: ${k} must be a string of 1-200 characters`;
@@ -3406,6 +3706,7 @@ function validateArgs(name, a) {
       if (!BID(a.browser_id)) return "browser_navigate: browser_id must be a string (1-64 chars)";
       const schemeOk = process.env.NORACU_ALLOW_FILE_URL === "1" ? /^(https?|file):\/\//.test(a.url) : /^https?:\/\//.test(a.url);
       if (!S(a.url, 20000) || !schemeOk) return "browser_navigate: url must start with http(s):// (file:// requires NORACU_ALLOW_FILE_URL=1)";
+      if (isDevtoolsUrl(a.url)) return `browser_navigate: ${DEVTOOLS_REFUSED}`;
       return null;
     }
     case "browser_snapshot":
@@ -3439,6 +3740,7 @@ function validateArgs(name, a) {
         if (act !== "new") return "browser_tabs: url goes with action new only";
         const schemeOk = process.env.NORACU_ALLOW_FILE_URL === "1" ? /^(https?|file):\/\//.test(a.url) : /^https?:\/\//.test(a.url);
         if (!S(a.url, 20000) || !schemeOk) return "browser_tabs: url must start with http(s):// (file:// requires NORACU_ALLOW_FILE_URL=1)";
+        if (isDevtoolsUrl(a.url)) return `browser_tabs: ${DEVTOOLS_REFUSED}`;
       }
       const needsTab = act === "select" || act === "close";
       if (needsTab && !(typeof a.tab_id === "string" && /^t\d{1,9}$/.test(a.tab_id))) return "browser_tabs: tab_id (from action list, such as \"t2\") is required for select and close";
@@ -3451,6 +3753,8 @@ function validateArgs(name, a) {
     case "browser_click":
       if (!BID(a.browser_id)) return "browser_click: browser_id must be a string (1-64 chars)";
       if (a.button !== undefined && !["left", "right", "middle"].includes(a.button)) return "browser_click: button must be left|right|middle";
+      // more than one way to name the target: the first in this order would be used and the others dropped
+      if ([a.element_index, a.selector, a.xy].filter((v) => v !== undefined).length > 1) return "browser_click: give element_index, selector or xy — one of the three (the others would be ignored)";
       if (a.element_index !== undefined) {
         if (!Number.isInteger(a.element_index) || a.element_index < 0) return "browser_click: element_index must be non-negative int";
         return null;
@@ -3467,8 +3771,10 @@ function validateArgs(name, a) {
     case "browser_fill":
       if (!BID(a.browser_id)) return "browser_fill: browser_id must be a string (1-64 chars)";
       if (!S(a.selector, 2000)) return "browser_fill: selector string (max 2000) required";
-      if (a.value !== undefined && typeof a.value !== "string" && typeof a.value !== "number") return "browser_fill: value must be a string";
-      if (a.value !== undefined && String(a.value).length > 100000) return "browser_fill: value too long (max 100000)";
+      // a fill without value would clear the field and read back as verified: the text has to be given
+      if (a.value === undefined || a.value === null) return `browser_fill: value is required — the text to put in the field${a.text !== undefined ? " (it was passed as text; this tool's argument is value)" : ""}; pass "" to clear the field`;
+      if (typeof a.value !== "string" && typeof a.value !== "number") return "browser_fill: value must be a string";
+      if (String(a.value).length > 100000) return "browser_fill: value too long (max 100000)";
       return null;
     case "browser_type":
       if (!BID(a.browser_id)) return "browser_type: browser_id must be a string (1-64 chars)";
@@ -3523,6 +3829,9 @@ function validateArgs(name, a) {
       return null;
     case "phone_open":
       if (!S(a.app, 200)) return "phone_open: app string (max 200) required";
+      // the name is pasted into Spotlight as it is: a line break or another control character is no part of an app's
+      // name, and a pasted return could act on Spotlight's first result before the name is compared
+      if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(a.app)) return "phone_open: app must not contain control characters (a line break, a tab)";
       return null;
     case "ios_status": case "ios_home": case "ios_screenshot":
       return null;
@@ -3656,7 +3965,7 @@ const MCP_INSTRUCTIONS = (() => {
   const readers = [mac && "mac_get", mac && "mac_ax_state", browser && "browser_snapshot", iphone && (xc ? "ios_snapshot" : "phone_ocr")].filter(Boolean).join(", ");
   return [
     `noracu operates${what}.${iphone && xc ? " iPhone: ios_launch an app by bundle id, ios_snapshot, then act by element_index (valid 30 s; ios_home and ios_launch end earlier indexes); coordinates are screen points." : ""}`,
-    `Loop: observe, act, then observe again to verify.${mac ? " Mac: mac_ax_state (interactive:true for dense apps; skeleton then root to drill) or mac_find, then act by element_index; an index is unique across snapshots and lasts 30 s." : ""}`,
+    `Loop: observe, act, then observe again to verify.${mac ? " Mac: mac_ax_state (interactive:true for dense apps; skeleton then root to drill) or mac_find, then act by element_index; an index is unique across snapshots and lasts 30 s. An app argument is a name, a bundle id, a .app path or pid:<n>; ambiguous_app lists the running apps that share a name — pick one by pid:<n>." : ""}`,
     `${all ? "Mac, browser and iPhone input actions" : "Input actions"} report delivery (delivered_verified / delivered_unverified / not_delivered / unknown) and retry (safe / unsafe). Retry or substitute an action only when retry=safe; otherwise read the state first (${readers}).`,
     mac || browser ? "element_no_longer_valid means take a new snapshot; occluded means bring the window forward or close what covers it; do not fall back to raw coordinates to get around either."
       : xc ? "element_no_longer_valid means take a new snapshot; do not fall back to raw coordinates to get around it." : null,
@@ -3686,14 +3995,14 @@ function errorCodeOf(raw) {
   if (/^Playwright chromium missing/i.test(s)) return "browser_unavailable";
   return "error";
 }
-function traceCall(name, args, ms, isError, errText) {
+function traceCall(name, args, ms, isError, errText, code) {
   if (!TRACE_FILE) return;
   let fd = null;
   try {
     const shape = {};
-    for (const [k, v] of Object.entries(args || {})) shape[k] = typeof v === "string" ? `string(${v.length})` : typeof v === "number" || typeof v === "boolean" ? v : Array.isArray(v) ? `array(${v.length})` : typeof v;
+    for (const [k, v] of Object.entries(args && typeof args === "object" && !Array.isArray(args) ? args : {})) shape[k] = typeof v === "string" ? `string(${v.length})` : typeof v === "number" || typeof v === "boolean" ? v : Array.isArray(v) ? `array(${v.length})` : typeof v;
     const err = Boolean(isError);
-    const line = JSON.stringify({ ts: new Date().toISOString(), tool: name, args: shape, ms, error: err, code: err ? errorCodeOf(errText) : null }) + "\n";
+    const line = JSON.stringify({ ts: new Date().toISOString(), tool: name, args: shape, ms, error: err, code: err ? (code ?? errorCodeOf(errText)) : null }) + "\n";
     fd = openSync(TRACE_FILE, TRACE_FLAGS, 0o600);
     writeSync(fd, line);
   } catch { /* tracing never breaks a call */ }
@@ -3704,22 +4013,26 @@ function traceCall(name, args, ms, isError, errText) {
 // the delivery wording is added here, once for every phone tool (read-only phone tools get none).
 const PHONE_INPUTS = new Set(["phone_tap", "phone_longpress", "phone_swipe", "phone_scroll", "phone_type", "phone_key", "phone_open", "phone_home", "phone_app_switcher", "phone_launch"]);
 // success that the phone screen confirmed (open: the app opened; type: the paste landed). phone_scroll is not here
-// (0.2.5, Andy's call): "the screen changed" is all it sees, and a notification or an animation changes it too
+// (0.2.5): "the screen changed" is all it sees, and a notification or an animation changes it too
 const PHONE_CONFIRMED = new Set(["phone_open", "phone_type"]);
 // "nothing was sent": refusals before the first event (expect_not_found, a capture that failed while checking --expect, invalid_args,
 // out_of_screen: a tap or long press aimed at the mirror window's margin, 2026-11-10)
 const PHONE_NOTHING_SENT = /^(mirror_not_live|mirror_state_unknown|mirror_setup_required|expect_not_found|imctl unavailable|server_shutting_down|keyboard_layout|out_of_screen)|server is shutting down|nothing was typed|nothing was sent/;
+// phone_open and phone_type are verified only on the driver's own line for a confirmed result: "opened '<app>'…",
+// and "typed <n> chars" with nothing after it. Any other line that comes with exit code 0 is a result the driver did
+// not confirm, whatever its words — a wording added to the driver later is not read as verified.
+const PHONE_VERIFIED_LINE = { phone_open: /^opened /, phone_type: /^typed \d+ chars$/ };
 function phoneDelivery(name, text, ok) {
   if (!PHONE_INPUTS.has(name) || /delivery=/.test(text)) return text;
   if (name === "phone_launch") return `${text} (delivery=${ok ? "delivered_unverified" : PHONE_NOTHING_SENT.test(text) ? "not_delivered" : "unknown"}, retry=safe)`;
   // a paste only the frame diff saw (OCR cannot read the text back) is not verified (device run 2026-11-06); neither is
-  // one character OCR saw appear, nor a text seen late — OCR cannot tell the paste from a line repeating it (review R38; E2 T15)
-  // review 0.2.6 #7: nor a text too short for OCR to confirm, nor one OCR saw only in the banner strip at the top
+  // one character OCR saw appear, nor a text seen late — OCR cannot tell the paste from a line repeating it
+  // nor a text too short for OCR to confirm, nor one OCR saw only in the banner strip at the top
   if (ok && /OCR cannot read this text back|no proof of where it landed|showed up late|never confirmed by OCR|cannot be told from a notification banner/.test(text)) return `${text} (delivery=delivered_unverified, retry=unsafe)`;
-  if (ok) return `${text} (delivery=${PHONE_CONFIRMED.has(name) ? "delivered_verified" : "delivered_unverified"}, retry=unsafe)`;
+  if (ok) return `${text} (delivery=${PHONE_CONFIRMED.has(name) && PHONE_VERIFIED_LINE[name].test(String(text).split("\n")[0].trim()) ? "delivered_verified" : "delivered_unverified"}, retry=unsafe)`;
   if (PHONE_NOTHING_SENT.test(text)) return `${text} (delivery=not_delivered, retry=safe)`;
   if (/^scroll_no_effect/.test(text)) return `${text} (delivery=delivered_unverified, retry=unsafe)`;
-  // phone_open went Home and searched Spotlight before it knew the app was not there (R19)
+  // phone_open went Home and searched Spotlight before it knew the app was not there
   if (/^app not found/.test(text)) return `${text} (delivery=delivered_unverified, retry=safe)`;
   // type_not_confirmed, open_not_confirmed, capture_failed, focus_lost, imctl_timeout, imctl_error, …
   return `${text} (delivery=unknown, retry=unsafe)`;
@@ -3727,7 +4040,11 @@ function phoneDelivery(name, text, ok) {
 
 // ── MCP stdio 协议 ──
 
-const rl = (await import("node:readline")).createInterface({ input: process.stdin });
+// One JSON-RPC message per line, and a line ends at \n (MCP's stdio framing). Not node:readline: it also ends a line at
+// U+2028 and U+2029, which JSON leaves as they are inside a string — a tools/call whose text held one was cut in two,
+// answered with parse errors under id null, and never under its own id. The reading starts at the end of this file,
+// once the handlers below are attached.
+const rl = new (await import("node:events")).EventEmitter();
 
 // a client that went away closes our stdout too: writing then must not crash the shutdown
 process.stdout.on("error", () => {});
@@ -3736,16 +4053,16 @@ function send(obj) {
   try { process.stdout.write(JSON.stringify(obj) + "\n"); } catch { /* the client is gone */ }
 }
 
-// tools/call 结果统一出口（F23）：进程比磁盘旧时，把 staleServerNote() 的一行提示加在
+// tools/call 结果统一出口：进程比磁盘旧时，把 staleServerNote() 的一行提示加在
 // 第一个 text 内容块的开头（单独一行）；纯图片结果没有 text 块则补一个。第一个 text 块是 JSON 时（截图元数据、
-// 快照）提示改为结尾单独一个 text 块，JSON 照样能解析（审计 S5A-s8-G-2）。只加提示 ——
+// 快照）提示改为结尾单独一个 text 块，JSON 照样能解析。只加提示 ——
 // 不改变工具执行、isError 返回码或其余内容块；tools/list / initialize 不加。
 function sendToolResult(id, content, isError) {
   const note = staleServerNote();
   if (note) {
     const firstText = content.find(b => b?.type === "text");
     const isJson = (t) => { try { JSON.parse(t); return true; } catch { return false; } };
-    // JSON stays parseable: the note goes in a block of its own after it (audit S5A-s8-G-2)
+    // JSON stays parseable: the note goes in a block of its own after it
     if (firstText && isJson(firstText.text)) content.push({ type: "text", text: note });
     else if (firstText) firstText.text = `${note}\n${firstText.text}`;
     else content.unshift({ type: "text", text: note });
@@ -3753,25 +4070,41 @@ function sendToolResult(id, content, isError) {
   send({ jsonrpc: "2.0", id, result: { content, ...(isError ? { isError: true } : {}) } });
 }
 
+// The protocol revisions this server answers in. It offers tools over stdio only, and what it sends for
+// them — text and image content, isError, and annotations that a 2024-11-05 client ignores — is valid in
+// each. 2025-03-26 is left out:
+// that revision requires a server to accept JSON-RPC batches (added there, removed again in 2025-06-18), and
+// this server does not; a client that asks for it also speaks 2024-11-05 and gets that. Any other version
+// gets the latest one here, as the specification says, and the client decides whether it can go on.
+const PROTOCOL_VERSIONS = ["2024-11-05", "2025-06-18", "2025-11-25"];
+function negotiateProtocol(requested) {
+  if (PROTOCOL_VERSIONS.includes(requested)) return requested;
+  if (requested === "2025-03-26") return "2024-11-05";
+  return PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
+}
+
 rl.on("line", async (line) => {
   if (!line.trim()) return;
   let msg;
   try { msg = JSON.parse(line); } catch { send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error: the line is not JSON" } }); return; }
-  // MCP has no JSON-RPC batches (removed in 2025-03-26; 2024-11-05 clients never send them)
+  // JSON-RPC batches are not accepted: only revision 2025-03-26 has them, and this server does not answer in it
   if (Array.isArray(msg)) { send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "JSON-RPC batch is not supported" } }); return; }
   if (!msg || typeof msg !== "object") { send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request" } }); return; }
   const { id, method, params } = msg;
   if (shuttingDown) { if (id !== undefined) send({ jsonrpc: "2.0", id, error: { code: -32603, message: "server is shutting down" } }); return; }
   try {
     if (method === "initialize") {
-      // F23：版本号用启动时快照的 LOADED.version，不在握手时现读 —— 进程旧了它也不会误报新版本
-      send({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "noracu", version: LOADED.version }, instructions: MCP_INSTRUCTIONS } });
+      // 版本号用启动时快照的 LOADED.version，不在握手时现读 —— 进程旧了它也不会误报新版本
+      send({ jsonrpc: "2.0", id, result: { protocolVersion: negotiateProtocol(params?.protocolVersion), capabilities: { tools: {} }, serverInfo: { name: "noracu", version: LOADED.version }, instructions: MCP_INSTRUCTIONS } });
     } else if (method === "notifications/initialized") {
       // no response
     } else if (method === "notifications/cancelled") {
-      // F40: a queued phone/Mac call the client gave up on is skipped when its turn comes
+      // A queued phone/Mac call the client gave up on is skipped when its turn comes
       // (only a call still waiting in the queue can be skipped; ids are never kept beyond that)
       if (queuedRequests.has(params?.requestId)) cancelledRequests.add(params.requestId);
+      // a call whose tool is already running is marked: no answer is sent for it, and browser_type stops typing
+      const given = liveCalls.get(params?.requestId);
+      if (given) { given.cancelled = true; for (const stop of [...(given.hooks || [])]) stop(); }
     } else if (method === "tools/list") {
       send({ jsonrpc: "2.0", id, result: { tools: TOOLS.map(t => ({
         name: t.name, description: t.desc,
@@ -3781,31 +4114,48 @@ rl.on("line", async (line) => {
     } else if (method === "tools/call") {
       const name = params?.name;
       const tool = TOOLS.find(t => t.name === name);
+      // A request id is the client's handle on one call. A second call under an id that is still under way would
+      // take over the first one's entry here and in the input queue, and a cancellation would then stop the wrong
+      // call. It is refused before anything else is answered for it — an unknown tool, a refusal of its arguments,
+      // of observation-only mode or of the stop file would be a result under that id, which the client takes for
+      // the first call's. The first call goes on and is answered under the id as usual.
+      if (id !== undefined && liveCalls.has(id)) {
+        traceCall(tool ? name : `unknown(${String(name).length})`, params?.arguments, 0, true, "", "duplicate_id");
+        send({ jsonrpc: "2.0", id, error: { code: -32600, message: `invalid request: id ${JSON.stringify(id)} is already in use by a call that has not been answered yet — this call was not run` } });
+        return;
+      }
       if (!tool) {
         // a tool of a layer that is off says how to turn the layer on; the other iPhone backend's tools do not,
-        // whether the layer is on or off (P18-Gemini-3)
+        // whether the layer is on or off
         const n = String(name);
         const ofBackend = !n.startsWith(PHONE_BACKEND === "xcuitest" ? "phone_" : "ios_");
         const off = TOOL_DEFS.some((t) => t.name === n) && ofBackend && !LAYERS.has(layerOf(n)) ? ` — ${layerOffNote(layerOf(n))}` : "";
+        // the name of a tool this server does not have is the caller's own text: its length goes in the trace, not the name
+        traceCall(`unknown(${n.length})`, params?.arguments, 0, true, "", "unknown_tool");
         sendToolResult(id, [{ type: "text", text: `unknown tool: ${name}${off}` }], true);
         return;
       }
       let r;
+      // a call refused before the tool runs is a call all the same: each refusal below gets its line in the
+      // trace (NORACU_TRACE), with the code and 0 ms
       if (process.env.NORACU_READ_ONLY === "1" && !READ_ONLY_TOOLS.has(name)) {
+        traceCall(name, params?.arguments, 0, true, "", "read_only");
         sendToolResult(id, [{ type: "text", text: `ERROR: ${name} blocked by NORACU_READ_ONLY=1 (observation-only mode) (delivery=not_delivered, retry=safe)` }], true);
         return;
       }
       // a refusal before the tool runs sent nothing: input tools say so
       const nothingSent = (t) => (/^(phone|mac|browser|ios)_/.test(name) && (!READ_ONLY_TOOLS.has(name) || name === "browser_navigate" || name === "browser_launch") && !/delivery=/.test(t) ? `${t} (delivery=not_delivered, retry=safe)` : t);
       const verr = validateArgs(name, params?.arguments || {});
-      if (verr) { sendToolResult(id, [{ type: "text", text: `ERROR: ${nothingSent(verr)}` }], true); return; }
-      // the stop file is the person's brake for the browser's input tools too (review S4A-s14-grok-1: it stopped
+      if (verr) { traceCall(name, params?.arguments, 0, true, "", "invalid_args"); sendToolResult(id, [{ type: "text", text: `ERROR: ${nothingSent(verr)}` }], true); return; }
+      // the stop file is the person's brake for the browser's input tools too (it stopped
       // Mac and iPhone input only, while chrome:true acts in the person's own Chrome)
       if (BROWSER_STOPPABLE.has(name) || (name === "browser_tabs" && ["new", "close"].includes(params?.arguments?.action))) {
         const stop = stopFileBlocked();
-        if (stop) { sendToolResult(id, [{ type: "text", text: `ERROR: ${stop}` }], true); return; }
+        if (stop) { traceCall(name, params?.arguments, 0, true, stop); sendToolResult(id, [{ type: "text", text: `ERROR: ${stop}` }], true); return; }
       }
-      const run = () => tool.fn(params?.arguments || {});
+      const live = { cancelled: false };
+      if (id !== undefined) liveCalls.set(id, live);
+      const run = () => tool.fn(params?.arguments || {}, live);
       const t0 = Date.now();
       // ios_* calls share the queue (the runner takes one command at a time); ios_status asks devicectl only
       const queued = /^(phone|mac|ios)_/.test(name) && !OBSERVE_TOOLS.has(name) && name !== "ios_status";
@@ -3813,8 +4163,17 @@ rl.on("line", async (line) => {
       // the stop file but does not wait: it does not use this Mac's keyboard or mouse
       const yieldToUser = queued && TOOL_HINTS[name][0] !== 1 ? (name.startsWith("ios_") ? "stop" : true) : false;
       try { r = await (queued ? serializedInput(run, id, yieldToUser) : OBSERVE_TOOLS.has(name) ? afterQueuedInput(run, QUEUE_WAIT_LIMIT_MS) : run()); }
-      catch (e) { r = { error: e instanceof Refusal ? e.message : String(e?.message ?? e).slice(0, 400) }; }
-      if (r === CANCELLED) return;  // the client cancelled it while it waited: no response (MCP)
+      catch (e) {
+        // an exception nobody planned for, from an input tool: what it had sent by then is not known
+        const msg = e instanceof Refusal ? e.message : String(e?.message ?? e).slice(0, 400);
+        const input = /^(phone|mac|browser|ios)_/.test(name) && (!READ_ONLY_TOOLS.has(name) || name === "browser_navigate");
+        r = { error: !(e instanceof Refusal) && input && !/delivery=/.test(msg) ? `internal_error: ${msg} (delivery=unknown, retry=unsafe)` : msg };
+      }
+      if (id !== undefined && liveCalls.get(id) === live) liveCalls.delete(id);
+      // the client cancelled it while it waited: it did not run, and gets no response (MCP)
+      if (r === CANCELLED) { traceCall(name, params?.arguments, Date.now() - t0, true, "", "cancelled_queued"); return; }
+      // the client gave the call up while its tool ran: it gets no answer either
+      if (live.cancelled) { traceCall(name, params?.arguments, Date.now() - t0, true, "", "cancelled"); return; }
       traceCall(name, params?.arguments, Date.now() - t0, Boolean(r?.error || r?.ok === false), r?.error ?? (r?.ok === false ? r.out : ""));
       if (r?.error) {
         sendToolResult(id, [{ type: "text", text: `ERROR: ${r.error}` }], true);
@@ -3842,5 +4201,62 @@ rl.on("line", async (line) => {
 
 // the client closed our stdin: it is gone, so stop (browsers closed, children ended) instead of lingering
 rl.on("close", () => { shutdown(0); });
+{
+  const decoder = new (await import("node:string_decoder")).StringDecoder("utf8");   // a chunk can end inside a character
+  let pending = "", scanned = 0, over = false;
+  // One message is one line. A line that grows past MAX_LINE without ending is not kept: no request this server
+  // takes comes near it (its largest text argument is 100,000 characters), and a sender that never ends the line
+  // would otherwise make the process hold whatever it sends. What arrived of it is dropped, the rest is skipped up
+  // to the line end, and the sender gets an error — under the request's id when the id stands before "params" in
+  // what was read (an "id" further in could be an argument's), under null otherwise. A line that is complete but
+  // longer than the limit is dropped the same way.
+  const MAX_LINE = 4 * 1024 * 1024;   // characters as JavaScript counts them (UTF-16 units), not bytes
+  let skipping = false;
+  // head: the first 4096 characters of the line that is dropped. The id is taken only from before the "params"
+  // field (the name followed by a colon — a string that merely reads "params" is not it).
+  const tooLarge = (head) => {
+    const at = head.search(/"params"\s*:/);
+    const m = /"id"\s*:\s*(-?\d+|"(?:[^"\\]|\\.){0,128}")/.exec(at === -1 ? head : head.slice(0, at));
+    let id = null;
+    try { if (m) id = JSON.parse(m[1]); } catch { /* not an id */ }
+    send({ jsonrpc: "2.0", id, error: { code: -32600, message: `request too large: a message of more than ${MAX_LINE} characters on one line was dropped, unread` } });
+  };
+  const end = () => {
+    if (over) return;
+    over = true;
+    const rest = pending + decoder.end();
+    pending = "";
+    if (rest.trim()) rl.emit("line", rest);
+    rl.emit("close");
+  };
+  process.stdin.on("data", (chunk) => {
+    if (over) return;
+    let text = decoder.write(chunk);
+    if (skipping) {
+      const nl = text.indexOf("\n");
+      if (nl === -1) return;
+      skipping = false;
+      text = text.slice(nl + 1);
+    }
+    pending += text;
+    for (let i = pending.indexOf("\n", scanned); i !== -1; i = pending.indexOf("\n")) {
+      const line = pending.slice(0, i);
+      pending = pending.slice(i + 1);
+      // the limit holds for a line that ends in the very chunk that takes it past it, too
+      if (line.length > MAX_LINE) { tooLarge(line.slice(0, 4096)); continue; }
+      rl.emit("line", line.endsWith("\r") ? line.slice(0, -1) : line);
+    }
+    scanned = pending.length;   // what is left holds no line end: the next chunk is searched from here
+    if (pending.length > MAX_LINE) {
+      tooLarge(pending.slice(0, 4096));
+      pending = ""; scanned = 0; skipping = true;
+    }
+  });
+  process.stdin.on("end", end);
+  process.stdin.on("close", end);
+  process.stdin.on("error", end);
+}
 
 process.stderr.write(`[noracu] ready — ${LAYERS.size === LAYER_NAMES.length ? "mac/browser/phone layers" : `layers: ${LAYER_NAMES.filter((l) => LAYERS.has(l)).join(", ")} (${LAYERS_RAW ? "NORACU_LAYERS" : "default; NORACU_LAYERS=mac,browser,iphone adds the iPhone layer"})`} (iPhone backend: ${PHONE_BACKEND})\n`);
+// started by hand in a terminal: say what this is (a client never gives the server a terminal for stdin)
+if (process.stdin.isTTY) process.stderr.write("[noracu] this is an MCP server: it waits for a client on stdin and answers in JSON-RPC, so typing here does nothing. `noracu doctor` checks this machine and prints the client configuration; `noracu --help` lists the commands. Ctrl-C to quit.\n");

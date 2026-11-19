@@ -27,7 +27,7 @@ xcodebuild test-without-building -project ios-runner/NoracuRunner.xcodeproj -sch
 ```
 
 The runner prints `NORACU_RUNNER ready v=1 port=<port> build=<hash of these sources>` on
-its own line when the listener is up (after a change here run `node scripts/gen-runner-build.mjs`), and `NORACU_RUNNER error bad_token|bad_bind|bad_port|bind_failed`
+its own line when the listener is up (after a change here run `node scripts/gen-runner-build.mjs`), and `NORACU_RUNNER error bad_token|bad_bind|bad_port|bind_failed` (or `listener_failed` after the ready line)
 on invalid start-up values. It ends on `quit` or after 12 hours.
 
 ## Protocol

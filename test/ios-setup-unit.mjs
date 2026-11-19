@@ -4,7 +4,7 @@
 // explained in plain words.
 import { strict as assert } from "node:assert";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildArgv, explain, main, parseArgs } from "../src/ios-setup.js";
@@ -45,6 +45,13 @@ async function run(argv, { devices = [dev()], code = 0, output = "", xctestrun =
   const elsewhere = await run(["--team", TEAM], { env: { NORACU_IOS_RUNNER_DIR: custom } });
   ok(elsewhere.rc === 0 && elsewhere.spawned[0][1].includes(join(custom, UDID)) && elsewhere.mode === null, "NORACU_IOS_RUNNER_DIR moves the build to the folder the server will look in");
   rmSync(custom, { recursive: true, force: true });
+  // a folder of the person's own keeps its mode; the device folder noracu makes in it is private
+  const theirs = mkdtempSync(join(tmpdir(), "noracu-setup-theirs-"));
+  chmodSync(theirs, 0o755);
+  await run(["--team", TEAM], { env: { NORACU_IOS_RUNNER_DIR: theirs } });
+  const modes = [statSync(theirs).mode & 0o777, statSync(join(theirs, UDID)).mode & 0o777];
+  ok(modes[0] === 0o755 && modes[1] === 0o700, "NORACU_IOS_RUNNER_DIR that is already there keeps its mode; the device folder in it is 0700", modes.map((m) => m.toString(8)));
+  rmSync(theirs, { recursive: true, force: true });
   const none = await run(["--team", "nope"]), noteam = await run([]), help = await run(["--help"]);
   ok(none.rc === 2 && noteam.rc === 2 && /must be signed/.test(noteam.text) && help.rc === 0 && /usage: noracu ios-setup/.test(help.text) && none.spawned.length + noteam.spawned.length + help.spawned.length === 0, "bad arguments, a missing team, and --help start no build");
   const two = await run(["--team", TEAM], { devices: [dev(), dev({ udid: "00008150-000A1B2C3D4E5F60", name: "Second" })] });
@@ -95,6 +102,38 @@ async function run(argv, { devices = [dev()], code = 0, output = "", xctestrun =
   await new Promise((r) => setTimeout(r, 1200));
   ok(kills.join() === "SIGTERM", "once xcodebuild is gone no SIGKILL follows a second later", kills);
   rmSync(home, { recursive: true, force: true });
+  // a build that does not end on SIGTERM, and Ctrl-C pressed twice: the handler is still there for the second
+  // one (it does not end this process), and the SIGKILL goes out a second after the first
+  {
+    const home2 = mkdtempSync(join(tmpdir(), "noracu-setup-")), kills2 = [], exits2 = [];
+    const stubborn = () => { const c = new EventEmitter(); c.stdout = new EventEmitter(); c.stderr = new EventEmitter(); c.kill = (sig) => { kills2.push(sig); if (sig === "SIGKILL") setImmediate(() => c.emit("close", null)); }; return c; };
+    const before2 = process.listenerCount("SIGINT");
+    const p2 = main(["--team", TEAM], { log: () => {}, api, spawnImpl: stubborn, home: home2, exit: (code) => exits2.push(code) });
+    for (let i = 0; i < 100 && process.listenerCount("SIGINT") === before2; i++) await new Promise((r) => setTimeout(r, 10));
+    process.emit("SIGINT", "SIGINT");
+    const held = process.listenerCount("SIGINT") > before2;
+    process.emit("SIGINT", "SIGINT");
+    const rc2 = await Promise.race([p2, new Promise((_, rej) => setTimeout(() => rej(new Error("ios-setup second Ctrl-C test hung")), 4000))]);
+    ok(held && rc2 === 130 && kills2.join() === "SIGTERM,SIGKILL" && process.listenerCount("SIGINT") === before2,
+      "Ctrl-C twice on a build that ignores SIGTERM: the handler is still in place for the second one, and SIGKILL follows", { held, rc2, kills2 });
+    const kills3 = [], exits3 = [];
+    const quick = () => { const c = new EventEmitter(); c.stdout = new EventEmitter(); c.stderr = new EventEmitter(); c.kill = (sig) => { kills3.push(sig); setImmediate(() => c.emit("close", null)); }; return c; };
+    const before3 = process.listenerCount("SIGTERM");
+    const p3 = main(["--team", TEAM], { log: () => {}, api, spawnImpl: quick, home: home2, exit: (code) => exits3.push(code) });
+    for (let i = 0; i < 100 && process.listenerCount("SIGTERM") === before3; i++) await new Promise((r) => setTimeout(r, 10));
+    process.emit("SIGTERM", "SIGTERM");
+    const rc3 = await Promise.race([p3, new Promise((_, rej) => setTimeout(() => rej(new Error("ios-setup SIGTERM test hung")), 3000))]);
+    ok(rc3 === 143 && exits3.join() === "143" && kills3[0] === "SIGTERM", "SIGTERM during the build: the exit code is 143, not Ctrl-C's 130", { rc3, exits3, kills3 });
+    // the handlers are off before exit is called
+    const seen = [];
+    const before4 = process.listenerCount("SIGINT");
+    const p4 = main(["--team", TEAM], { log: () => {}, api, spawnImpl: quick, home: home2, exit: () => seen.push(process.listenerCount("SIGINT")) });
+    for (let i = 0; i < 100 && process.listenerCount("SIGINT") === before4; i++) await new Promise((r) => setTimeout(r, 10));
+    process.emit("SIGINT", "SIGINT");
+    await Promise.race([p4, new Promise((_, rej) => setTimeout(() => rej(new Error("ios-setup exit-order test hung")), 3000))]);
+    ok(seen.length === 1 && seen[0] === before4, "Ctrl-C: the signal handlers are taken off before exit is called", { seen, before4 });
+    rmSync(home2, { recursive: true, force: true });
+  }
 }
 {
   // a build for another bundle prefix in the same folder is removed first; the build must name a runner under the
@@ -130,6 +169,25 @@ async function run(argv, { devices = [dev()], code = 0, output = "", xctestrun =
   const good = await go();
   ok(good.rc === 0 && !/Not checked/.test(good.text), "a runner under the prefix asked for: no 'not checked' note", good.text);
   rmSync(home, { recursive: true, force: true });
+}
+
+// a locked keychain is not a locked iPhone
+ok(/keychain is locked/.test(explain("error: The keychain /Users/me/Library/Keychains/login.keychain-db is locked.")) && !/unlock the iPhone/.test(explain("error: The keychain /Users/me/Library/Keychains/login.keychain-db is locked.")) && /keychain is locked/.test(explain("codesign: errSecInteractionNotAllowed")) && /unlock the iPhone/.test(explain("error: Someone's iPhone is locked.")),
+  "explain: a locked keychain is told apart from a locked iPhone", [explain("error: The keychain /Users/me/Library/Keychains/login.keychain-db is locked."), explain("error: Someone's iPhone is locked.")]);
+
+// a prefix with an empty part (a dot at the end, two dots in a row) would make a bundle identifier Xcode refuses
+ok(["com.example.", "com..example", ".com.example"].every((p) => /--bundle-prefix must look/.test(parseArgs(["--team", TEAM, "--bundle-prefix", p]).error || "")) && ["com.example.me", "a-b.c9", "abc"].every((p) => parseArgs(["--team", TEAM, "--bundle-prefix", p]).prefix === p),
+  "--bundle-prefix: an empty part between dots is refused", ["com.example.", "com..example"].map((p) => parseArgs(["--team", TEAM, "--bundle-prefix", p])));
+
+// xcodebuild ended by a signal that did not come from this command: not "could not be run — is Xcode installed?"
+{
+  const home = mkdtempSync(join(tmpdir(), "noracu-setup-"));
+  const lines = [];
+  const api = { ...real, XCODEBUILD: "/usr/bin/xcodebuild", listDevices: async () => ({ ok: true, devices: [dev()] }), findXctestrun: async () => null };
+  const spawnImpl = () => { const c = new EventEmitter(); c.stdout = new EventEmitter(); c.stderr = new EventEmitter(); c.kill = () => {}; setImmediate(() => { c.stderr.emit("data", "CompileSwift normal arm64\n"); c.emit("close", null, "SIGKILL"); }); return c; };
+  const rc = await main(["--team", TEAM], { log: (t) => lines.push(t), api, spawnImpl, home });
+  rmSync(home, { recursive: true, force: true });
+  ok(rc === 1 && /ended by SIGKILL/.test(lines.join("\n")) && !/is Xcode installed|could not be run/.test(lines.join("\n")), "xcodebuild killed from outside: the message says so", lines);
 }
 
 console.log(`ios-setup unit: ${n}/${n} passed`);
