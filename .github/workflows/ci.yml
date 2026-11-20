@@ -1,9 +1,10 @@
 name: CI
 
+# Not started by a push or a pull request: GitHub runs no CI for this project (2026-11-19). Its CI runs on the
+# maintainers' own Gitea, on a runner on a maintainer's Mac (.gitea/workflows/ci.yml). This file keeps the same
+# steps for GitHub's runners, to be started by hand.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -34,8 +35,16 @@ jobs:
         run: node test/bg-inject-unit.mjs
       - name: "release gate tests (throwaway git repository)"
         run: node test/release-gate-unit.mjs
-      - name: "command line: --version, --help, doctor (the server is not started)"
-        run: node test/cli-unit.mjs
+      - name: "command line: --version, --help, doctor (the server is not started), and again with cliclick hidden"
+        run: |
+          node test/cli-unit.mjs
+          node test/cli-no-cliclick.mjs
+      - name: "tools.md generator, package rules, documented error codes, runner source rules"
+        run: |
+          node test/gen-tools-unit.mjs
+          node test/check-pack-unit.mjs
+          node test/docs-codes-unit.mjs
+          node test/ios-runner-rules.mjs
       - name: "iOS XCUITest backend client contract tests (fake runner, no iPhone, no Xcode)"
         run: node test/ios-xcuitest-unit.mjs
       - name: "iOS XCUITest backend: tool logic against a model phone, and the ios-setup command (no iPhone, no Xcode)"
@@ -48,6 +57,8 @@ jobs:
         run: NORACU_CI=1 node test/e2e.mjs
         env:
           NORACU_IMCTL_DIR: /nonexistent # phone layer degrades gracefully on CI
+      - name: "browser_scroll on a slow Chromium: the server as it is and at background priority, as under a launchd runner"
+        run: node test/browser-scroll-slow.mjs
       - name: "docs freshness: tools.md must match running server"
         run: |
           node scripts/gen-tools.mjs
@@ -77,7 +88,8 @@ jobs:
             const d = JSON.parse(require("fs").readFileSync(0, "utf8")).devices;
             const num = (k) => k.split("iOS-")[1].split("-").map(Number);
             const rts = Object.keys(d).filter((k) => /SimRuntime\.iOS-\d/.test(k) && d[k].some((x) => /^iPhone/.test(x.name)));
-            rts.sort((a, b) => { const [x, y] = [num(a), num(b)]; return x[0] - y[0] || (x[1] || 0) - (y[1] || 0); });
+            const cmp = (x, y) => { for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); return 0; };
+            rts.sort((a, b) => cmp(num(a), num(b)));
             const dev = rts.length ? d[rts.at(-1)].find((x) => /^iPhone/.test(x.name)) : null;
             if (!dev) { console.error("no iPhone simulator on this image"); process.exit(1); }
             console.log(dev.udid);')

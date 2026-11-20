@@ -2887,50 +2887,300 @@ async function browserType(args, live) {
   return { text: `typed ${chars.length} chars — delivery=delivered_unverified, retry=unsafe` };
 }
 
-async function browserScroll(args = {}) {
+// browser_scroll judges the wheel by what the page did with it, read once the page has had it — not at a fixed time
+// after mouse.wheel returns. Measured 2026-11-19 (headless, a 125-button page): the page got the wheel and moved
+// 36–58 ms after mouse.wheel returned in a normal process, 200–660 ms when the server (and with it Chromium) ran at
+// background priority, as a launchd job without ProcessType does — there it moved up to 224 ms after it reported
+// the wheel; a navigation the wheel started committed after 36–60 ms and 236–455 ms. A fixed 80 ms then said "did
+// not move" for a scroll that went through, took the late scroll of the call before for its own, and missed the
+// navigation. So: the position is to be still before the wheel; listeners under a name of this call's own count the
+// trusted wheel events that reach the page (one mouse.wheel makes one, with this call's deltas) and say that a
+// navigation began (the Navigation API's navigate event, or pagehide where there is none); after the wheel the
+// position is read until it has moved and stopped, until SCROLL_STILL_MS have passed since the page had the wheel
+// without it moving, or until SCROLL_SEEN_MS have passed. A movement is verified only when exactly one wheel reached
+// the page and it was this one. A wheel over a frame goes to the frame's document, which these listeners do not
+// hear: there the page around it is watched for SCROLL_FRAME_MS after the wheel is sent, and nothing is verified
+// (also when the page reports a wheel then: it can tell neither that it was this one nor that the frame was not
+// there). Calls on one page take turns, so one call's wheel is not read as another's. A wheel whose effect a call
+// did not verify may still have one, at any time and either way — a page can act on a wheel later, or make room to
+// scroll first — so in a document a movement is verified only while every wheel that may have reached it was
+// verified. That doubt is kept here, out of the page's reach, by the identity Chromium gives a document (scrollDocId):
+// a document is in doubt from right before a wheel goes out to it until a call verifies. A wheel can also reach a
+// document that comes later — a navigation that commits before the page has handled it — so while a wheel may still
+// be on its way (pending), every document the tab commits is in doubt as well. A wheel is on its way from right
+// before it goes out until the page reports it, or until the page, in one and the same document, has drawn twice
+// since Chromium acknowledged it (mouse.wheel returns once the page's renderer has the wheel): Chromium hands queued
+// wheel events to the page at the start of a frame, before its requestAnimationFrame callbacks (scrollFlushed). A
+// document the server cannot name gets no wheel, and a tab whose documents the server lost sight of no longer
+// verifies (blind).
+const SCROLL_POLL_MS = 25, SCROLL_STABLE_MS = 75, SCROLL_STILL_MS = 1000, SCROLL_FRAME_MS = 1500, SCROLL_SEEN_MS = 3000, SCROLL_SETTLE_MS = 1000, SCROLL_FLUSH_MS = 1000;
+const scrollTurns = new WeakMap();   // page → the end of the last browser_scroll queued on it
+// the gap between a float32 and the next one above it, at |x| (Chromium carries a wheel's distance as a float32)
+const f32Cell = new Float32Array(1), f32Bits = new Int32Array(f32Cell.buffer);
+const ulp32 = (x) => { f32Cell[0] = Math.abs(x); const a = f32Cell[0]; f32Bits[0] += 1; return f32Cell[0] - a; };
+const scrollPages = new WeakMap();   // page → { cdp: the server's own CDP session, doubted: Set of documents, pending, blind, world, tag }
+const scrollPage = (page) => {
+  let st = scrollPages.get(page);
+  if (!st) scrollPages.set(page, (st = { cdp: null, doubted: new Set(), pending: false, blind: false, world: null, tag: 0 }));
+  return st;
+};
+// The document the page shows, as Chromium names it: the main frame's id and the id of the loader of its document,
+// read through a CDP session of the server's own. history.pushState and fragments keep it; a document loaded again
+// has a new one; a document brought back from the back-forward cache keeps its own (with its doubt). null when it
+// cannot be read — the call then does not verify.
+async function scrollDocId(page) {
+  const st = scrollPage(page);
+  try {
+    if (!st.cdp) {
+      const making = page.context().newCDPSession(page);
+      let cdp;
+      try {
+        cdp = await withTimeout(making, 5000, "scroll document");
+      } catch (e) {
+        making.then((late) => late.detach().catch(() => {}), () => {});
+        throw e;
+      }
+      cdp.on("Page.frameNavigated", (e) => {
+        // the tab shows another document while a wheel may still be on its way: it may go there
+        if (st.pending && e?.frame && !e.frame.parentId) st.doubted.add(`${e.frame.id}:${e.frame.loaderId}`);
+      });
+      try {
+        await withTimeout(cdp.send("Page.enable"), 5000, "scroll document");
+      } catch (e) {
+        cdp.detach().catch(() => {});
+        throw e;
+      }
+      st.cdp = cdp;
+    }
+    const { frameTree } = await withTimeout(st.cdp.send("Page.getFrameTree"), 5000, "scroll document");
+    return frameTree?.frame?.id && frameTree.frame.loaderId ? `${frameTree.frame.id}:${frameTree.frame.loaderId}` : null;
+  } catch (e) {
+    // the server's view of the tab ended (not a slow answer): documents committed from then on went unseen, so the
+    // tab no longer verifies; the next call opens a new view, to name documents again
+    if (st.cdp && /closed|detached|not attached|No target|not found/i.test(String(e?.message ?? e))) {
+      st.blind = true;
+      st.cdp.detach().catch(() => {});
+      st.cdp = null;
+    }
+    return null;
+  }
+}
+// evaluated in a world of the server's own in that document (made once per document), out of the page scripts' reach
+async function scrollWorldEval(page, docId, expression, ms) {
+  const st = scrollPage(page);
+  if (docId === null || !st.cdp) throw new Error("no document");
+  if (st.world?.doc !== docId) {
+    const w = await withTimeout(st.cdp.send("Page.createIsolatedWorld", { frameId: docId.split(":")[0], worldName: "noracu-scroll" }), 5000, "scroll world");
+    st.world = { doc: docId, ctx: w.executionContextId };
+  }
+  const r = await withTimeout(st.cdp.send("Runtime.evaluate", { expression, contextId: st.world.ctx, awaitPromise: true, returnByValue: true }), ms, "scroll world");
+  if (r?.exceptionDetails) throw new Error(`scroll world: ${r.exceptionDetails.text || "exception"}`);
+  return r?.result?.value;
+}
+// true once the page, in one and the same document, has drawn twice: every wheel Chromium acknowledged before was
+// handed to that document's renderer by then
+async function scrollFlushed(page) {
+  const docId = await scrollDocId(page);
+  try {
+    const v = await scrollWorldEval(page, docId, "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))", SCROLL_FLUSH_MS);
+    return v === 1 && (await scrollDocId(page)) === docId;
+  } catch {
+    return false;
+  }
+}
+async function browserScroll(args = {}, live) {
+  const first = getActiveSession(args.browser_id);
+  if (!first) return { error: "no browser — call browser_launch first (delivery=not_delivered, retry=safe)" };
+  const turn = (scrollTurns.get(first.page) || Promise.resolve()).then(() => scrollOnce(args, live, first.page));
+  scrollTurns.set(first.page, turn.then(() => {}, () => {}));
+  return turn;
+}
+async function scrollOnce(args, live, page0) {
+  // the call may have waited for the one before it: what was checked when it came in is checked again
+  if (live?.cancelled) return { error: "cancelled: the client cancelled the call while it waited for its turn; nothing was sent (delivery=not_delivered, retry=safe)" };
+  const stop = stopFileBlocked();
+  if (stop) return { error: stop };
   const s = getActiveSession(args.browser_id);
   if (!s) return { error: "no browser — call browser_launch first (delivery=not_delivered, retry=safe)" };
+  if (s.page !== page0) return { error: "not_actionable: the active page changed while this call waited for the browser_scroll before it; nothing was sent (delivery=not_delivered, retry=safe)" };
   const { page } = s;
   const direction = args.direction || "down";
   const pages = args.pages !== undefined ? Number(args.pages) : 1;
-  let before, cx, cy;
+  const key = `__noracu_wheel_${randomUUID().replace(/-/g, "")}`;
+  const read = (k) => withTimeout(page.evaluate((k2) => {
+    const f = k2 ? window[k2] : null;
+    return { x: Math.round(window.scrollX), y: Math.round(window.scrollY), ours: !k2 || Boolean(f), n: f ? f.n : 0, wx: f ? f.dx : 0, wy: f ? f.dy : 0, leaving: f?.leaving === true };
+  }, k), 5000, "scroll read");
+  // the listeners go when the call is done (nothing waits for that; on another page there is nothing to remove)
+  const unhook = () => page.evaluate((k) => {
+    const f = window[k];
+    if (!f) return;
+    try { f.off(); } catch {}
+    try { delete window[k]; } catch {}
+  }, key).catch(() => {});
+  let before, cx, cy, still = true, framed = false, doubt = false, docId = null, dpr = null;
   try {
-    const info = await withTimeout(
-      page.evaluate(() => ({ x: Math.round(window.scrollX), y: Math.round(window.scrollY), w: window.innerWidth, h: window.innerHeight })),
-      5000,
-      "scroll read"
-    );
-    const vp = page.viewportSize() || { width: info.w, height: info.h };
-    cx = Math.round((vp.width || 800) / 2);
-    cy = Math.round((vp.height || 600) / 2);
+    // still before the wheel: a page that is still moving (a scroll of its own, or one that has not landed yet)
+    // would have that movement counted as this wheel's
+    let a = await read(null);
+    for (const t0 = Date.now(); ;) {
+      await sleep(2 * SCROLL_POLL_MS);
+      const b = await read(null);
+      if (b.x === a.x && b.y === a.y) break;
+      a = b;
+      if (Date.now() - t0 > SCROLL_SETTLE_MS) { still = false; break; }
+    }
+    const vp = page.viewportSize();
+    // a document the server cannot name gets no wheel
+    docId = await scrollDocId(page);
+    if (docId === null) {
+      unhook();
+      return { error: "not_actionable: noracu could not tell which document the page shows (its DevTools view of the tab did not answer); no wheel was sent (delivery=not_delivered, retry=safe)" };
+    }
+    // an earlier wheel that may have reached this document was not verified, or may still be on its way
+    doubt = scrollPage(page).blind || scrollPage(page).pending || scrollPage(page).doubted.has(docId);
+    // the ratio the page reports wheel distances by, read where the page cannot change it; not known → not verified
+    dpr = await scrollWorldEval(page, docId, "devicePixelRatio", 5000).then((v) => (typeof v === "number" && v > 0 ? v : null), () => null);
+    const info = await withTimeout(page.evaluate(([k, vw, vh]) => {
+      const f = { n: 0, dx: 0, dy: 0, leaving: false };
+      const ac = new AbortController();
+      f.off = () => ac.abort();
+      Object.defineProperty(window, k, { value: f, configurable: true, enumerable: false, writable: false });
+      // trusted only: a wheel event the page makes itself is no sign of this one
+      addEventListener("wheel", (e) => { if (!e.isTrusted) return; if (++f.n === 1) { f.dx = e.deltaX; f.dy = e.deltaY; } }, { capture: true, passive: true, signal: ac.signal });
+      const nav = globalThis.navigation;
+      if (nav && typeof nav.addEventListener === "function") nav.addEventListener("navigate", () => { f.leaving = true; }, { once: true, signal: ac.signal });
+      else addEventListener("pagehide", () => { f.leaving = true; }, { once: true, signal: ac.signal });
+      // the point the wheel is sent at, and whether a frame is there (inside a shadow root too)
+      const px = Math.round((vw || window.innerWidth || 800) / 2), py = Math.round((vh || window.innerHeight || 600) / 2);
+      let el = document.elementFromPoint(px, py);
+      for (let i = 0; el && el.shadowRoot && i < 32; i++) {
+        const inner = el.shadowRoot.elementFromPoint(px, py);
+        if (!inner || inner === el) break;
+        el = inner;
+      }
+      return { x: Math.round(window.scrollX), y: Math.round(window.scrollY), px, py, framed: Boolean(el) && /^(IFRAME|FRAME|OBJECT|EMBED)$/.test(el.tagName) };
+    }, [key, vp?.width || 0, vp?.height || 0]), 5000, "scroll read");
+    cx = info.px;
+    cy = info.py;
     before = { x: info.x, y: info.y };
+    framed = info.framed;
   } catch (e) {
+    unhook();
     return { error: `not_actionable: could not read scroll position: ${shortErr(e)} (delivery=not_delivered, retry=safe)` };
   }
-  const dist = Math.round(pages * 600);
-  const dx = direction === "left" ? -dist : direction === "right" ? dist : 0;
-  const dy = direction === "up" ? -dist : direction === "down" ? dist : 0;
-  let after;
+  const st = scrollPage(page);
+  // the wheel carries a tag in its distance: 1 to 15 units of 16 float32 steps of that distance (a 1024th of a pixel
+  // for one page; for a request under a 1200th of a page, which rounds to no pixel, the steps of 1 px), another one
+  // on each call on the page; it moves the page by under a quarter pixel more, which the positions, in whole pixels,
+  // do not show
+  st.tag = (st.tag % 15) + 1;
+  const base = Math.round(pages * 600);
+  const unit = 16 * ulp32(Math.max(1, base));
+  const amount = base + st.tag * unit;
+  const dx = direction === "left" ? -amount : direction === "right" ? amount : 0;
+  const dy = direction === "up" ? -amount : direction === "down" ? amount : 0;
+  let after, seenAt = null, sent = false;
+  // the one wheel the page had was this call's: one mouse.wheel is one trusted event, and the page reports its
+  // distance divided by the device pixel ratio, tag included (measured at ratios 1 to 3: as sent divided by the ratio;
+  // were it rounded to a float32 on the way, it would still be within 2 float32 steps of that). So: within 2 such
+  // steps, and a tag's step, as reported, over 4 of them — else this wheel cannot be told from the next tag's, and is
+  // not taken for this call's. A wheel of another size, or another call's, is not this one.
+  const near = (w, d) => {
+    if (d === 0) return w === 0;
+    if (dpr === null) return false;
+    const want = d / dpr, step = ulp32(want);
+    return unit / dpr > 4 * step && Math.abs(w - want) <= 2 * step;
+  };
+  const isMine = (a) => a.n === 1 && near(a.wx, dx) && near(a.wy, dy);
+  let pendingBefore = st.pending;
+  // the stop file and a cancellation, again before the input (the still-wait above can take a second or more), and
+  // once more right before the wheel (moving the pointer waits for the page)
+  const halted = () => (live?.cancelled ? "cancelled: the client cancelled the call; nothing was sent (delivery=not_delivered, retry=safe)" : stopFileBlocked());
+  let halt = halted();
+  if (halt) {
+    unhook();
+    return { error: halt };
+  }
   try {
     await withTimeout(page.mouse.move(cx, cy), 5000, "mouse.move");
+    // the document the wheel goes to: the one the call read the page in, or no wheel
+    const wheelDoc = await scrollDocId(page);
+    if (wheelDoc !== docId) {
+      unhook();
+      if (wheelDoc === null) return { error: `not_actionable: noracu could not tell which document the page showed by the time the pointer had moved to (${cx},${cy}) (its DevTools view of the tab did not answer); no wheel was sent (delivery=not_delivered, retry=safe)` };
+      return { error: `not_actionable: the page showed another document by the time the pointer had moved to (${cx},${cy}) (it shows ${showsNow(s)} now); no wheel was sent (delivery=not_delivered, retry=safe)` };
+    }
+    // the stop file and a cancellation, last thing before the wheel: from this check to the wheel nothing waits
+    halt = halted();
+    if (halt) {
+      unhook();
+      // the reason as it is given, without its "nothing was sent": the pointer did move
+      const why = halt.split(/\s*[;—]?\s*nothing was sent/)[0].trim();
+      return { error: `${why} — this came up after the pointer had moved to (${cx},${cy}) in the page; no wheel was sent (delivery=not_delivered, retry=safe)${/^user_stopped/.test(halt) ? "; remove the file to resume" : ""}` };
+    }
+    // from here on a wheel may reach the document, or one that comes later: in doubt until a call verifies
+    pendingBefore = st.pending;
+    st.doubted.add(docId);
+    st.pending = true;
     await withTimeout(page.mouse.wheel(dx, dy), 5000, "mouse.wheel");
-    await sleep(80);
-    after = await withTimeout(
-      page.evaluate(() => ({ x: Math.round(window.scrollX), y: Math.round(window.scrollY) })),
-      5000,
-      "scroll read"
-    );
+    sent = true;
+    const t0 = Date.now();
+    let last = null, lastAt = t0;
+    for (;;) {
+      await sleep(SCROLL_POLL_MS);
+      after = await read(key);
+      const now = Date.now();
+      // the page has had this call's wheel, and none was on its way before: none can reach another document now
+      if (after.ours && isMine(after) && !pendingBefore) st.pending = false;
+      if (navigated(s) || !after.ours || after.leaving) break;
+      if (after.n > 0 && seenAt === null) seenAt = now;
+      const at = `${after.x},${after.y}`;
+      if (at !== last) { last = at; lastAt = now; }
+      const moved = after.x !== before.x || after.y !== before.y;
+      if (moved && now - lastAt >= SCROLL_STABLE_MS) break;
+      // still since the page had the wheel; over a frame, which does not say so, since the wheel was sent
+      const from = framed ? t0 : seenAt;
+      if (!moved && from !== null && now - from >= (framed ? SCROLL_FRAME_MS : SCROLL_STILL_MS)) break;
+      if (now - t0 >= SCROLL_SEEN_MS) break;
+    }
   } catch (e) {
+    unhook();
+    // whatever the call ends with: a wheel the page has drawn twice since is no longer on its way
+    if (sent && (await scrollFlushed(page))) st.pending = false;
+    const shows = navigated(s) ? ` (it shows ${showsNow(s)} now)` : "";
+    // the wheel went out and the page navigated before it was read: as when a read below shows that
+    if (sent && (navigated(s) || ctxGone(e))) return { text: `scrolled ${direction} ${pages} page(s) at (${cx},${cy}): scrollX ${before.x}, scrollY ${before.y} before the wheel — the page navigated meanwhile${shows}, so where the wheel left it was not read — delivery=delivered_unverified, retry=unsafe` };
     return { error: `action_failed: scroll ${direction} failed: ${shortErr(e)}${navigated(s) || ctxGone(e) ? " — the page navigated meanwhile" : ""} (delivery=unknown, retry=unsafe)` };
   }
+  unhook();
+  if (await scrollFlushed(page)) st.pending = false;
   const where = `scrolled ${direction} ${pages} page(s) at (${cx},${cy}): scrollX ${before.x} → ${after.x}, scrollY ${before.y} → ${after.y}`;
   // the two positions are of two pages: a new page starts at the top, which says nothing about the wheel
-  if (navigated(s)) return { text: `${where} — the page navigated meanwhile (it shows ${showsNow(s)} now), so the positions are of two pages — delivery=delivered_unverified, retry=unsafe` };
+  if (navigated(s) || !after.ours) return { text: `${where} — the page navigated meanwhile${navigated(s) ? ` (it shows ${showsNow(s)} now)` : ""}, so the positions are of two pages — delivery=delivered_unverified, retry=unsafe` };
+  const unverified = (text) => ({ text });
+  // a navigation that began may not finish (a download, a 204): the page stays, and the wheel's effect is not known
+  if (after.leaving) return unverified(`${where} — the page navigated meanwhile (a navigation started while this call ran), so the position is not taken as the wheel's — delivery=delivered_unverified, retry=unsafe`);
   const moved = after.x !== before.x || after.y !== before.y;
-  if (!moved) return { text: `${where} (did not move) — delivery=delivered_unverified, retry=unsafe` };
+  const mine = isMine(after);
+  const overFrame = framed;
+  if (after.n > 0 && !mine) return unverified(`${where}${moved ? "" : " (did not move)"} — ${after.n > 1 ? `${after.n} wheel events` : "a wheel event that was not this one"} reached the page meanwhile, so what it did is not known to be this wheel's — delivery=unknown, retry=unsafe`);
+  if (!moved) {
+    if (overFrame) return unverified(`${where} (did not move in the ${SCROLL_FRAME_MS / 1000} s after the wheel was sent; the wheel was over a frame, whose own scrolling is not read) — delivery=delivered_unverified, retry=unsafe`);
+    // no sign that the page had the wheel: it may still arrive
+    if (!mine) return unverified(`${where} (did not move) — the page did not report the wheel within ${SCROLL_SEEN_MS / 1000} s; it may still arrive — delivery=unknown, retry=unsafe`);
+    return unverified(`${where} (did not move in the ${SCROLL_STILL_MS / 1000} s after the page had the wheel) — delivery=delivered_unverified, retry=unsafe`);
+  }
+  if (!still) return unverified(`${where} — the page was still moving before the wheel, so this movement is not known to be the wheel's — delivery=delivered_unverified, retry=unsafe`);
+  if (overFrame) return unverified(`${where} — the page moved, but the wheel was over a frame, so the movement is not known to be the wheel's — delivery=delivered_unverified, retry=unsafe`);
+  if (!mine) return unverified(`${where} — the page moved but did not report the wheel, so the movement is not known to be the wheel's — delivery=delivered_unverified, retry=unsafe`);
   // verified only when the page went the way that was asked: a page can move itself, also the other way
   const went = dy > 0 ? after.y > before.y : dy < 0 ? after.y < before.y : dx > 0 ? after.x > before.x : dx < 0 ? after.x < before.x : false;
-  if (!went) return { text: `${where} (the page moved, but not ${direction}) — delivery=delivered_unverified, retry=unsafe` };
+  if (!went) return unverified(`${where} (the page moved, but not ${direction}) — delivery=delivered_unverified, retry=unsafe`);
+  if (st.blind) return unverified(`${where} — noracu lost sight of this tab's documents earlier (its DevTools view ended), so no movement in it is taken as the wheel's — delivery=delivered_unverified, retry=unsafe`);
+  if (doubt) return unverified(`${where} — an earlier wheel that may have reached this page was not verified, so this movement may be that wheel's — delivery=delivered_unverified, retry=unsafe`);
+  // every wheel that may have reached this document was verified: the doubt comes off
+  st.doubted.delete(docId);
   return { text: `${where} — delivery=delivered_verified, retry=unsafe` };
 }
 
@@ -4157,7 +4407,7 @@ rl.on("line", async (line) => {
       if (id !== undefined) liveCalls.set(id, live);
       const run = () => tool.fn(params?.arguments || {}, live);
       const t0 = Date.now();
-      // ios_* calls share the queue (the runner takes one command at a time); ios_status asks devicectl only
+      // ios_* calls share the queue (the runner takes one command at a time); ios_status asks devicectl / simctl only
       const queued = /^(phone|mac|ios)_/.test(name) && !OBSERVE_TOOLS.has(name) && name !== "ios_status";
       // every queued tool that is not read-only waits for the person at the Mac (0.2.7); ios_* input checks
       // the stop file but does not wait: it does not use this Mac's keyboard or mouse

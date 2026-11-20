@@ -14,6 +14,23 @@
   README says that reading an Electron or Chromium app tries to turn on its
   web accessibility (Google Chrome refuses it); macOS 26.7.1 is in the list of
   where it was tested.
+- **XCUITest backend: a simulator is found with Xcode 26 too.** `noracu
+  ios-setup --udid` and the `ios_*` tools now look a simulator up with
+  `simctl`. `devicectl`, which with Xcode 26.6 listed no simulators or gave no
+  answer for 30 s, is asked about iPhones only.
+- **`browser_scroll` reads the page once it has had the wheel.** It used to
+  read the position 80 ms after sending the wheel; on a busy machine, or with
+  the server running at background priority (a launchd job, a CI runner), the
+  page could take half a second to get it, and the result then said that a
+  scroll that went through did not move, took the late end of the scroll
+  before for its own (`delivered_verified`), or missed a navigation the wheel
+  started. Now it waits until the page reports the wheel and the position
+  stops changing (up to 3 s). It verifies a movement only when the one wheel
+  the page had was this call's and every earlier wheel that may have reached
+  that page was verified (a page loaded again starts afresh, unless it came in
+  while a wheel may still have been on its way), and never when the wheel was
+  over a frame; two calls on one page take turns; the result says which of
+  these kept it from verifying.
 - **XCUITest backend: build the runner again once.** Its sources changed in
   comments only, but the runner's build check counts every byte of them:
   `ios_*` answers `runner_version_mismatch` until `npx noracu ios-setup` (the

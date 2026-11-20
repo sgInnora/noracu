@@ -128,7 +128,8 @@ export function createIosSession({
   async function resolveDevice() {
     const want = String(env.NORACU_IOS_UDID || "").trim();
     if (want && !api.validUdid(want)) return { ok: false, error: "ios_config", message: "NORACU_IOS_UDID is not a device identifier" };
-    const list = await api.listDevices();
+    // a simulator named in NORACU_IOS_UDID is looked up with simctl alone; devicectl answers for iPhones
+    const list = await (want && api.isSimulatorUdid(want) ? api.listSimulators() : api.listDevices());
     if (!list.ok) return list;
     let d;
     if (want) {

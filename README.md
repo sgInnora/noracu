@@ -3,7 +3,6 @@
 **A local MCP server that lets an MCP client (Claude Desktop, Claude Code, Cursor, …) operate macOS apps
 and a browser by `element_index`, and says what each action did. No API key, no telemetry.**
 
-[![CI](https://github.com/sgInnora/noracu/actions/workflows/ci.yml/badge.svg)](https://github.com/sgInnora/noracu/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/noracu.svg)](https://www.npmjs.com/package/noracu)
 [![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

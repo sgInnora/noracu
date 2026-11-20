@@ -21,7 +21,8 @@ function rig({ env = {}, sbDenied = false } = {}) {
   const t = { now: 1_000_000, starts: 0, stopped: 0, launches: [], locks: 0, lock: { ok: true, locked: false }, lockSeq: [], approvedOps: [], snapMs: 0, launchFail: null, devices: [dev()], xctestrun: "/x/b.xctestrun", denied: null, approved: [], children: [], startFail: null };
   const api = {
     ...real,
-    listDevices: async () => (t.listFail ? { ok: false, error: "devicectl_failed", message: "xcrun: no devicectl" } : { ok: true, devices: t.devices }),
+    listDevices: async () => { t.dcLists = (t.dcLists || 0) + 1; return t.listFail ? { ok: false, error: "devicectl_failed", message: "xcrun: no devicectl" } : { ok: true, devices: t.devices }; },
+    listSimulators: async () => { t.simLists = (t.simLists || 0) + 1; return t.simFail ? { ok: false, error: "simctl_failed", message: "xcrun: no simctl" } : { ok: true, devices: t.devices.filter((d) => d.simulated) }; },
     deviceDetails: async (udid) => ({ ok: true, device: { ...t.devices.find((d) => d.udid === udid), tunnelIP: "fd09:6c3e:c65c::1" } }),
     lockState: async () => { t.locks++; if (t.lockGate) await t.lockGate; return t.lockSeq.length ? t.lockSeq.shift() : t.lock; },
     launchApp: async (udid, b, opts) => { if (t.onLaunchPrep) t.onLaunchPrep(); const no = opts?.beforeRun?.(); if (no) return no; t.launches.push(["device", b, opts, t.starts]); if (t.launchFail) return t.launchFail; return phone.launch(b) ? { ok: true, pid: 1, activated: true } : { ok: false, error: "devicectl_failed", message: "The application is not installed" }; },
@@ -71,6 +72,19 @@ function rig({ env = {}, sbDenied = false } = {}) {
   const c = rig({ env: { NORACU_IOS_UDID: SIM } }); c.t.devices = [dev(), sim()];
   const st = J(await c.s.status());
   ok(st.device.simulated === true && st.locked === undefined && c.t.locks === 0, "a simulator named in NORACU_IOS_UDID is used, and nobody asks for its lock state", st);
+}
+{
+  // a simulator is looked up with simctl alone: a devicectl that fails or gives no answer (Xcode 26.6 on a CI runner) is not asked
+  const c = rig({ env: { NORACU_IOS_UDID: SIM } }); c.t.devices = [dev(), sim()]; c.t.listFail = true;
+  const st = J(await c.s.status());
+  const r = await c.s.launch({ bundle_id: SETTINGS });
+  ok(st.device?.udid === SIM && st.device.simulated && !st.problem && /delivered_verified/.test(r.text) && c.t.launches[0][0] === "sim" && !c.t.dcLists && c.t.simLists >= 1,
+    "a simulator named in NORACU_IOS_UDID is found with simctl and used while devicectl does not work — devicectl is not asked", [st, r, c.t.dcLists]);
+  const down = rig({ env: { NORACU_IOS_UDID: SIM } }); down.t.devices = [sim()]; down.t.simFail = true;
+  ok(/^simctl_failed: xcrun: no simctl/.test(J(await down.s.status()).problem) && !down.t.dcLists, "a simctl that fails: ios_status says so, and devicectl is not asked instead");
+  const p = rig(); p.t.devices = [dev(), sim()];
+  const ps = J(await p.s.status());
+  ok(ps.device?.udid === UDID && p.t.dcLists === 1 && !p.t.simLists, "without NORACU_IOS_UDID an iPhone is looked up with devicectl, and simctl is not asked", [ps, p.t.dcLists, p.t.simLists]);
 }
 {
   const { s, t, phone } = rig(); t.xctestrun = null;

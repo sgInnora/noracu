@@ -285,8 +285,12 @@ const J = (r) => JSON.parse(r.text);
   const simw = world({ env: { NORACU_IOS_UDID: "1A2B3C4D-5E6F-4A7B-8C9D-0E1F2A3B4C5D" }, devices: [device(), device({ hardware: { udid: "1A2B3C4D-5E6F-4A7B-8C9D-0E1F2A3B4C5D", reality: "simulated", marketingName: "iPhone 17 Pro" }, connection: { transportType: "sameMachine", tunnelIPAddress: undefined } })], built: false });
   mkdirSync(join(simw.dir, "runner", "1A2B3C4D-5E6F-4A7B-8C9D-0E1F2A3B4C5D", "Build", "Products"), { recursive: true });
   writeFileSync(join(simw.dir, "runner", "1A2B3C4D-5E6F-4A7B-8C9D-0E1F2A3B4C5D", "Build", "Products", "NoracuRunner_iphonesimulator.xctestrun"), "");
+  simw.put("devicectl", "hang");   // as on a CI runner (Xcode 26.6): devicectl gives no answer
   const sl = await simw.call("ios_launch", { bundle_id: SETTINGS });
-  check("a simulator named in NORACU_IOS_UDID: bound to 127.0.0.1, launched through simctl, no lock question", !sl.isError && simw.lines("xcodebuild.log")[0].bind === "127.0.0.1" && simw.lines("xcrun.log").some((a) => a[0] === "simctl" && a.at(-1) === SETTINGS) && simw.lines("xcrun.log").every((a) => !a.includes("lockState")), [sl.text, simw.lines("xcrun.log").map((a) => a.slice(0, 4).join(" "))]);
+  const sst = J(await simw.call("ios_status"));
+  check("a simulator named in NORACU_IOS_UDID: found with simctl while devicectl hangs (devicectl is never asked), bound to 127.0.0.1, launched through simctl, no lock question",
+    !sl.isError && sst.device?.simulated === true && !sst.problem && simw.lines("xcodebuild.log")[0].bind === "127.0.0.1" && simw.lines("xcrun.log").some((a) => a[0] === "simctl" && a[1] === "list") && simw.lines("xcrun.log").some((a) => a[0] === "simctl" && a.at(-1) === SETTINGS)
+      && simw.lines("xcrun.log").every((a) => a[0] !== "devicectl"), [sl.text, sst, simw.lines("xcrun.log").map((a) => a.slice(0, 4).join(" "))]);
   await simw.close();
 }
 

@@ -296,6 +296,38 @@ const client = (extra = {}) => new RunnerClient({ host: "127.0.0.1", port: PORT,
   ok(!timeout.ok && timeout.error === "devicectl_timeout", "a devicectl that hangs is a timeout", timeout);
 }
 
+// ---------- simulators: simctl list ----------
+{
+  const runs = [];
+  const fakeSim = (stdout, { code = 0, timedOut = false, stderr = "" } = {}) => async (file, argv) => { runs.push({ file, argv }); return { code, stdout, stderr, timedOut }; };
+  const RT = "com.apple.CoreSimulator.SimRuntime.iOS-26-5", WATCH = "com.apple.CoreSimulator.SimRuntime.watchOS-12-0", UNDESCRIBED = "com.apple.CoreSimulator.SimRuntime.iOS-18-2";
+  const doc = {
+    devicetypes: [{ identifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro", name: "iPhone 17 Pro" }],
+    runtimes: [{ identifier: RT, platform: "iOS", version: "26.5", isAvailable: true }, { identifier: WATCH, platform: "watchOS", version: "12.0", isAvailable: true }],
+    devices: {
+      [RT]: [
+        { udid: SIM, name: "iPhone 17 Pro", state: "Booted", isAvailable: true, deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro" },
+        { udid: "2B3C4D5E-6F70-4182-9DA4-B5C6D7E8F901", name: "Off", state: "Shutdown", isAvailable: true, deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-SE" },
+        { udid: "3C4D5E6F-7081-4293-AEB5-C6D7E8F9A012", name: "No runtime", state: "Shutdown", isAvailable: false },
+      ],
+      [WATCH]: [{ udid: "4D5E6F70-8192-43A4-BFC6-D7E8F9A0B123", name: "Watch", state: "Booted", isAvailable: true }],
+      [UNDESCRIBED]: [{ udid: "5E6F7081-92A3-44B5-80D7-E8F9A0B1C234", name: "Older", state: "Shutdown", isAvailable: true }],
+    },
+  };
+  const sims = await ios.listSimulators({ run: fakeSim(JSON.stringify(doc)) });
+  const [s0, s1, s2] = sims.devices || [];
+  ok(runs[0].file === "/usr/bin/xcrun" && JSON.stringify(runs[0].argv) === JSON.stringify(["simctl", "list", "--json"]), "simulators are listed with xcrun simctl list --json", runs[0]);
+  ok(sims.ok && sims.devices.length === 3 && s0.udid === SIM && s0.simulated && s0.booted && s0.tunnel && s0.paired && s0.os === "26.5" && s0.model === "iPhone 17 Pro" && s0.platform === "iOS" && s0.transport === "sameMachine" && s0.developerMode === false && bindAddressFor(s0).bind === "127.0.0.1",
+    "simctl's iOS simulators carry the fields a devicectl entry for a simulator gives; an unavailable one and a watch are left out", sims);
+  ok(s1.booted === false && s1.tunnel === false && bindAddressFor(s1).error === "device_not_ready" && s1.model === null && s2.os === "18.2",
+    "a shut-down simulator is not ready; an unknown device type has no model; a runtime missing from simctl's runtime list still gives its iOS version from its name", [s1, s2]);
+  const slow = await ios.listSimulators({ run: fakeSim("", { timedOut: true, code: null }) });
+  const gone = await ios.listSimulators({ run: fakeSim("", { code: 72, stderr: "xcrun: error: unable to find utility \"simctl\"" }) });
+  const text = await ios.listSimulators({ run: fakeSim("== Devices ==") });
+  ok(slow.error === "simctl_timeout" && gone.error === "simctl_failed" && /unable to find utility/.test(gone.message) && text.error === "simctl_failed",
+    "a simctl that hangs, fails or does not answer in JSON is a failure, not an empty list", { slow, gone, text });
+}
+
 // devicectl / simctl calls still running end with the server
 {
   const { defaultRun, killPending } = await import("../src/ios-xcuitest.js");

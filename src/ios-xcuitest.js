@@ -6,11 +6,14 @@
 // This module finds the device, starts the runner through xcodebuild, and talks to it.
 //
 // What it keeps to:
-//  • No internet. xcodebuild and devicectl are local tools; the socket goes to a paired device over
+//  • No internet. xcodebuild, devicectl and simctl are local tools; the socket goes to a paired device over
 //    Apple's tunnel, or to 127.0.0.1 for a simulator.
 //  • Every subprocess gets its arguments as an argv array — nothing is put into a shell line.
 //  • devicectl answers are read from --json-output files, never from terminal text (Apple documents
-//    the JSON as the stable interface and the terminal output as free to change).
+//    the JSON as the stable interface and the terminal output as free to change); the simulator list is
+//    simctl's --json output.
+//  • iPhones are found with devicectl, simulators with simctl: devicectl does not list simulators with
+//    every Xcode (see listSimulators).
 //  • Every runner call has a hard time limit. A call that timed out, or whose connection broke after
 //    the request left, is reported as such — "delivery unknown" for input commands — and never
 //    re-sent. The connection is dropped so a late answer cannot be taken for the next call's.
@@ -119,6 +122,38 @@ export async function listDevices(opts = {}) {
   if (!r.ok) return r;
   const devices = (Array.isArray(r.result.devices) ? r.result.devices : []).map(parseDevice).filter((d) => d.platform === "iOS" && d.udid);
   return { ok: true, devices };
+}
+
+// The iOS simulators `simctl list --json` reports (its devices, runtimes and device types), with the fields
+// parseDevice gives — set as devicectl reports a simulator: paired, on this same Mac, its tunnel up while it is
+// booted, no Developer Mode. One that simctl marks unavailable (its runtime is gone) is left out.
+export function parseSimulators(doc) {
+  const runtimes = new Map((Array.isArray(doc?.runtimes) ? doc.runtimes : []).map((r) => [r?.identifier, r]));
+  const types = new Map((Array.isArray(doc?.devicetypes) ? doc.devicetypes : []).map((t) => [t?.identifier, t]));
+  const out = [];
+  for (const [key, list] of Object.entries(doc?.devices && typeof doc.devices === "object" ? doc.devices : {})) {
+    const rt = runtimes.get(key), m = /SimRuntime\.iOS-(\d+)-(\d+)(?:-(\d+))?$/.exec(key);
+    if ((rt?.platform ?? (m ? "iOS" : null)) !== "iOS" || !Array.isArray(list)) continue;
+    const os = typeof rt?.version === "string" ? rt.version : m ? [m[1], m[2], m[3]].filter((x) => x !== undefined).join(".") : null;
+    for (const d of list) {
+      if (typeof d?.udid !== "string" || d.isAvailable === false) continue;
+      const booted = d.state === "Booted";
+      out.push({ udid: d.udid, name: typeof d.name === "string" ? d.name : null, model: types.get(d.deviceTypeIdentifier)?.name ?? null, os, platform: "iOS",
+        simulated: true, transport: "sameMachine", paired: true, tunnel: booted, tunnelIP: null, developerMode: false, booted });
+    }
+  }
+  return out;
+}
+
+// Simulators are looked up with simctl, never with devicectl: devicectl does not list them with every Xcode. With
+// Xcode 26.6 (a macOS 26 CI runner, 2026-11) it listed none, or gave no answer in 30 s; Xcode 27.2 lists them.
+export async function listSimulators({ run = defaultRun, timeoutMs = 30000 } = {}) {
+  const r = await run(XCRUN, ["simctl", "list", "--json"], { timeoutMs });
+  if (r.timedOut) return { ok: false, error: "simctl_timeout", message: `simctl list gave no answer in ${timeoutMs} ms` };
+  let doc = null;
+  try { doc = JSON.parse(r.stdout); } catch { /* reported below */ }
+  if (r.code !== 0 || !doc || typeof doc !== "object") return { ok: false, error: "simctl_failed", message: oneLine(r.stderr || (r.code === 0 ? "simctl list did not answer in JSON" : `exit ${r.code}`)) };
+  return { ok: true, devices: parseSimulators(doc) };
 }
 
 export async function deviceDetails(udid, opts = {}) {

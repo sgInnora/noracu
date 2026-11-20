@@ -26,16 +26,19 @@ ok(s.includes("CODE_SIGNING_ALLOWED=NO") && !s.some((a) => /DEVELOPMENT_TEAM|all
 
 ok(/accept an updated agreement/.test(explain("error: PLA Update available: You currently don't have access")) && /--register-device/.test(explain("Your team has no devices… Device \"iPhone\" isn't registered in your developer account")) && /Xcode › Settings › Accounts/.test(explain("error: No Account for Team \"ABCDE12345\"")) && /--bundle-prefix/.test(explain("Failed to register bundle identifier: The app identifier \"x\" cannot be registered to your development team because it is not available")) && /Developer Mode/.test(explain("Developer Mode disabled")) && explain("ld: symbol not found") === null, "the usual signing failures are explained; anything else is left to xcodebuild's own lines");
 
-async function run(argv, { devices = [dev()], code = 0, output = "", xctestrun = "/x/Build/Products/a.xctestrun", listOk = true, env = {} } = {}) {
+async function run(argv, { devices = [dev()], code = 0, output = "", xctestrun = "/x/Build/Products/a.xctestrun", listOk = true, simOk = true, env = {} } = {}) {
   const home = mkdtempSync(join(tmpdir(), "noracu-setup-"));
-  const lines = [], spawned = [];
-  const api = { ...real, XCODEBUILD: "/usr/bin/xcodebuild", listDevices: async () => (listOk ? { ok: true, devices } : { ok: false, error: "devicectl_failed", message: "xcrun: error: unable to find utility devicectl" }), findXctestrun: async () => xctestrun };
+  const lines = [], spawned = [], asked = { devicectl: 0, simctl: 0 };
+  const api = { ...real, XCODEBUILD: "/usr/bin/xcodebuild",
+    listDevices: async () => { asked.devicectl++; return listOk ? { ok: true, devices } : { ok: false, error: "devicectl_failed", message: "xcrun: error: unable to find utility devicectl" }; },
+    listSimulators: async () => { asked.simctl++; return simOk ? { ok: true, devices: devices.filter((d) => d.simulated) } : { ok: false, error: "simctl_failed", message: "xcrun: error: unable to find utility \"simctl\"" }; },
+    findXctestrun: async () => xctestrun };
   const spawnImpl = (file, a, opts) => { spawned.push([file, a, opts]); const c = new EventEmitter(); c.stdout = new EventEmitter(); c.stderr = new EventEmitter(); setImmediate(() => { c.stderr.emit("data", output); c.emit("close", code); }); return c; };
   const rc = await main(argv, { log: (t) => lines.push(t), api, spawnImpl, home, env });
   let mode = null;
   try { mode = statSync(join(home, ".noracu", "ios-runner", devices[0]?.udid || "x")).mode & 0o777; } catch { /* not created */ }
   rmSync(home, { recursive: true, force: true });
-  return { rc, text: lines.join("\n"), spawned, mode, home };
+  return { rc, text: lines.join("\n"), spawned, mode, home, asked };
 }
 {
   const r = await run(["--team", TEAM]);
@@ -60,6 +63,16 @@ async function run(argv, { devices = [dev()], code = 0, output = "", xctestrun =
   ok(two.rc === 1 && /several iPhones/.test(two.text) && two.text.includes("Second") && zero.rc === 1 && /no connected iPhone/.test(zero.text) && unknown.rc === 1 && two.spawned.length + zero.spawned.length + unknown.spawned.length === 0, "several iPhones, none, or an unknown --udid: asked to choose, nothing built", [two.text, zero.text]);
   const simr = await run(["--udid", SIM], { devices: [dev(), dev({ udid: SIM, name: "iPhone 17 Pro", simulated: true })] });
   ok(simr.rc === 0 && simr.spawned[0][1].includes("CODE_SIGNING_ALLOWED=NO") && new RegExp(`NORACU_IOS_UDID=${SIM}`).test(simr.text), "a simulator is built for without a team, and the next step names NORACU_IOS_UDID", simr.text);
+  // a simulator is looked up with simctl alone: a devicectl that fails or gives no answer (Xcode 26.6 on a CI runner) is not asked
+  const simOnly = await run(["--udid", SIM], { devices: [dev(), dev({ udid: SIM, name: "iPhone 17 Pro", simulated: true })], listOk: false });
+  ok(simOnly.rc === 0 && simOnly.asked.devicectl === 0 && simOnly.asked.simctl === 1 && simOnly.spawned[0][1].includes(`id=${SIM}`) && simOnly.spawned[0][1].includes("CODE_SIGNING_ALLOWED=NO"),
+    "a simulator named with --udid is found with simctl and built for while devicectl does not work — devicectl is not asked", [simOnly.text, simOnly.asked]);
+  const simGone = await run(["--udid", "2B3C4D5E-6F70-4182-9DA4-B5C6D7E8F901"]);
+  const simDown = await run(["--udid", SIM], { devices: [dev({ udid: SIM, simulated: true })], simOk: false });
+  ok(simGone.rc === 1 && /does not list the simulator named with --udid/.test(simGone.text) && simDown.rc === 1 && /could not list simulators \(xcrun: error: unable to find utility "simctl"\)/.test(simDown.text)
+    && simGone.spawned.length + simDown.spawned.length === 0 && simGone.asked.devicectl + simDown.asked.devicectl === 0,
+    "a simulator simctl does not list, or a simctl that fails: said so, nothing built, devicectl not asked", [simGone.text, simDown.text]);
+  ok(unknown.asked.devicectl === 1 && unknown.asked.simctl === 0 && two.asked.simctl === 0, "an iPhone is still looked up with devicectl, and simctl is not asked", [unknown.asked, two.asked]);
   const failed = await run(["--team", TEAM], { code: 65, output: "note: x\nerror: No Account for Team \"ABCDE12345\". Add a new account in Accounts settings\n** TEST BUILD FAILED **\n", xctestrun: null });
   ok(failed.rc === 1 && /the build failed: Xcode has no account or certificate for team ABCDE12345/.test(failed.text) && /TEST BUILD FAILED/.test(failed.text), "a failed build: the likely reason in plain words, then xcodebuild's last lines", failed.text);
   const stale = await run(["--team", TEAM], { code: 0, xctestrun: null });

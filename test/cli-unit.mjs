@@ -22,8 +22,9 @@ const j = run(["doctor", "--json"]);
 let d = null;
 try { d = JSON.parse(j.stdout); } catch { /* reported below */ }
 const cfg = d?.config?.mcpServers?.noracu;
+// its exit code follows what it found (1 with any problem: on a Mac without cliclick, as a CI runner is, that is 1)
 check("cli: doctor --json is JSON with the version, an absolute node path and the server's own path",
-  j.status === 0 && d?.noracu === VERSION && isAbsolute(d.node.path) && realpathSync(d.node.path) === realpathSync(process.execPath) && d.node.exec_path === process.execPath && realpathSync(d.server.path) === realpathSync(SERVER) && d.node.ok === true,
+  j.status === (d?.problems?.length ? 1 : 0) && d?.noracu === VERSION && isAbsolute(d.node.path) && realpathSync(d.node.path) === realpathSync(process.execPath) && d.node.exec_path === process.execPath && realpathSync(d.server.path) === realpathSync(SERVER) && d.node.ok === true,
   j.stdout.slice(0, 160) + j.stderr.slice(0, 160));
 check("cli: doctor's client configuration runs this node (by a path that leads to it) with this server, both by absolute path",
   cfg?.command === d.node.path && Array.isArray(cfg.args) && cfg.args.length === 1 && realpathSync(cfg.args[0]) === realpathSync(SERVER) && d.claude_code.includes(cfg.args[0]),

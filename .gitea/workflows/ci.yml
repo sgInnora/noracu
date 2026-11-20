@@ -1,6 +1,6 @@
 # CI for the maintainers' own Gitea. Its runner runs on a maintainer's Mac in host mode (label macos-noracu),
-# one job at a time, with the Mac's own Node. The steps follow .github/workflows/ci.yml, which stays for the
-# public repository; the simulator job is not run here.
+# one job at a time, with the Mac's own Node and Xcode. This is the project's CI: GitHub runs none
+# (2026-11-19); .github/workflows/ci.yml keeps the same steps for GitHub's runners and starts only by hand.
 # It runs only while nobody is using that Mac (2026-11-13): checks that time an action or look for keyboard and
 # mouse input fail when a person works on it. A watcher on the Mac dispatches it after 10 minutes without keyboard
 # or mouse input, once per new commit; a push does not start it.
@@ -42,6 +42,16 @@ jobs:
         run: node test/bg-inject-unit.mjs
       - name: "release gate tests (throwaway git repository)"
         run: node test/release-gate-unit.mjs
+      - name: "command line: --version, --help, doctor (the server is not started), and again with cliclick hidden"
+        run: |
+          node test/cli-unit.mjs
+          node test/cli-no-cliclick.mjs
+      - name: "tools.md generator, package rules, documented error codes, runner source rules"
+        run: |
+          node test/gen-tools-unit.mjs
+          node test/check-pack-unit.mjs
+          node test/docs-codes-unit.mjs
+          node test/ios-runner-rules.mjs
       - name: "iOS XCUITest backend client contract tests (fake runner, no iPhone, no Xcode)"
         run: node test/ios-xcuitest-unit.mjs
       - name: "iOS XCUITest backend: tool logic against a model phone, and the ios-setup command"
@@ -54,9 +64,95 @@ jobs:
         run: NORACU_CI=1 node test/e2e.mjs
         env:
           NORACU_IMCTL_DIR: /nonexistent
+      - name: "browser_scroll on a slow Chromium: the server as it is and at background priority, as under a launchd runner"
+        run: node test/browser-scroll-slow.mjs
       - name: "docs freshness: tools.md must match the running server"
         run: |
           node scripts/gen-tools.mjs
           git diff --exit-code docs/tools.md || (echo "docs/tools.md is stale — run: node scripts/gen-tools.mjs" && exit 1)
       - name: "package contents: runtime files present, internal material absent"
         run: node scripts/check-pack.mjs
+
+  # The XCUITest backend against a real simulator: build the runner (ios-runner/) with this Mac's Xcode, then drive
+  # the ios_* tools through the MCP server in the simulator's Settings app. devicectl is out of order for the whole
+  # job — it hangs, as with Xcode 26.6 on GitHub's runners — so the simulator must be found and used without it.
+  # The simulator is one of its own (noracu-ci, made once on the newest iOS runtime and kept), shut down again
+  # afterwards when this job booted it; the runner build is kept in ~/.cache/noracu-runner/ios-runner.
+  ios-simulator:
+    needs: test
+    runs-on: macos-noracu
+    timeout-minutes: 30
+    steps:
+      - name: "the Mac is not in use (no keyboard or mouse input for 10 minutes)"
+        run: |
+          idle=$(( $(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}') / 1000000000 ))
+          echo "keyboard and mouse idle for ${idle}s"
+          if [ "$idle" -lt 600 ]; then
+            echo "::error::not run: this Mac was in use (idle ${idle}s, needs 600s) — the simulator was not started"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - name: "node and dependencies"
+        run: npm ci
+      - name: "the noracu-ci simulator, booted (made on the newest iOS runtime if it is not there yet)"
+        run: |
+          UDID=$(xcrun simctl list devices -j | node -e '
+            const d = JSON.parse(require("fs").readFileSync(0, "utf8")).devices;
+            const hit = Object.entries(d).filter(([k]) => /SimRuntime\.iOS-\d/.test(k)).flatMap(([, v]) => v).find((x) => x.name === "noracu-ci" && x.isAvailable !== false);
+            console.log(hit ? hit.udid : "");')
+          if [ -z "$UDID" ]; then
+            PICK=$(xcrun simctl list runtimes available -j | node -e '
+              const num = (v) => v.split(".").map(Number);
+              const cmp = (x, y) => { for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); return 0; };
+              const rts = JSON.parse(require("fs").readFileSync(0, "utf8")).runtimes.filter((r) => r.platform === "iOS" && r.isAvailable);
+              rts.sort((a, b) => cmp(num(a.version), num(b.version)));
+              const rt = rts.at(-1), type = rt && (rt.supportedDeviceTypes || []).find((t) => t.productFamily === "iPhone");
+              if (!type) { console.error("no iOS runtime with an iPhone on this Mac"); process.exit(1); }
+              console.log(rt.identifier + " " + type.identifier);')
+            UDID=$(xcrun simctl create noracu-ci "${PICK#* }" "${PICK% *}")
+          fi
+          # recorded before the boot, so the clean-up step finds it whatever happens from here on
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+          STATE=$(xcrun simctl list devices -j | node -e '
+            const d = JSON.parse(require("fs").readFileSync(0, "utf8")).devices;
+            console.log(Object.values(d).flat().find((x) => x.udid === process.argv[1])?.state || "");' "$UDID")
+          if [ "$STATE" != "Booted" ]; then
+            echo "SIM_BOOTED_HERE=1" >> "$GITHUB_ENV"
+            xcrun simctl boot "$UDID"
+          fi
+          xcrun simctl bootstatus "$UDID" -b
+          : > "$PWD/devicectl-calls.log"
+          {
+            echo "NORACU_IOS_RUNNER_DIR=$HOME/.cache/noracu-runner/ios-runner"
+            echo "NORACU_IOS_XCRUN=$PWD/test/fixtures/xcrun-devicectl-hangs.mjs"
+            echo "NORACU_DEVICECTL_LOG=$PWD/devicectl-calls.log"
+          } >> "$GITHUB_ENV"
+      - name: "build the runner for it (noracu ios-setup; a simulator build is not signed)"
+        run: node src/server.mjs ios-setup --udid "$SIM_UDID"
+      - name: "live run: every ios_* tool against the simulator's Settings app"
+        run: node test/ios-live.mjs --udid "$SIM_UDID"
+      - name: "devicectl was never called"
+        run: |
+          if [ -s "$NORACU_DEVICECTL_LOG" ]; then echo "::error::devicectl was called:"; cat "$NORACU_DEVICECTL_LOG"; exit 1; fi
+          echo "devicectl: not called"
+      - name: "the simulator is shut down again when this job booted it"
+        if: always()
+        run: |
+          if [ "${SIM_BOOTED_HERE:-}" = "1" ] && [ -n "${SIM_UDID:-}" ]; then
+            xcrun simctl shutdown "$SIM_UDID" || echo "simctl shutdown failed — the state below decides"
+            # whatever shutdown answered, the simulator this job booted has to be shut down now
+            # a read every second for 30 s, the last thing in the loop being a read; a read that fails (the step runs
+            # under bash -e) is retried, not the end of the step
+            for i in $(seq 0 30); do
+              if [ "$i" -gt 0 ]; then sleep 1; fi
+              if STATE=$(xcrun simctl list devices -j | node -e '
+                const d = JSON.parse(require("fs").readFileSync(0, "utf8")).devices;
+                console.log(Object.values(d).flat().find((x) => x.udid === process.argv[1])?.state || "gone");' "$SIM_UDID"); then
+                if [ "$STATE" = "Shutdown" ] || [ "$STATE" = "gone" ]; then break; fi
+              else
+                STATE="unreadable"
+              fi
+            done
+            echo "simulator $SIM_UDID: $STATE"
+            if [ "$STATE" != "Shutdown" ] && [ "$STATE" != "gone" ]; then echo "::error::the simulator this job booted is still $STATE"; exit 1; fi
+          fi

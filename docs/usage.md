@@ -83,7 +83,10 @@ mac_click { "element_index": 1 }        # a sheet now covers the text area
 ```
 
 **Read `delivery` and `retry`.** Every input action (Mac, browser and iPhone)
-states both. `delivered_verified`: a change was observed.
+states both. `delivered_verified`: a change was observed (for `browser_scroll`:
+the page reported that call's wheel, every earlier wheel that may have reached
+the page was verified, and the page then moved the way asked — a page whose own
+script moves it at that moment cannot be told apart from the wheel).
 `delivered_unverified`: the call succeeded but nothing observable changed — read
 the state (`mac_get`, `mac_ax_state`) before acting again. `not_delivered` with
 `retry=safe`: nothing was sent. `unknown` with `retry=unsafe`: the call timed

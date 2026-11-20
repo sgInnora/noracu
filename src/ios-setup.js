@@ -1,7 +1,8 @@
 // ios-setup — `noracu ios-setup`: build the on-device runner for one iPhone or simulator (0.3.0, EXPERIMENTAL).
 //
 // An explicit command; nothing runs on install. It uses Apple's own tools on this Mac:
-//   xcrun devicectl list devices      which device
+//   xcrun devicectl list devices      which iPhone
+//   xcrun simctl list --json          which simulator (a simulator's udid is looked up here, not with devicectl)
 //   xcodebuild build-for-testing      the runner in ios-runner/, into ~/.noracu/ios-runner/<udid>
 // For an iPhone the build is signed for the developer team given with --team, and Xcode may create or
 // update a development provisioning profile in that team (-allowProvisioningUpdates talks to Apple's
@@ -104,12 +105,14 @@ export async function main(argv, { log = (s) => process.stdout.write(s + "\n"), 
   const o = parseArgs(argv);
   if (o.error) { log(`noracu ios-setup: ${o.error}\n\n${USAGE}`); return 2; }
   if (o.help) { log(USAGE); return 0; }
-  const list = await api.listDevices();
-  if (!list.ok) { log(`noracu ios-setup: could not list devices (${list.message}) — is Xcode installed?`); return 1; }
+  // a simulator's udid is looked up with simctl alone, an iPhone's with devicectl (src/ios-xcuitest.js, listSimulators)
+  const sim = o.udid !== null && api.isSimulatorUdid(o.udid);
+  const list = await (sim ? api.listSimulators() : api.listDevices());
+  if (!list.ok) { log(`noracu ios-setup: could not list ${sim ? "simulators" : "devices"} (${list.message}) — is Xcode installed?`); return 1; }
   let device;
   if (o.udid) {
     device = list.devices.find((d) => d.udid.toLowerCase() === o.udid.toLowerCase());
-    if (!device) { log("noracu ios-setup: this Mac does not list the device named with --udid"); return 1; }
+    if (!device) { log(`noracu ios-setup: this Mac does not list the ${sim ? "simulator" : "device"} named with --udid${sim ? " (xcrun simctl list devices shows the simulators it has)" : ""}`); return 1; }
   } else {
     const phones = list.devices.filter((d) => !d.simulated && d.paired && d.tunnel);
     if (phones.length !== 1) { log(`noracu ios-setup: ${phones.length ? "several iPhones are connected" : "no connected iPhone found"} — name the device with --udid${phones.length ? ": " + phones.map((d) => `${d.udid} (${d.name})`).join(", ") : ""}`); return 1; }
