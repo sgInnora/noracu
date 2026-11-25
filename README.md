@@ -6,6 +6,7 @@ and a browser by `element_index`, and says what each action did. No API key, no 
 [![npm](https://img.shields.io/npm/v/noracu.svg)](https://www.npmjs.com/package/noracu)
 [![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![sgInnora/noracu MCP server](https://glama.ai/mcp/servers/sgInnora/noracu/badges/score.svg)](https://glama.ai/mcp/servers/sgInnora/noracu)
 
 中文说明见 [docs/README.zh-CN.md](docs/README.zh-CN.md)。
 
